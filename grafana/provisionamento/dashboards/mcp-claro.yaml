@@ -1,0 +1,16 @@
+# Paineis do MCP-CLARO: arquivos versionados em grafana/paineis, montados em /etc/grafana/paineis.
+# Nao se editam pela tela; mudar um painel e mudar o arquivo no repositorio.
+apiVersion: 1
+
+providers:
+  - name: mcp-claro
+    orgId: 1
+    folder: MCP-CLARO
+    folderUid: mcp-claro
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/paineis
+      foldersFromFilesStructure: false

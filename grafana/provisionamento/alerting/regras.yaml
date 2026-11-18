@@ -1,0 +1,217 @@
+# Alertas de tendencia do MCP-CLARO. Cada um le so as visoes de medicoes (contagens sem pessoa e sem
+# conteudo) e devolve um numero: 0 quando esta tudo normal. O alerta dispara quando o numero passa de 0
+# por 10 minutos e vai ao webhook interno das rotinas (contato.yaml).
+#
+# Comparacao usada nas tendencias: a ultima hora contra a media por hora das 24 horas anteriores.
+# Os limites ficam no proprio SQL (minimo absoluto e quantas vezes a media); mudar um limite e mudar
+# este arquivo no repositorio. As consultas nao usam macros do Grafana ($), que o provisionamento
+# trocaria por variaveis de ambiente.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: MCP-CLARO tendencias
+    folder: MCP-CLARO alertas
+    interval: 5m
+    rules:
+      - uid: mcp-claro-recusas-versao-subindo
+        title: Recusas por versao subindo
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: mcp-claro-medicoes
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                WITH ultima AS (
+                  SELECT coalesce(sum(contagem), 0) AS n FROM medicoes.v_recusas_versao
+                  WHERE minuto >= now() - interval '1 hour'
+                ), antes AS (
+                  SELECT coalesce(sum(contagem), 0) / 24.0 AS media FROM medicoes.v_recusas_versao
+                  WHERE minuto >= now() - interval '25 hours' AND minuto < now() - interval '1 hour'
+                )
+                SELECT CASE WHEN ultima.n >= 20 AND ultima.n > 3 * greatest(antes.media, 1)
+                            THEN ultima.n ELSE 0 END::float8 AS valor
+                FROM ultima, antes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: media
+          assunto: versao
+        annotations:
+          summary: >-
+            Mais aplicativos ou sistemas estao pedindo uma versao do MCP que nao aceitamos. O MCP-CLARO fala so
+            a 2026-07-28. Veja no painel quais aplicativos e versoes.
+
+      - uid: mcp-claro-sistema-recusado-versao
+        title: Sistema recusado por versao
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 3600, to: 0}
+            datasourceUid: mcp-claro-medicoes
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                SELECT coalesce(sum(contagem), 0)::float8 AS valor FROM medicoes.v_recusas_versao_sistema
+                WHERE minuto >= now() - interval '1 hour'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: alta
+          assunto: versao
+        annotations:
+          summary: >-
+            Um sistema conectado passou a falar outra versao do MCP e foi recusado. As ferramentas dele ficam
+            fora ate o sistema voltar a falar a 2026-07-28.
+
+      - uid: mcp-claro-crachas-recusados-subindo
+        title: Crachas recusados subindo
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: mcp-claro-medicoes
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                WITH ultima AS (
+                  SELECT coalesce(sum(contagem), 0) AS n FROM medicoes.v_crachas_recusados
+                  WHERE minuto >= now() - interval '1 hour'
+                ), antes AS (
+                  SELECT coalesce(sum(contagem), 0) / 24.0 AS media FROM medicoes.v_crachas_recusados
+                  WHERE minuto >= now() - interval '25 hours' AND minuto < now() - interval '1 hour'
+                )
+                SELECT CASE WHEN ultima.n >= 30 AND ultima.n > 3 * greatest(antes.media, 1)
+                            THEN ultima.n ELSE 0 END::float8 AS valor
+                FROM ultima, antes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: alta
+          assunto: cracha
+        annotations:
+          summary: >-
+            Mais crachas estao sendo recusados que o normal. Pode ser um aplicativo mal configurado ou alguem
+            tentando entrar. Veja os motivos no painel.
+
+      - uid: mcp-claro-recusas-chamada-subindo
+        title: Recusas de chamada subindo
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: mcp-claro-medicoes
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                WITH ultima AS (
+                  SELECT coalesce(sum(contagem), 0) AS n FROM medicoes.v_recusas_chamada
+                  WHERE minuto >= now() - interval '1 hour'
+                ), antes AS (
+                  SELECT coalesce(sum(contagem), 0) / 24.0 AS media FROM medicoes.v_recusas_chamada
+                  WHERE minuto >= now() - interval '25 hours' AND minuto < now() - interval '1 hour'
+                )
+                SELECT CASE WHEN ultima.n >= 30 AND ultima.n > 3 * greatest(antes.media, 1)
+                            THEN ultima.n ELSE 0 END::float8 AS valor
+                FROM ultima, antes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 10m
+        labels:
+          severity: media
+          assunto: chamada
+        annotations:
+          summary: >-
+            Mais chamadas de ferramenta estao sendo recusadas que o normal. Veja no painel em que etapa e por
+            qual motivo.
+
+      - uid: mcp-claro-leituras-pararam
+        title: Leituras pararam
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 90000, to: 0}
+            datasourceUid: mcp-claro-medicoes
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: |
+                WITH ultima AS (
+                  SELECT coalesce(sum(contagem), 0) AS n FROM medicoes.v_leituras
+                  WHERE minuto >= now() - interval '1 hour'
+                ), antes AS (
+                  SELECT coalesce(sum(contagem), 0) / 24.0 AS media FROM medicoes.v_leituras
+                  WHERE minuto >= now() - interval '25 hours' AND minuto < now() - interval '1 hour'
+                )
+                SELECT CASE WHEN antes.media >= 10 AND ultima.n < 0.1 * antes.media
+                            THEN 1 ELSE 0 END::float8 AS valor
+                FROM ultima, antes
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: alta
+          assunto: leitura
+        annotations:
+          summary: >-
+            As leituras cairam para menos de um decimo do normal na ultima hora. Pode ser a porta de saida
+            fechada, um sistema fora do ar ou um problema no gateway.
