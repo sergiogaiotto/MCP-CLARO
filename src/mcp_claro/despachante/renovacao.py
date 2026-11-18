@@ -67,8 +67,10 @@ async def _ler(c: AsyncConnection, sistema_id: uuid.UUID, pessoa_id: uuid.UUID, 
     ).first()
 
 
-async def _abrir(cifra: Cifra, linha: Row[Any], sistema_id: uuid.UUID, pessoa_id: uuid.UUID) -> str:
-    return (await cifra.decifrar(linha.cifrada, chaves.contexto(sistema_id, pessoa_id, None))).decode()
+async def _abrir(
+    cifra: Cifra, linha: Row[Any], sistema_id: uuid.UUID, pessoa_id: uuid.UUID, tipo: str = "acesso"
+) -> str:
+    return (await cifra.decifrar(linha.cifrada, chaves.contexto(sistema_id, pessoa_id, None, tipo))).decode()
 
 
 async def chave_pronta(
@@ -143,7 +145,7 @@ async def _trocar_com_trava(
             segredo,
             {
                 "grant_type": "refresh_token",
-                "refresh_token": await _abrir(cifra, renovacao, sistema_id, pessoa_id),
+                "refresh_token": await _abrir(cifra, renovacao, sistema_id, pessoa_id, "renovacao"),
                 "resource": sistema.recurso,
             },
         )

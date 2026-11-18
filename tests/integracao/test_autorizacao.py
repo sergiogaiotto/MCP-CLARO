@@ -187,7 +187,8 @@ class Ambiente:
         return self.idp.cracha(audiencia=RECURSO, sujeito=sujeito)
 
     async def iniciar(self, pessoa_id: uuid.UUID) -> str:
-        async with self.entrada_db.begin() as c:
+        # Opcao B: quem cria o pedido e cifra o verificador PKCE e o despachante; a entrada nao cifra.
+        async with self.despachante_db.begin() as c:
             return await autorizacao.iniciar_autorizacao(c, self.cifra, pessoa_id, self.sistema_id, VOLTA)
 
     async def na_pagina_do_sistema(self, url: str, usuario: str) -> tuple[str, str]:
@@ -251,8 +252,8 @@ class Ambiente:
             ).all()
         return {linha.tipo: linha for linha in linhas}
 
-    async def abrir(self, pessoa_id: uuid.UUID, cifrada: str) -> str:
-        return (await self.cifra.decifrar(cifrada, chaves.contexto(self.sistema_id, pessoa_id, None))).decode()
+    async def abrir(self, pessoa_id: uuid.UUID, cifrada: str, tipo: str = "acesso") -> str:
+        return (await self.cifra.decifrar(cifrada, chaves.contexto(self.sistema_id, pessoa_id, None, tipo))).decode()
 
     async def extrato(self, tipo: str, pessoa_id: uuid.UUID | None = None) -> list[Any]:
         async with self.admin.connect() as c:
@@ -465,7 +466,7 @@ async def test_troca_do_codigo_guarda_a_chave_cifrada_e_a_leitura_usa_a_chave_da
         assert "renova-ana" not in linha.cifrada
         assert (linha.expira_em is None) == (tipo == "renovacao")
     assert await amb.abrir(amb.ana_id, guardadas["acesso"].cifrada) == "acesso-ana-1"
-    assert await amb.abrir(amb.ana_id, guardadas["renovacao"].cifrada) == "renova-ana-1"
+    assert await amb.abrir(amb.ana_id, guardadas["renovacao"].cifrada, "renovacao") == "renova-ana-1"
     assert guardadas["acesso"].expira_em > datetime.now(UTC) + timedelta(minutes=50)
 
     async with amb.admin.connect() as c:
@@ -588,7 +589,7 @@ async def test_duas_renovacoes_ao_mesmo_tempo_geram_uma_so_troca(amb: Ambiente) 
     assert sorted([primeira.renovada, segunda.renovada]) == [False, True]
     guardadas = await amb.chaves_de(amb.ana_id)
     assert await amb.abrir(amb.ana_id, guardadas["acesso"].cifrada) == "acesso-ana-2"
-    assert await amb.abrir(amb.ana_id, guardadas["renovacao"].cifrada) == "renova-ana-2"
+    assert await amb.abrir(amb.ana_id, guardadas["renovacao"].cifrada, "renovacao") == "renova-ana-2"
     assert guardadas["acesso"].expira_em > datetime.now(UTC) + timedelta(minutes=50)
     assert len(await amb.extrato("chave_renovada", amb.ana_id)) == 1
     pedidos = [p for p in amb.oauth.pedidos if p["grant_type"] == "refresh_token"]
@@ -757,7 +758,7 @@ async def test_configuracao_so_vale_para_sistema_de_chave_por_pessoa(amb: Ambien
                     "client_id": "x",
                 },
             )
-    async with amb.entrada_db.begin() as c:
+    async with amb.despachante_db.begin() as c:
         with pytest.raises(autorizacao.AutorizacaoRecusada, match="nao usa autorizacao por pessoa"):
             await autorizacao.iniciar_autorizacao(c, amb.cifra, amb.ana_id, compartilhado, VOLTA)
         with pytest.raises(autorizacao.AutorizacaoRecusada, match="https"):

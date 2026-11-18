@@ -33,6 +33,10 @@ from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 log = logger("mcp_claro.despachante")
 
 
+class DeclaracoesIndisponiveis(Exception):
+    """O sistema nao respondeu a listagem (sem chave, fora do ar ou resposta invalida)."""
+
+
 class LeituraRecusada(Exception):
     def __init__(self, motivo: str, mensagem: str) -> None:
         self.motivo = motivo
@@ -308,12 +312,26 @@ class Despachante:
             ).scalar_one_or_none()
         if sistema is None or sistema.situacao not in ("ativo", "quarentena"):
             raise LookupError("sistema inativo")
+        if segredo is None:
+            # Sem chave dada (pedido das rotinas): a chave propria de leitura das declaracoes, guardada pelo
+            # ADMIN; num sistema de chave compartilhada, a propria chave compartilhada.
+            async with self.engine.connect() as c:
+                for tipo in ("declaracoes", "acesso") if sistema.tipo_chave == "compartilhada" else ("declaracoes",):
+                    try:
+                        segredo = await chaves.abrir(c, self.cifra, sistema_id=sistema_id, tipo=tipo)
+                        break
+                    except chaves.ChaveAusente:
+                        continue
+        chave_usada = segredo
 
         async def obter() -> str | None:
-            return segredo
+            return chave_usada
 
         sondagem = json.dumps(discover_json) if isinstance(discover_json, dict) else discover_json
-        ferramentas = await cliente.listar_ferramentas(sistema.endereco, obter, sondagem)
+        try:
+            ferramentas = await cliente.listar_ferramentas(sistema.endereco, obter, sondagem)
+        except Exception as erro:
+            raise DeclaracoesIndisponiveis(f"o sistema {sistema.nome} nao entregou as declaracoes") from erro
         async with self.engine.begin() as c:
             for f in ferramentas:
                 await c.execute(

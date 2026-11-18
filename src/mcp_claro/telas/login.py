@@ -41,6 +41,7 @@ class Identidade:
     sujeito: str
     nome: str | None
     auth_time: int | None
+    email: str | None = None
 
 
 class ProvedorLogin:
@@ -171,4 +172,6 @@ class ProvedorLogin:
             sujeito=sujeito,
             nome=str(nome)[:200] if nome else None,
             auth_time=int(auth_time) if isinstance(auth_time, int | float) else None,
+            # So e-mail verificado pelo provedor serve para os avisos a pessoa.
+            email=str(dados["email"])[:254] if dados.get("email_verified") is True and dados.get("email") else None,
         )

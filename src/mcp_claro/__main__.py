@@ -63,6 +63,11 @@ def _subir(papel: Papel, p: Parametros) -> None:
         from mcp_claro.despachante.app import criar_app_despachante
 
         app = criar_app_despachante(p, criar_engine(p))
+    elif papel is Papel.ROTINAS:
+        from mcp_claro.rotinas.app import criar_app_rotinas
+
+        # Cada tarefa rodando usa ate duas conexoes: uma para a trava e outra para o trabalho.
+        app = criar_app_rotinas(p, criar_engine(p, pool_size=8, max_overflow=4))
     else:
         app = criar_app(papel, p)
     uvicorn.run(

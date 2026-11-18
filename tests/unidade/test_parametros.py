@@ -44,6 +44,9 @@ def test_producao_exige_verify_full(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("INTERNAL_CERT_FILE", "/run/secrets/cert.pem")
     monkeypatch.setenv("INTERNAL_KEY_FILE", "/run/secrets/key.pem")
     monkeypatch.setenv("DISPATCHER_INTERNAL_URL", "https://despachante:9443")
+    monkeypatch.setenv("SCREENS_CLIENT_SECRET_FILE", "/run/secrets/telas_cliente")
+    monkeypatch.setenv("NOTIFY_ADMIN_EMAILS", "admin@claro.exemplo")
+    monkeypatch.setenv("GRAFANA_WEBHOOK_PASSWORD_FILE", "/run/secrets/grafana_webhook")
     monkeypatch.setenv("DB_SSLMODE", "require")
     with pytest.raises(ConfiguracaoInvalida, match="verify-full"):
         carregar()

@@ -10,7 +10,10 @@
   "editUsernameAllowed": false,
   "bruteForceProtected": true,
   "internationalizationEnabled": true,
-  "supportedLocales": ["pt-BR", "en"],
+  "supportedLocales": [
+    "pt-BR",
+    "en"
+  ],
   "defaultLocale": "pt-BR",
   "accessTokenLifespan": 300,
   "accessTokenLifespanForImplicitFlow": 300,
@@ -22,21 +25,30 @@
   "eventsExpiration": 2592000,
   "adminEventsEnabled": true,
   "adminEventsDetailsEnabled": true,
-  "defaultDefaultClientScopes": ["basic", "mcp-claro"],
+  "defaultDefaultClientScopes": [
+    "basic",
+    "mcp-claro"
+  ],
   "defaultOptionalClientScopes": [],
   "clientScopes": [
     {
       "name": "basic",
       "description": "Reivindicacoes basicas: sub e auth_time.",
       "protocol": "openid-connect",
-      "attributes": {"include.in.token.scope": "false", "display.on.consent.screen": "false"},
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
       "protocolMappers": [
         {
           "name": "sub",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-sub-mapper",
           "consentRequired": false,
-          "config": {"access.token.claim": "true", "introspection.token.claim": "true"}
+          "config": {
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
         },
         {
           "name": "auth_time",
@@ -58,7 +70,10 @@
       "name": "profile",
       "description": "Nome da pessoa no cracha (name e preferred_username). So para aplicativos de pessoas.",
       "protocol": "openid-connect",
-      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
       "protocolMappers": [
         {
           "name": "usuario",
@@ -93,7 +108,10 @@
       "name": "mcp-claro",
       "description": "Recurso do MCP-CLARO: poe PUBLIC_BASE_URL/mcp na audiencia (aud) do cracha. Padrao em todos os clientes que falam com o MCP-CLARO.",
       "protocol": "openid-connect",
-      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
       "protocolMappers": [
         {
           "name": "audiencia-mcp-claro",
@@ -114,7 +132,10 @@
       "name": "outro-servico",
       "description": "SO DE TESTE. Outro recurso (outro condominio): cracha com audiencia que nao e a do MCP-CLARO.",
       "protocol": "openid-connect",
-      "attributes": {"include.in.token.scope": "true", "display.on.consent.screen": "false"},
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
       "protocolMappers": [
         {
           "name": "audiencia-outro-servico",
@@ -147,7 +168,10 @@
       "consentRequired": false,
       "fullScopeAllowed": false,
       "frontchannelLogout": false,
-      "redirectUris": ["http://127.0.0.1/*", "http://localhost/*"],
+      "redirectUris": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
       "webOrigins": [],
       "attributes": {
         "pkce.code.challenge.method": "S256",
@@ -157,7 +181,11 @@
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
       },
-      "defaultClientScopes": ["basic", "profile", "mcp-claro"],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "mcp-claro"
+      ],
       "optionalClientScopes": []
     },
     {
@@ -174,7 +202,10 @@
       "consentRequired": false,
       "fullScopeAllowed": false,
       "frontchannelLogout": false,
-      "redirectUris": ["http://127.0.0.1/*", "http://localhost/*"],
+      "redirectUris": [
+        "http://127.0.0.1/*",
+        "http://localhost/*"
+      ],
       "webOrigins": [],
       "attributes": {
         "pkce.code.challenge.method": "S256",
@@ -184,7 +215,11 @@
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
       },
-      "defaultClientScopes": ["basic", "profile", "mcp-claro"],
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "mcp-claro"
+      ],
       "optionalClientScopes": []
     },
     {
@@ -217,7 +252,10 @@
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
       },
-      "defaultClientScopes": ["basic", "mcp-claro"],
+      "defaultClientScopes": [
+        "basic",
+        "mcp-claro"
+      ],
       "optionalClientScopes": []
     },
     {
@@ -250,7 +288,10 @@
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
       },
-      "defaultClientScopes": ["basic", "mcp-claro"],
+      "defaultClientScopes": [
+        "basic",
+        "mcp-claro"
+      ],
       "optionalClientScopes": []
     },
     {
@@ -279,7 +320,10 @@
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
       },
-      "defaultClientScopes": ["basic", "mcp-claro"],
+      "defaultClientScopes": [
+        "basic",
+        "mcp-claro"
+      ],
       "optionalClientScopes": []
     },
     {
@@ -308,7 +352,43 @@
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
       },
-      "defaultClientScopes": ["basic", "outro-servico"],
+      "defaultClientScopes": [
+        "basic",
+        "outro-servico"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "mcp-claro-telas",
+      "name": "Telas do MCP-CLARO",
+      "description": "Login das pessoas nas telas do gateway. Cliente confidencial (segredo vindo do ambiente), authorization code com PKCE S256 obrigatorio e retorno so no endereco publico.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${MCP_CLARO_TELAS_SEGREDO}",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "fullScopeAllowed": false,
+      "frontchannelLogout": false,
+      "redirectUris": [
+        "${MCP_CLARO_PUBLICO:https://mcp-claro.localhost}/telas/login/volta"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "use.refresh.tokens": "false",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "standard.token.exchange.enabled": "false"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile"
+      ],
       "optionalClientScopes": []
     }
   ],
@@ -320,21 +400,33 @@
         "subType": "anonymous",
         "config": {
           "trusted-hosts": [],
-          "host-sending-registration-request-must-match": ["true"],
-          "client-uris-must-match": ["true"]
+          "host-sending-registration-request-must-match": [
+            "true"
+          ],
+          "client-uris-must-match": [
+            "true"
+          ]
         }
       },
       {
         "name": "Sem cadastro anonimo",
         "providerId": "max-clients",
         "subType": "anonymous",
-        "config": {"max-clients": ["0"]}
+        "config": {
+          "max-clients": [
+            "0"
+          ]
+        }
       },
       {
         "name": "Sem cadastro por token",
         "providerId": "max-clients",
         "subType": "authenticated",
-        "config": {"max-clients": ["0"]}
+        "config": {
+          "max-clients": [
+            "0"
+          ]
+        }
       }
     ]
   }

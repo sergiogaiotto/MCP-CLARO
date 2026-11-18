@@ -51,8 +51,10 @@ async def marcar_versao_vista(c: AsyncConnection, aplicativo_id: uuid.UUID, vers
     )
 
 
-async def pessoa_no_login(c: AsyncConnection, emissor: str, sujeito: str, nome: str | None) -> Pessoa:
-    """Acha a pessoa pelo emissor e sujeito do cracha; cria no primeiro login."""
+async def pessoa_no_login(
+    c: AsyncConnection, emissor: str, sujeito: str, nome: str | None, *, email: str | None = None
+) -> Pessoa:
+    """Acha a pessoa pelo emissor e sujeito do cracha; cria no primeiro login. Guarda o e-mail verificado."""
     linha = (
         await c.execute(
             text(
@@ -63,6 +65,8 @@ async def pessoa_no_login(c: AsyncConnection, emissor: str, sujeito: str, nome: 
             {"e": emissor, "s": sujeito, "n": nome},
         )
     ).one()
+    if email and email != getattr(linha, "email", None):
+        await c.execute(text("UPDATE pessoas SET email = :m WHERE id = :i"), {"m": email, "i": linha.id})
     return _pessoa(linha)
 
 

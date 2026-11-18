@@ -32,19 +32,8 @@ from mcp_claro.db.engine import criar_engine
 
 IMAGEM_MAILPIT = "axllent/mailpit:v1.34.0"
 
-AJUSTES_0003 = r"""
--- Limpeza das sessoes e logins: DELETE com WHERE precisa de SELECT nas colunas lidas.
-GRANT SELECT (expira_em, encerrada_em) ON sessoes_telas TO mcp_claro_rotinas;
-GRANT SELECT (expira_em, usado_em) ON logins_pendentes TO mcp_claro_rotinas;
--- Guarda das medicoes por hora e por dia.
-GRANT DELETE ON medicoes.hora, medicoes.dia TO mcp_claro_rotinas;
--- Particoes: CREATE TABLE ... PARTITION OF exige ser dono da tabela-mae; a funcao roda como o dono.
-ALTER FUNCTION garantir_particao_mensal(regclass, date) SECURITY DEFINER SET search_path = public, pg_temp;
-REVOKE ALL ON FUNCTION garantir_particao_mensal(regclass, date) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION garantir_particao_mensal(regclass, date) TO mcp_claro_rotinas;
--- E-mail da pessoa para os avisos (preenchido pela entrada a partir do cracha, quando verificado).
-ALTER TABLE pessoas ADD COLUMN IF NOT EXISTS email text;
-"""
+AJUSTES_0003 = ""
+"""As permissoes que faltavam entraram na migracao 0003; os testes provam que ela basta."""
 
 
 def comandos(sql: str) -> list[str]:

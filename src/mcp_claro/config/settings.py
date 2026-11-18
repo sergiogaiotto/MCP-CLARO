@@ -102,6 +102,13 @@ class ExportaRastros(enum.StrEnum):
     OTLP = "otlp"
 
 
+def _parece_email(valor: str) -> bool:
+    if any(c.isspace() for c in valor) or valor.count("@") != 1:
+        return False
+    local, dominio = valor.split("@")
+    return bool(local) and "." in dominio and not dominio.startswith(".") and not dominio.endswith(".")
+
+
 class ConfiguracaoInvalida(Exception):
     """A partida recusa erro: uma ou mais combinacoes de parametros sao invalidas."""
 
@@ -220,6 +227,26 @@ class Parametros(BaseSettings):
     WATCH_SILENCE_ALARM_SECONDS: int = Field(default=900, ge=60, le=86400)
     BACKUP_RESTORE_DRILL_DAYS: int = Field(default=30, ge=1, le=365)
 
+    # Telas (Fase 1): login das pessoas pelo provedor (OIDC com PKCE)
+    SCREENS_CLIENT_ID: str = "mcp-claro-telas"
+    SCREENS_CLIENT_SECRET_FILE: str | None = None
+    SCREENS_SESSION_TTL_MINUTES: int = Field(default=480, ge=15, le=1440)
+    SCREENS_SESSION_IDLE_MINUTES: int = Field(default=30, ge=5, le=1440)
+    SCREENS_LOGIN_TTL_SECONDS: int = Field(default=600, ge=60, le=1800)
+    SCREENS_IDP_AUTHORIZATION_URL: str | None = None
+    SCREENS_IDP_TOKEN_URL: str | None = None
+    SCREENS_TIMEZONE: str = "America/Sao_Paulo"
+    SCREENS_FOREIGN_LEDGER_WINDOW_MINUTES: int = Field(default=30, ge=5, le=240)
+
+    # Rotinas e avisos (Fase 1)
+    NOTIFY_ADMIN_EMAILS: ListaTexto = Field(default_factory=list)
+    GRAFANA_WEBHOOK_PASSWORD_FILE: str | None = None
+    NOTIFY_RETRY_BASE_SECONDS: int = Field(default=30, ge=1, le=3600)
+    NOTIFY_RETRY_CAP_SECONDS: int = Field(default=3600, ge=60, le=86400)
+    NOTIFY_POLL_SECONDS: int = Field(default=5, ge=1, le=300)
+    ROUTINES_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
+    TOOL_DRIFT_CHECK_SECONDS: int = Field(default=900, ge=60, le=86400)
+
     # Limites de pedidos e medicoes
     EDGE_RATE_PER_IP_PER_MINUTE: int = Field(default=120, ge=1)
     RATE_PER_APP_PER_MINUTE: int = Field(default=60, ge=1)
@@ -322,6 +349,26 @@ class Parametros(BaseSettings):
                 erros.append("Em piloto ou producao, a porta interna exige INTERNAL_CERT_FILE e INTERNAL_KEY_FILE.")
             if not self.DISPATCHER_INTERNAL_URL.startswith("https://"):
                 erros.append("Em piloto ou producao, DISPATCHER_INTERNAL_URL deve usar https (mTLS).")
+        if self.SCREENS_SESSION_IDLE_MINUTES > self.SCREENS_SESSION_TTL_MINUTES:
+            erros.append("SCREENS_SESSION_IDLE_MINUTES nao pode passar de SCREENS_SESSION_TTL_MINUTES.")
+        if self.NOTIFY_RETRY_CAP_SECONDS < self.NOTIFY_RETRY_BASE_SECONDS:
+            erros.append("NOTIFY_RETRY_CAP_SECONDS deve ser maior ou igual a NOTIFY_RETRY_BASE_SECONDS.")
+        email_ruim = [e for e in self.NOTIFY_ADMIN_EMAILS if not _parece_email(e)]
+        if email_ruim:
+            erros.append("NOTIFY_ADMIN_EMAILS tem endereco invalido.")
+        if self.SMTP_USERNAME and not self.SMTP_PASSWORD_FILE:
+            erros.append("SMTP_USERNAME exige SMTP_PASSWORD_FILE.")
+        if self.SMTP_FROM and not _parece_email(self.SMTP_FROM):
+            erros.append("SMTP_FROM deve ser um endereco de e-mail.")
+        if self.em_producao:
+            if not self.SCREENS_CLIENT_SECRET_FILE:
+                erros.append("Em piloto ou producao, as telas usam cliente confidencial: SCREENS_CLIENT_SECRET_FILE.")
+            if not self.NOTIFY_ADMIN_EMAILS:
+                erros.append("Em piloto ou producao, NOTIFY_ADMIN_EMAILS precisa de pelo menos um endereco.")
+            if not self.GRAFANA_WEBHOOK_PASSWORD_FILE:
+                erros.append("Em piloto ou producao, GRAFANA_WEBHOOK_PASSWORD_FILE e obrigatorio.")
+            if self.SMTP_HOST and not self.SMTP_STARTTLS and self.SMTP_PORT != 465:
+                erros.append("Em piloto ou producao, o SMTP exige STARTTLS (ou a porta 465).")
         if self.FEATURE_TASKS:
             erros.append("FEATURE_TASKS so liga com implementacao propria sobre PostgreSQL (decisao 13).")
         if self.AUTH_ENTERPRISE_ASSERTION_ENABLED:

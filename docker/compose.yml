@@ -92,7 +92,11 @@ services:
       INTERNAL_HEALTH_KEY_FILE: /run/secrets/entrada_saude_key.pem
       VAULT_ROLE_ID_FILE: /run/secrets/cofre_entrada_role_id
       VAULT_SECRET_ID_FILE: /run/secrets/cofre_entrada_secret_id
-    secrets: [db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem, ca_clientes_entrada.pem,
+      # Telas: login das pessoas pelo cliente confidencial; a troca do codigo vai pela rede interna.
+      SCREENS_CLIENT_ID: mcp-claro-telas
+      SCREENS_CLIENT_SECRET_FILE: /run/secrets/telas_cliente
+      SCREENS_IDP_TOKEN_URL: http://login:8080/login/realms/mcp-claro/protocol/openid-connect/token
+    secrets: [telas_cliente, db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem, ca_clientes_entrada.pem,
               entrada_cliente_cert.pem, entrada_cliente_key.pem, entrada_saude_cert.pem, entrada_saude_key.pem,
               cofre_entrada_role_id, cofre_entrada_secret_id]
     depends_on:
@@ -141,6 +145,9 @@ services:
       SMTP_PORT: "1025"
       SMTP_FROM: mcp-claro@mcp-claro.localhost
       SMTP_STARTTLS: desligado
+      WEBHOOK_SECRET_FILE: /run/secrets/webhook_assinatura
+      GRAFANA_WEBHOOK_PASSWORD_FILE: /run/secrets/grafana_webhook
+      NOTIFY_ADMIN_EMAILS: admin@mcp-claro.localhost
       # A porta das rotinas aceita so o Grafana (alertas por webhook interno).
       INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_rotinas.pem
       INTERNAL_CLIENT_CERT_FILE: /run/secrets/rotinas_cliente_cert.pem
@@ -151,12 +158,16 @@ services:
       VAULT_SECRET_ID_FILE: /run/secrets/cofre_rotinas_secret_id
     secrets: [db_rotinas, ca_interna.pem, rotinas_cert.pem, rotinas_key.pem, ca_clientes_rotinas.pem,
               rotinas_cliente_cert.pem, rotinas_cliente_key.pem, rotinas_saude_cert.pem, rotinas_saude_key.pem,
-              cofre_rotinas_role_id, cofre_rotinas_secret_id]
+              cofre_rotinas_role_id, cofre_rotinas_secret_id, webhook_assinatura, grafana_webhook]
     depends_on:
       migrar:
         condition: service_completed_successfully
       cofre-iniciar:
         condition: service_completed_successfully
+      despachante:
+        condition: service_healthy
+      correio:
+        condition: service_started
     networks: [interna, saida]
 
   cofre:
@@ -232,7 +243,8 @@ services:
         set -euo pipefail
         KC_DB_PASSWORD="$$(< /run/secrets/db_login)"
         KC_BOOTSTRAP_ADMIN_PASSWORD="$$(< /run/secrets/login_admin)"
-        export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD
+        MCP_CLARO_TELAS_SEGREDO="$$(< /run/secrets/telas_cliente)"
+        export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD MCP_CLARO_TELAS_SEGREDO
         exec /opt/keycloak/bin/kc.sh "$$@"
       - kc
     command: ["start-dev", "--import-realm"]
@@ -252,7 +264,7 @@ services:
       # Audiencia dos crachas: PUBLIC_BASE_URL + /mcp (MCP_RESOURCE_ID do gateway).
       MCP_CLARO_RECURSO: https://mcp-claro.localhost/mcp
       MCP_CLARO_CLIENTES_DE_TESTE: "false"
-    secrets: [db_login, login_admin, ca_interna.pem]
+    secrets: [db_login, login_admin, telas_cliente, ca_interna.pem]
     volumes:
       - ./login/realm-mcp-claro.json:/opt/keycloak/data/import/realm-mcp-claro.json:ro
     depends_on:
@@ -353,3 +365,6 @@ secrets:
   cofre_despachante_secret_id: { file: ../.segredos/cofre_despachante_secret_id }
   cofre_rotinas_role_id: { file: ../.segredos/cofre_rotinas_role_id }
   cofre_rotinas_secret_id: { file: ../.segredos/cofre_rotinas_secret_id }
+  telas_cliente: { file: ../.segredos/telas_cliente }
+  webhook_assinatura: { file: ../.segredos/webhook_assinatura }
+  grafana_webhook: { file: ../.segredos/grafana_webhook }

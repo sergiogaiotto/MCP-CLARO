@@ -104,7 +104,9 @@ class TelasDaPessoa:
                 pedido, 503, "Login indisponível", "O provedor de login não respondeu. Tente de novo em instantes."
             )
         async with self.t.engine.begin() as c:
-            pessoa = await repositorio.pessoa_no_login(c, identidade.emissor, identidade.sujeito, identidade.nome)
+            pessoa = await repositorio.pessoa_no_login(
+                c, identidade.emissor, identidade.sujeito, identidade.nome, email=identidade.email
+            )
             if pessoa.situacao != "ativa":
                 log.info("telas_login_recusado", motivo="pessoa " + pessoa.situacao)
                 return self._falha_login(pedido, "Seu acesso está suspenso. Fale com o ADMIN.", status=403)

@@ -24,8 +24,9 @@ from starlette.routing import Route
 from mcp_claro import __version__
 from mcp_claro.config.settings import Parametros
 from mcp_claro.despachante import chaves
+from mcp_claro.despachante.autorizacao import rotas_autorizacao
 from mcp_claro.despachante.chaves import Cifra
-from mcp_claro.despachante.servico import Despachante, LeituraRecusada, PedidoLeitura
+from mcp_claro.despachante.servico import DeclaracoesIndisponiveis, Despachante, LeituraRecusada, PedidoLeitura
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
@@ -103,6 +104,8 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
             ferramentas = await despachante.ler_declaracoes(sistema_id, corpo.get("chave_sondagem"))
         except LookupError as erro:
             return JSONResponse({"mensagem": str(erro)}, status_code=404)
+        except DeclaracoesIndisponiveis as erro:
+            return JSONResponse({"motivo": "declaracoes_indisponiveis", "mensagem": str(erro)}, status_code=502)
         return JSONResponse({"ferramentas": ferramentas})
 
     async def guardar_chave(pedido: Request) -> JSONResponse:
@@ -117,7 +120,10 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         aplicativo_id = _uuid(corpo.get("aplicativo_id"))
         quem = str(corpo.get("quem") or "admin")
         async with engine.begin() as c:
-            await chaves.guardar(c, cifra, sistema_id=sistema_id, segredo=segredo, aplicativo_id=aplicativo_id)
+            tipo = "declaracoes" if corpo.get("tipo") == "declaracoes" else "acesso"
+            await chaves.guardar(
+                c, cifra, sistema_id=sistema_id, segredo=segredo, aplicativo_id=aplicativo_id, tipo=tipo
+            )
             await registrar(
                 c,
                 papel="despachante",
@@ -150,6 +156,7 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
             Route("/interno/declaracoes", declaracoes, methods=["POST"]),
             Route("/interno/chaves", guardar_chave, methods=["POST"]),
             Route("/saude", saude, methods=["GET"]),
+            *rotas_autorizacao(engine, cifra),
         ],
         lifespan=ciclo,
     )
