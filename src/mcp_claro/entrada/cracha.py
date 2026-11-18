@@ -53,6 +53,10 @@ class CrachaRecusado(Exception):
         super().__init__(motivo)
 
 
+class ProvedorIndisponivel(Exception):
+    """O provedor de login nao respondeu e nao ha chaves guardadas validas."""
+
+
 cracha_atual: contextvars.ContextVar[Cracha | None] = contextvars.ContextVar("cracha_atual", default=None)
 
 
@@ -67,6 +71,7 @@ class ChavesPublicas:
         self._buscado_em = 0.0
         self._trava = asyncio.Lock()
         self._ultima_busca_forcada = 0.0
+        self._ultima_falha = -1e9
 
     async def _buscar(self) -> None:
         resposta = await self.http.get(self.url)
@@ -77,13 +82,22 @@ class ChavesPublicas:
 
     async def chave(self, kid: str) -> PyJWK:
         async with self._trava:
-            vencido = time.monotonic() - self._buscado_em > self.cache_segundos
-            if vencido or not self._chaves:
-                await self._buscar()
-            elif kid not in self._chaves and time.monotonic() - self._ultima_busca_forcada > 30:
-                # Rodizio de chaves no provedor: busca de novo, no maximo a cada 30 s.
-                self._ultima_busca_forcada = time.monotonic()
-                await self._buscar()
+            agora = time.monotonic()
+            vencido = agora - self._buscado_em > self.cache_segundos
+            kid_novo = kid not in self._chaves and agora - self._ultima_busca_forcada > 30
+            espera_ok = agora - self._ultima_falha > 5
+            if (vencido or not self._chaves or kid_novo) and espera_ok:
+                if kid_novo:
+                    # Rodizio de chaves no provedor: busca de novo, no maximo a cada 30 s.
+                    self._ultima_busca_forcada = agora
+                try:
+                    await self._buscar()
+                except (httpx2.HTTPError, ValueError, jwt.PyJWKSetError) as erro:
+                    self._ultima_falha = agora
+                    # Provedor fora do ar: segue com as chaves guardadas por ate 24 h (stale-if-error).
+                    if not self._chaves or agora - self._buscado_em > 86400:
+                        raise ProvedorIndisponivel("lista de chaves do provedor indisponivel") from erro
+                    log.warning("jwks_desatualizada_em_uso")
         try:
             return self._chaves[kid]
         except KeyError as erro:
@@ -187,7 +201,7 @@ class FiltroCracha:
             CONTADORES.somar("crachas_recusados", motivo=erro.motivo)
             await desafio_401(self.p)(scope, receive, send)
             return
-        except httpx2.HTTPError:
+        except ProvedorIndisponivel:
             log.warning("jwks_indisponivel")
             await JSONResponse(
                 {"error": "temporarily_unavailable", "error_description": "Provedor de login indisponivel"},

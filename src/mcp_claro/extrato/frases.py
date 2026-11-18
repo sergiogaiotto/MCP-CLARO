@@ -50,6 +50,7 @@ FRASES: Final[dict[str, Frase]] = {
             "O banco foi restaurado; a porta de saida ficou fechada ate decisao humana.",
         ),
         Frase("ronda_falha", "A ronda das portas achou uma passagem indevida: {motivo}."),
+        Frase("chave_guardada", "Chave {dono} guardada cifrada no cofre por {quem}."),
         Frase("politica_mudou", "Politica {chave} mudou para {valor} por {autor}: {motivo}."),
     )
 }

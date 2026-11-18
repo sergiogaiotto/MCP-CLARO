@@ -26,6 +26,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.despachante import chaves
 from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.despachante.servico import Despachante, LeituraRecusada, PedidoLeitura
+from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
@@ -110,14 +111,20 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         segredo = corpo.get("segredo")
         if sistema_id is None or not isinstance(segredo, str) or not segredo:
             return JSONResponse({"mensagem": "sistema_id e segredo sao obrigatorios"}, status_code=400)
+        if corpo.get("pessoa_id"):
+            # Chave de pessoa so nasce da autorizacao dela na pagina do sistema (troca do codigo no despachante).
+            return JSONResponse({"mensagem": "chave de pessoa so pela autorizacao no sistema"}, status_code=403)
+        aplicativo_id = _uuid(corpo.get("aplicativo_id"))
+        quem = str(corpo.get("quem") or "admin")
         async with engine.begin() as c:
-            await chaves.guardar(
+            await chaves.guardar(c, cifra, sistema_id=sistema_id, segredo=segredo, aplicativo_id=aplicativo_id)
+            await registrar(
                 c,
-                cifra,
+                papel="despachante",
+                tipo="chave_guardada",
+                campos={"dono": "programa" if aplicativo_id else "compartilhada", "quem": quem[:80]},
                 sistema_id=sistema_id,
-                segredo=segredo,
-                pessoa_id=_uuid(corpo.get("pessoa_id")),
-                aplicativo_id=_uuid(corpo.get("aplicativo_id")),
+                aplicativo_id=aplicativo_id,
             )
         return JSONResponse({"guardada": True})
 

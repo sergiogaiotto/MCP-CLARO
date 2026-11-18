@@ -17,11 +17,9 @@ def contexto_tls_interno(p: Parametros) -> ssl.SSLContext | bool:
         return False
     ctx = ssl.create_default_context(cafile=p.INTERNAL_CA_FILE)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-    # Certificado de cliente proprio para chamar outra peca; sem ele, usa o do servidor deste papel.
-    cert = p.INTERNAL_CLIENT_CERT_FILE or p.INTERNAL_CERT_FILE
-    chave = p.INTERNAL_CLIENT_KEY_FILE or p.INTERNAL_KEY_FILE
-    if cert and chave:
-        ctx.load_cert_chain(cert, chave)
+    # Certificado de cliente proprio, emitido pela autoridade de clientes da porta chamada.
+    if p.INTERNAL_CLIENT_CERT_FILE and p.INTERNAL_CLIENT_KEY_FILE:
+        ctx.load_cert_chain(p.INTERNAL_CLIENT_CERT_FILE, p.INTERNAL_CLIENT_KEY_FILE)
     return ctx
 
 

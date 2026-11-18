@@ -51,10 +51,9 @@ def _subir(papel: Papel, p: Parametros) -> None:
     opcoes: dict[str, Any] = {}
     if p.INTERNAL_CERT_FILE and p.INTERNAL_KEY_FILE:
         opcoes = {"ssl_certfile": p.INTERNAL_CERT_FILE, "ssl_keyfile": p.INTERNAL_KEY_FILE}
-        autoridade_clientes = p.INTERNAL_CLIENT_CA_FILE or p.INTERNAL_CA_FILE
-        if autoridade_clientes:
-            # mTLS: cada porta interna aceita so o certificado de quem pode chama-la.
-            opcoes |= {"ssl_ca_certs": autoridade_clientes, "ssl_cert_reqs": ssl.CERT_REQUIRED}
+        # mTLS: cada porta interna aceita so o certificado de quem pode chama-la. Sem volta para a
+        # autoridade comum: a partida ja recusou TLS sem INTERNAL_CLIENT_CA_FILE.
+        opcoes |= {"ssl_ca_certs": p.INTERNAL_CLIENT_CA_FILE, "ssl_cert_reqs": ssl.CERT_REQUIRED}
     app: Any
     if papel is Papel.ENTRADA:
         from mcp_claro.entrada.app import criar_app_entrada

@@ -312,6 +312,16 @@ class Parametros(BaseSettings):
                 erros.append("Em piloto ou producao, VAULT_ADDR deve comecar com https:// (TLS interno).")
         if self.VAULT_AUTH_METHOD != "approle":
             erros.append("VAULT_AUTH_METHOD aceita so approle (login de maquina com token curto).")
+        if self.INTERNAL_CERT_FILE and not self.INTERNAL_CLIENT_CA_FILE:
+            erros.append(
+                "Porta interna com TLS exige INTERNAL_CLIENT_CA_FILE: sem ela, qualquer certificado da autoridade "
+                "interna entraria (mTLS falharia aberto)."
+            )
+        if self.em_producao:
+            if not (self.INTERNAL_CERT_FILE and self.INTERNAL_KEY_FILE):
+                erros.append("Em piloto ou producao, a porta interna exige INTERNAL_CERT_FILE e INTERNAL_KEY_FILE.")
+            if not self.DISPATCHER_INTERNAL_URL.startswith("https://"):
+                erros.append("Em piloto ou producao, DISPATCHER_INTERNAL_URL deve usar https (mTLS).")
         if self.FEATURE_TASKS:
             erros.append("FEATURE_TASKS so liga com implementacao propria sobre PostgreSQL (decisao 13).")
         if self.AUTH_ENTERPRISE_ASSERTION_ENABLED:
