@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+import mcp_types as types
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -23,7 +24,7 @@ from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
+from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.despachante")
 
@@ -57,6 +58,14 @@ class PedidoLeitura:
 
 
 _PROPRIO = "__mcp_claro_proprio"
+
+
+def capacidades_exigidas(dados: Any) -> list[str]:
+    """Nomes das capacidades que o sistema disse faltar, filtrados pela lista conhecida. Texto dele nao passa."""
+    exigidas = dados.get("requiredCapabilities") if isinstance(dados, dict) else None
+    if not isinstance(exigidas, dict):
+        return []
+    return [nome for nome in CAPACIDADES_DO_CLIENTE if nome in exigidas]
 
 
 def _resultado_de_erro(texto: str, motivo: str) -> dict[str, Any]:
@@ -161,6 +170,20 @@ class Despachante:
             else:
                 resultado = medida.aplicar(bruto, ferramenta.campos_pessoais)
                 resultado.pop("resultType", None)
+        elif (
+            resposta.tipo == "erro_rpc"
+            and resposta.erro is not None
+            and resposta.erro.code == types.MISSING_REQUIRED_CLIENT_CAPABILITY
+        ):
+            # O sistema so responde se puder pedir dados ao aplicativo (o MCP-CLARO, como cliente, nao declara
+            # nenhuma capacidade). A entrada decide: -32021 se o aplicativo tambem nao declarou, ou este erro.
+            capacidades = capacidades_exigidas(resposta.erro.data)
+            resultado = _resultado_de_erro(
+                f"O sistema {sistema.nome} so responde pedindo dados ao aplicativo"
+                f" ({', '.join(capacidades) or 'capacidade nao informada'}). O MCP-CLARO nao repassa esses pedidos.",
+                MOTIVO_EXIGE_CAPACIDADE,
+            )
+            resultado["_meta"][PREFIXO_META + "capacidades"] = capacidades
         else:
             resultado = _resultado_de_erro(
                 f"O sistema {sistema.nome} nao respondeu a leitura ({resposta.tipo}).",

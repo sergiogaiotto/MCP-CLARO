@@ -16,3 +16,9 @@ PROXIMA_VERSAO_PREVISTA: Final = "2027-03-30"
 
 PREFIXO_META: Final = "br.com.claro.mcp-claro/"
 """Prefixo proprio das chaves que o gateway escreve em ``_meta``."""
+
+CAPACIDADES_DO_CLIENTE: Final = ("elicitation", "roots", "sampling")
+"""Capacidades do aplicativo que um sistema pode exigir (-32021). So estes nomes passam do despachante a entrada."""
+
+MOTIVO_EXIGE_CAPACIDADE: Final = "sistema_exige_capacidade"
+"""Motivo, no ``_meta`` do resultado interno, de um sistema que so responde pedindo dados ao aplicativo."""
