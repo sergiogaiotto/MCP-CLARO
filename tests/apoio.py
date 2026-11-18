@@ -23,18 +23,26 @@ def porta_livre() -> int:
 
 
 @contextlib.asynccontextmanager
-async def servidor(app: Any, porta: int | None = None) -> AsyncIterator[str]:
-    """Sobe ``app`` com uvicorn e devolve a URL base (http://127.0.0.1:<porta>)."""
+async def servidor(app: Any, porta: int | None = None, *, host: str = "127.0.0.1", **tls: Any) -> AsyncIterator[str]:
+    """Sobe ``app`` com uvicorn e devolve a URL base (http://127.0.0.1:<porta>).
+
+    ``tls`` vai direto ao ``uvicorn.Config`` (``ssl_certfile``, ``ssl_keyfile``, ``ssl_ca_certs``,
+    ``ssl_cert_reqs``); com certificado, a URL sai em https.
+    """
     porta = porta or porta_livre()
-    config = uvicorn.Config(app, host="127.0.0.1", port=porta, log_level="warning", lifespan="on")
+    config = uvicorn.Config(app, host=host, port=porta, log_level="warning", lifespan="on", **tls)
     srv = uvicorn.Server(config)
     tarefa = asyncio.create_task(srv.serve())
     for _ in range(200):
-        if srv.started:
+        if srv.started or tarefa.done():
             break
         await asyncio.sleep(0.02)
+    if tarefa.done():
+        tarefa.result()  # a partida falhou: mostra o erro em vez de seguir com a porta fechada
+        raise RuntimeError(f"o servidor de teste nao subiu em {host}:{porta}")
+    esquema = "https" if tls.get("ssl_certfile") else "http"
     try:
-        yield f"http://127.0.0.1:{porta}"
+        yield f"{esquema}://{host}:{porta}"
     finally:
         srv.should_exit = True
         await tarefa
@@ -45,7 +53,7 @@ async def cliente_mcp(url: str, chave: str | None = None, *, modo: str = VERSAO_
     """Cliente oficial fixado na versao (padrao 2026-07-28), sem callbacks automaticos."""
     cabecalhos = {"authorization": f"Bearer {chave}"} if chave else {}
     http = httpx2.AsyncClient(headers=cabecalhos, follow_redirects=False, timeout=10)
-    async with http, Client(streamable_http_client(url, http_client=http), mode=modo) as c:  # type: ignore[arg-type]
+    async with http, Client(streamable_http_client(url, http_client=http), mode=modo) as c:
         yield c
 
 

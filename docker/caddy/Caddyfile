@@ -5,6 +5,9 @@
 	order rate_limit before reverse_proxy
 	servers {
 		trusted_proxies static private_ranges
+		# Host diferente do nome pedido no TLS (SNI) recebe 421: o portao nao responde por endereco que nao
+		# serve, nem com 200 vazio (protecao de Host, como no cenario de DNS rebinding da suite oficial).
+		strict_sni_host on
 	}
 }
 
@@ -44,15 +47,18 @@
 	}
 
 	handle {
-	reverse_proxy https://entrada:{$GATEWAY_INTERNAL_PORT:8443} {
-		transport http {
-			tls_client_auth /run/secrets/portao_cliente_cert.pem /run/secrets/portao_cliente_key.pem
-			tls_trust_pool file /run/secrets/ca_interna.pem
-			tls_server_name entrada
+		reverse_proxy https://entrada:{$GATEWAY_INTERNAL_PORT:8443} {
+			# Com upstream HTTPS o Caddy troca o Host pelo da entrada ("entrada:8443"); a entrada confere o
+			# Host publico (ALLOWED_HOSTS) e recusaria todo pedido MCP com 421. O Host segue como veio.
+			header_up Host {host}
+			transport http {
+				tls_client_auth /run/secrets/portao_cliente_cert.pem /run/secrets/portao_cliente_key.pem
+				tls_trust_pool file /run/secrets/ca_interna.pem
+				tls_server_name entrada
+			}
+			# Sem novas tentativas: o portao nunca repete um pedido.
+			lb_retries 0
 		}
-		# Sem novas tentativas: o portao nunca repete um pedido.
-		lb_retries 0
-	}
 	}
 
 	header {

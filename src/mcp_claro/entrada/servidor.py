@@ -6,6 +6,9 @@
 - ``tools/call`` recusa ferramenta fora da vitrine, confere os argumentos
   contra o esquema revisado e manda leituras ao despachante pela porta
   interna. Acoes so entram com a Fase 2.
+- O MCP-CLARO nunca pede dados ao aplicativo (sem ``InputRequiredResult``):
+  ``inputResponses`` e ``requestState`` nao seguem ao sistema. Quando o sistema
+  exige uma capacidade que o aplicativo nao declarou, a resposta e -32021.
 
 Antes de cada pedido, a entrada consulta o estado da entrada (fechada recusa
 tudo; so de leitura aceita so a classe "le") e os bloqueios ativos (pessoa,
@@ -38,7 +41,7 @@ from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios, catraca, estado, revisao
 from mcp_claro.regras.bloqueios import Vigentes
 from mcp_claro.regras.estado import EstadoEntrada
-from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
+from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.entrada.servidor")
 
@@ -71,6 +74,35 @@ class Recusa(MCPError):
     def __init__(self, mensagem: str, motivo: str) -> None:
         super().__init__(code=CODIGO_RECUSA, message=mensagem, data={PREFIXO_META + "motivo": motivo})
         self.motivo = motivo
+
+
+def _campos_nulos(params: types.CallToolRequestParams) -> list[str]:
+    """``inputResponses`` e ``requestState`` sao opcionais, mas, se vierem, nao podem ser ``null``."""
+    campos = (("input_responses", "inputResponses"), ("request_state", "requestState"))
+    return [fio for campo, fio in campos if campo in params.model_fields_set and getattr(params, campo) is None]
+
+
+def capacidades_nao_declaradas(ctx: ServerRequestContext[Any], exigidas: Any) -> list[str]:
+    """Das capacidades que o sistema exige, as que o aplicativo nao declarou no ``_meta`` deste pedido."""
+    if not isinstance(exigidas, list):
+        return []
+    declaradas = ctx.session.client_capabilities
+    return [
+        nome
+        for nome in exigidas
+        if nome in CAPACIDADES_DO_CLIENTE and (declaradas is None or getattr(declaradas, nome, None) is None)
+    ]
+
+
+def capacidade_ausente(faltam: list[str]) -> MCPError:
+    dados = types.MissingRequiredClientCapabilityErrorData(
+        required_capabilities=types.ClientCapabilities.model_validate({nome: {} for nome in faltam})
+    )
+    return MCPError(
+        code=types.MISSING_REQUIRED_CLIENT_CAPABILITY,
+        message=f"Esta ferramenta precisa que o aplicativo declare a capacidade: {', '.join(faltam)}.",
+        data=dados.model_dump(by_alias=True, mode="json", exclude_none=True),
+    )
 
 
 def _traceparent(ctx: ServerRequestContext[Any], p: Parametros) -> str | None:
@@ -154,6 +186,8 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         return Recusa(mensagem, motivo)
 
     async def chamar(ctx: ServerRequestContext[Any], params: types.CallToolRequestParams) -> types.CallToolResult:
+        if nulos := _campos_nulos(params):
+            raise MCPError(code=types.INVALID_PARAMS, message=f"{', '.join(nulos)} nao pode ser null.")
         q = await quem(ctx)
         trace = _traceparent(ctx, p)
         entrada, vigentes = await portas(q)
@@ -222,6 +256,11 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         async with engine.begin() as c:
             await repositorio.marcar_uso_da_ordem(c, ferramenta.ordem_id)
         CONTADORES.somar("leituras", sistema=ferramenta.sistema.nome)
+        meta = resultado.get("_meta") or {}
+        exige = meta.get(PREFIXO_META + "motivo") == MOTIVO_EXIGE_CAPACIDADE
+        if exige and (faltam := capacidades_nao_declaradas(ctx, meta.get(PREFIXO_META + "capacidades"))):
+            # O sistema so responde pedindo dados ao aplicativo, e o aplicativo nem declarou a capacidade.
+            raise capacidade_ausente(faltam)
         return types.CallToolResult.model_validate(resultado)
 
     def esquema_da_ferramenta(nome: str) -> dict[str, Any] | None:

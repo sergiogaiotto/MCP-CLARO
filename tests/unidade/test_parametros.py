@@ -47,6 +47,8 @@ def test_producao_exige_verify_full(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCREENS_CLIENT_SECRET_FILE", "/run/secrets/telas_cliente")
     monkeypatch.setenv("NOTIFY_ADMIN_EMAILS", "admin@claro.exemplo")
     monkeypatch.setenv("GRAFANA_WEBHOOK_PASSWORD_FILE", "/run/secrets/grafana_webhook")
+    monkeypatch.setenv("WATCH_CONTINUITY_URL", "https://vigia.claro.exemplo:9445")
+    monkeypatch.setenv("WATCH_CONTINUITY_TOKEN_FILE", "/run/secrets/vigia_continuidade")
     monkeypatch.setenv("DB_SSLMODE", "require")
     with pytest.raises(ConfiguracaoInvalida, match="verify-full"):
         carregar()

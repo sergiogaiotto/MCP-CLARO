@@ -11,6 +11,9 @@
 # Saida: conformidade/resultados/ (log do exemplo, saida da suite e o checks.json
 # de cada cenario). O codigo de saida e o da suite: 0 quando todo cenario exigido
 # passa ou falha so como previsto em conformidade/falhas-esperadas.yml.
+#
+# A mesma suite ATRAVES do gateway (entrada, despachante e, com --portao, o Caddy),
+# com este exemplo atras: uv run --frozen python -m conformidade.gateway [--portao].
 set -euo pipefail
 
 # Versao fixada de proposito: nunca "latest" (a tag latest aponta para 0.1.16,
