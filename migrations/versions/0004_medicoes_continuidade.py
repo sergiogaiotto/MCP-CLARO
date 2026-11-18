@@ -188,6 +188,66 @@ GRANT pg_read_all_data TO mcp_claro_backup;
 """
 
 
+SQL_EPOCA = r"""
+-- Epoca do banco: o identificador do servidor PostgreSQL. Uma copia logica posta num servidor novo recomeca o
+-- contador de transacoes (xid8); sem a epoca, as linhas novas cairiam num trecho ja fechado. Cada fechamento
+-- cobre so as linhas da propria epoca, e a cadeia continua (hash_anterior) de uma epoca para a outra.
+CREATE FUNCTION epoca_banco() RETURNS text LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp AS $$
+  SELECT system_identifier::text FROM pg_control_system()
+$$;
+ALTER TABLE extrato ADD COLUMN epoca text NOT NULL DEFAULT epoca_banco();
+ALTER TABLE fechamentos ADD COLUMN epoca text NOT NULL DEFAULT epoca_banco();
+CREATE INDEX extrato_epoca_xid_idx ON extrato (epoca, xid, id);
+
+CREATE FUNCTION extrato_hash_trecho(p_epoca text, p_desde xid8, p_ate xid8, p_hash_anterior bytea)
+RETURNS TABLE (linhas bigint, hash bytea) LANGUAGE sql STABLE AS $$
+  SELECT count(*)::bigint,
+         sha256(coalesce(p_hash_anterior, '\x'::bytea) ||
+                coalesce(string_agg(e.hash_linha, '\x'::bytea ORDER BY e.xid, e.id), '\x'::bytea))
+  FROM extrato e
+  WHERE e.epoca = p_epoca AND e.xid >= p_desde AND e.xid < p_ate
+$$;
+
+CREATE OR REPLACE FUNCTION extrato_fechar() RETURNS fechamentos LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, pg_temp AS $$
+DECLARE
+  ultimo fechamentos;
+  novo   fechamentos;
+  epoca  text := epoca_banco();
+  limite xid8 := pg_snapshot_xmin(pg_current_snapshot());
+  r      record;
+BEGIN
+  IF NOT pg_try_advisory_xact_lock(hashtext('mcp_claro.fechamento')) THEN
+    RAISE EXCEPTION 'Outro fechamento esta em andamento' USING ERRCODE = 'lock_not_available';
+  END IF;
+  SELECT * INTO ultimo FROM fechamentos ORDER BY numero DESC LIMIT 1;
+  IF ultimo.numero IS NULL THEN
+    novo.numero := 1; novo.anterior := NULL; novo.desde_xid := '0'::xid8; novo.hash_anterior := NULL;
+  ELSE
+    novo.numero := ultimo.numero + 1; novo.anterior := ultimo.numero; novo.hash_anterior := ultimo.hash;
+    -- Mesma epoca: continua de onde o anterior parou. Epoca nova (servidor novo): recomeca do zero.
+    novo.desde_xid := CASE WHEN ultimo.epoca = epoca THEN ultimo.ate_xid ELSE '0'::xid8 END;
+  END IF;
+  IF limite < novo.desde_xid THEN
+    limite := novo.desde_xid;
+  END IF;
+  novo.ate_xid := limite;
+  novo.epoca := epoca;
+  SELECT * INTO r FROM extrato_hash_trecho(epoca, novo.desde_xid, novo.ate_xid, novo.hash_anterior);
+  novo.linhas := r.linhas; novo.hash := r.hash; novo.calculado_em := clock_timestamp();
+  INSERT INTO fechamentos SELECT (novo).*;
+  RETURN novo;
+END $$;
+
+CREATE OR REPLACE FUNCTION extrato_conferir(p_numero bigint) RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT f.hash = t.hash AND f.linhas = t.linhas
+  FROM fechamentos f, LATERAL extrato_hash_trecho(f.epoca, f.desde_xid, f.ate_xid, f.hash_anterior) t
+  WHERE f.numero = p_numero
+$$;
+"""
+
+
 def upgrade() -> None:
     sql_em_bloco(SQL_VISOES)
     sql_em_bloco(SQL_GRAFANA)
@@ -195,6 +255,7 @@ def upgrade() -> None:
     sql_em_bloco(SQL_CONTINUIDADE)
     sql_em_bloco(GRANTS)
     sql_em_bloco(SQL_BACKUP)
+    sql_em_bloco(SQL_EPOCA)
 
 
 def downgrade() -> None:

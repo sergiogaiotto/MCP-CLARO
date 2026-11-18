@@ -10,7 +10,7 @@ chmod 700 "$DEST"
 aleatorio() { openssl rand -base64 48 | tr -d '\n=/+' | cut -c1-40; }
 
 for nome in db_migracao db_entrada db_despachante db_rotinas db_grafana_leitor db_cofre db_login db_grafana \
-            webhook_assinatura grafana_webhook telas_cliente smtp login_admin grafana_admin; do
+            webhook_assinatura grafana_webhook telas_cliente backup_cifra db_backup smtp login_admin grafana_admin; do
   [ -s "$DEST/$nome" ] || aleatorio > "$DEST/$nome"
 done
 # Chave do selo static do OpenBao: 32 bytes em hexadecimal, sem quebra de linha (o OpenBao le o arquivo como esta

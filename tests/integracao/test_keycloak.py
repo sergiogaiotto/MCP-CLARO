@@ -153,6 +153,8 @@ async def _cracha_por_jwt(http: httpx2.AsyncClient, login: Login, assercao: str)
             "grant_type": "client_credentials",
             "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
             "client_assertion": assercao,
+            # Programas pedem o escopo do MCP-CLARO (opcional no realm), como a ronda e o vigia fazem.
+            "scope": "mcp-claro",
         },
     )
 

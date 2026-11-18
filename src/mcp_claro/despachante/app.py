@@ -59,6 +59,33 @@ class _CifraDoCofre:
         return await self._pronta().decifrar(cifrado, contexto)
 
 
+async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) -> None:
+    """Antes de atender: confere se o banco e o mesmo (identificador, linha do tempo, marca restaurado e o
+    fechamento guardado no vigia). Se nao conferir, a saida fica fechada e os aplicativos pausados."""
+    import asyncio
+    import ssl
+
+    from mcp_claro.continuidade import conferir_continuidade
+    from mcp_claro.vigia.continuidade import numero_no_vigia
+
+    numero: int | None = None
+    if p.WATCH_CONTINUITY_URL and p.WATCH_CONTINUITY_TOKEN_FILE:
+        from pathlib import Path
+
+        from pydantic import SecretStr
+
+        # Leitura unica e pequena, na partida, antes de atender qualquer pedido.
+        segredo = SecretStr(Path(p.WATCH_CONTINUITY_TOKEN_FILE).read_text(encoding="utf-8").strip())  # noqa: ASYNC240
+        contexto = ssl.create_default_context(cafile=p.WATCH_CONTINUITY_CA_FILE) if p.WATCH_CONTINUITY_CA_FILE else None
+        for tentativa in range(3):
+            numero = await numero_no_vigia(p.WATCH_CONTINUITY_URL, segredo, verify=contexto)
+            if numero is not None:
+                break
+            await asyncio.sleep(2 * (tentativa + 1))
+    resultado = await conferir_continuidade(engine, numero, exigir_vigia=bool(p.CONTINUITY_REQUIRE_WATCH))
+    log.info("continuidade", desfecho=str(getattr(resultado, "desfecho", resultado)))
+
+
 def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | None = None) -> Starlette:
     """Sem ``cifra`` dada, o papel entra no cofre (OpenBao, AppRole do despachante) na partida."""
     p.conferir()
@@ -146,6 +173,7 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
                 cofre = await pilha.enter_async_context(Cofre(p))
                 do_cofre.alvo = cofre.cifra()
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
+            await _conferir_continuidade_na_partida(p, engine)
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 

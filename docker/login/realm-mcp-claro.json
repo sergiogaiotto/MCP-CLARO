@@ -253,10 +253,12 @@
         "standard.token.exchange.enabled": "false"
       },
       "defaultClientScopes": [
-        "basic",
-        "mcp-claro"
+        "basic"
       ],
-      "optionalClientScopes": []
+      "optionalClientScopes": [
+        "mcp-claro",
+        "outro-servico"
+      ]
     },
     {
       "clientId": "mcp-claro-vigia",
@@ -289,10 +291,12 @@
         "standard.token.exchange.enabled": "false"
       },
       "defaultClientScopes": [
-        "basic",
-        "mcp-claro"
+        "basic"
       ],
-      "optionalClientScopes": []
+      "optionalClientScopes": [
+        "mcp-claro",
+        "outro-servico"
+      ]
     },
     {
       "clientId": "mcp-claro-teste-cc",

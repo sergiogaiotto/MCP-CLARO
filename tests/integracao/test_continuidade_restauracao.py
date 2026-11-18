@@ -368,13 +368,6 @@ def test_senha_de_cifra_errada_nao_abre_a_copia(copia: Copia, destino: Parametro
         shutil.rmtree(outra, ignore_errors=True)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Copia logica num servidor novo: o contador de transacoes (xid8) recomeca, a linha nova do extrato cai "
-        "num trecho ja fechado e extrato_conferir() deixa de bater. Correcao pendente no fechamento."
-    ),
-)
 async def test_fechamento_segue_conferindo_depois_da_copia_logica_em_servidor_novo(
     copia: Copia, no_servidor_novo: Parametros
 ) -> None:

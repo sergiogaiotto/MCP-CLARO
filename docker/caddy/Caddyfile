@@ -28,6 +28,16 @@
 		respond "Nao disponivel por este endereco." 403
 	}
 
+	# Paineis do Grafana (root_url /paineis/), pela rede interna com TLS da autoridade interna.
+	handle /paineis/* {
+		reverse_proxy https://grafana:3000 {
+			transport http {
+				tls_trust_pool file /run/secrets/ca_interna.pem
+				tls_server_name grafana
+			}
+		}
+	}
+
 	# Provedor de login (Keycloak) no mesmo endereco publico: o emissor dos crachas e /login.
 	handle /login/* {
 		reverse_proxy http://login:8080

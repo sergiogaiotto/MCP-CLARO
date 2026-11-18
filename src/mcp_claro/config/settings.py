@@ -277,6 +277,9 @@ class Parametros(BaseSettings):
     WATCH_CONTINUITY_TOKEN_FILE: str | None = None
     WATCH_CONTINUITY_URL: str | None = None
     WATCH_CONTINUITY_CA_FILE: str | None = None
+    # Conferencia de continuidade na partida do despachante exige resposta do vigia. Sem valor: ligado em
+    # piloto e producao, desligado em desenvolvimento e teste (onde nao ha segunda maquina).
+    CONTINUITY_REQUIRE_WATCH: Annotated[bool | None, BeforeValidator(_liga_desliga)] = None
 
     # Limites de pedidos e medicoes
     EDGE_RATE_PER_IP_PER_MINUTE: int = Field(default=120, ge=1)
@@ -307,6 +310,8 @@ class Parametros(BaseSettings):
             object.__setattr__(self, "ALLOWED_HOSTS", [host] if host else [])
         if self.WATCH_PUBLIC_URL is None:
             object.__setattr__(self, "WATCH_PUBLIC_URL", self.PUBLIC_BASE_URL)
+        if self.CONTINUITY_REQUIRE_WATCH is None:
+            object.__setattr__(self, "CONTINUITY_REQUIRE_WATCH", self.em_producao)
         return self
 
     @property
@@ -415,6 +420,14 @@ class Parametros(BaseSettings):
                 valor = getattr(self, nome)
                 if valor and not str(valor).startswith("https://"):
                     erros.append(f"Em piloto ou producao, {nome} deve comecar com https://.")
+            if not self.CONTINUITY_REQUIRE_WATCH:
+                erros.append(
+                    "Em piloto ou producao, a conferencia de continuidade exige o vigia (CONTINUITY_REQUIRE_WATCH)."
+                )
+            if not self.WATCH_CONTINUITY_URL or not self.WATCH_CONTINUITY_TOKEN_FILE:
+                erros.append(
+                    "Em piloto ou producao, WATCH_CONTINUITY_URL e WATCH_CONTINUITY_TOKEN_FILE sao obrigatorios."
+                )
             if self.PATROL_CA_FILE or self.WATCH_CA_FILE:
                 erros.append("PATROL_CA_FILE e WATCH_CA_FILE so valem em desenvolvimento e teste.")
         if self.FEATURE_TASKS:

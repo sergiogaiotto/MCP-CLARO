@@ -18,6 +18,12 @@ varredura de segredos (gitleaks) roda a cada mudança no CI.
 | Chave de destravar o cofre | `static`: segredo do Docker fora do backup. Piloto: partes Shamir com guardiões | Guardiões | Por decisão |
 | Senha do SMTP e segredo dos webhooks | Segredos `smtp` e `webhook_assinatura` | Rotinas | 180 dias |
 | Credenciais do vigia | Segredos próprios na segunda máquina | Vigia | Separadas das do gateway |
+| Senha da cifra da cópia lógica | Segredo `backup_cifra`, guardado também fora das duas máquinas | Backup; roteiro de restauração | Na troca de operador |
+| Usuário da cópia lógica (só leitura) | Segredo `db_backup` | Backup | 180 dias |
+| Senha do ADMIN do Grafana | Segredo `grafana_admin` | Equipe que opera | 180 dias |
+| Segredo do cliente das telas no provedor de login | Segredo `telas_cliente` | Entrada e provedor de login | 180 dias |
+| Senha do webhook interno do Grafana | Segredo `grafana_webhook` | Grafana e rotinas | 180 dias |
+| Chaves dos programas da ronda e do vigia | Segredos `PATROL_KEY_FILE` e `WATCH_KEY_FILE`; a pública vai ao provedor | Rotinas e vigia | `PROGRAM_KEY_MAX_AGE_DAYS` |
 
 ## Desenvolvimento e teste
 
