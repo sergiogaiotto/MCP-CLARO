@@ -110,6 +110,66 @@ services:
     secrets: [db_rotinas, ca_interna.pem, rotinas_cert.pem, rotinas_key.pem]
     networks: [interna, saida]
 
+  cofre:
+    # OpenBao: so as chaves de cifra (Transit) e a chave do estado das confirmacoes (KV v2), sobre o PostgreSQL.
+    # Selo static nos testes (decisao 6): destrava sozinho com o segredo cofre_selo.key. Porta 8200 com mTLS.
+    # Na primeira subida, o servico cofre-iniciar inicia o cofre e cria os AppRoles.
+    image: openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
+    entrypoint: ["/usr/bin/dumb-init", "/bin/sh", "/openbao/mcp-claro/partida.sh"]
+    read_only: true
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp"]
+    volumes: ["./cofre:/openbao/mcp-claro:ro"]
+    secrets: [db_cofre, cofre_selo.key, cofre_cert.pem, cofre_key.pem, ca_interna.pem]
+    depends_on:
+      banco:
+        condition: service_healthy
+    healthcheck:
+      # 0 so quando iniciado e destravado; 2 quando trancado ou ainda nao iniciado.
+      test: ["CMD", "bao", "status", "-address=https://127.0.0.1:8200", "-ca-cert=/run/secrets/ca_interna.pem",
+             "-client-cert=/run/secrets/cofre_cert.pem", "-client-key=/run/secrets/cofre_key.pem"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: local
+    networks: [interna]
+
+  cofre-iniciar:
+    # Uma vez, so desenvolvimento e teste: inicia o cofre, liga Transit e KV v2, grava as politicas, cria os
+    # AppRoles entrada, despachante e rotinas e grava role_id/secret_id em .segredos/. Idempotente.
+    # Roda como root so para gravar em .segredos/ com o dono da pasta.
+    image: openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
+    entrypoint: ["/bin/sh", "/iniciar/iniciar-cofre.sh"]
+    user: "0:0"
+    read_only: true
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    tmpfs: ["/tmp"]
+    environment:
+      BAO_ADDR: https://cofre:8200
+      BAO_CACERT: /run/secrets/ca_interna.pem
+      BAO_CLIENT_CERT: /run/secrets/cofre_cert.pem
+      BAO_CLIENT_KEY: /run/secrets/cofre_key.pem
+      COFRE_SEGREDOS: /segredos
+      COFRE_POLITICAS: /iniciar/politicas
+    volumes:
+      - ../scripts/iniciar-cofre.sh:/iniciar/iniciar-cofre.sh:ro
+      - ./cofre/politicas:/iniciar/politicas:ro
+      - ../.segredos:/segredos
+    secrets: [ca_interna.pem, cofre_cert.pem, cofre_key.pem]
+    depends_on:
+      cofre:
+        condition: service_started
+    logging:
+      driver: local
+    networks: [interna]
+
   portao:
     build: ./caddy
     image: mcp-claro-portao:dev
@@ -154,6 +214,9 @@ secrets:
   ca_interna.pem: { file: ../.segredos/ca_interna.pem }
   banco_cert.pem: { file: ../.segredos/banco_cert.pem }
   banco_key.pem: { file: ../.segredos/banco_key.pem }
+  cofre_selo.key: { file: ../.segredos/cofre_selo.key }
+  cofre_cert.pem: { file: ../.segredos/cofre_cert.pem }
+  cofre_key.pem: { file: ../.segredos/cofre_key.pem }
   portao_cert.pem: { file: ../.segredos/portao_cert.pem }
   portao_key.pem: { file: ../.segredos/portao_key.pem }
   entrada_cert.pem: { file: ../.segredos/entrada_cert.pem }

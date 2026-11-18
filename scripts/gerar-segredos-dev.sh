@@ -10,7 +10,7 @@ chmod 700 "$DEST"
 aleatorio() { openssl rand -base64 48 | tr -d '\n=/+' | cut -c1-40; }
 
 for nome in db_migracao db_entrada db_despachante db_rotinas db_grafana_leitor db_cofre db_login db_grafana \
-            webhook_assinatura grafana_webhook smtp cofre_chave_static login_admin grafana_admin; do
+            webhook_assinatura grafana_webhook smtp login_admin grafana_admin; do
   [ -s "$DEST/$nome" ] || aleatorio > "$DEST/$nome"
 done
 # Chave do selo static do OpenBao: 32 bytes em hexadecimal, sem quebra de linha (o OpenBao le o arquivo como esta
@@ -64,6 +64,14 @@ nova_autoridade ca_clientes_rotinas
 emitir_cliente ca_clientes_entrada portao_cliente
 emitir_cliente ca_clientes_despachante entrada_cliente
 emitir_cliente ca_clientes_rotinas grafana_cliente
+
+# Lugares das credenciais AppRole de cada papel: o cofre-iniciar preenche no mesmo arquivo.
+for papel in entrada despachante rotinas; do
+  for campo in role_id secret_id; do
+    [ -e "$DEST/cofre_${papel}_${campo}" ] || : > "$DEST/cofre_${papel}_${campo}"
+  done
+done
+emitir_cliente ca_clientes_despachante rotinas_cliente
 
 chmod 644 "$DEST"/*  # a pasta fica 700; os conteineres leem como usuarios sem privilegio
 echo "Segredos de desenvolvimento em $DEST/ (fora do Git)."
