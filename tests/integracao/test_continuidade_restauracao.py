@@ -74,6 +74,29 @@ def rodar_script(script: str, ambiente: dict[str, str], volumes: dict[Path, tupl
     return saida
 
 
+def liberar_para_o_teste(pasta: Path) -> None:
+    """A copia sai com pastas 700 e arquivos 600, do usuario postgres do conteiner (como deve ser). O teste
+    roda com outro usuario na maquina (no CI, o do executor): abre a leitura so desta pasta temporaria,
+    para conferir, copiar e apagar depois. Nada muda nos scripts nem na copia de producao."""
+    import docker
+
+    cliente = docker.from_env()
+    container = cliente.containers.run(
+        IMAGEM_POSTGRES,
+        ["chmod", "-R", "a+rwX", "/alvo"],
+        entrypoint=[],
+        volumes={str(pasta): {"bind": "/alvo", "mode": "rw"}},
+        user="root",
+        detach=True,
+    )
+    try:
+        fim = container.wait(timeout=60)
+    finally:
+        container.remove(force=True)
+    if fim["StatusCode"] != 0:
+        raise ScriptFalhou(fim["StatusCode"], "chmod da pasta temporaria do teste falhou")
+
+
 class ScriptFalhou(Exception):
     def __init__(self, codigo: int, saida: str) -> None:
         self.codigo = codigo
@@ -164,6 +187,7 @@ def copia(banco_migrado: Parametros) -> Iterator[Copia]:
         },
         {segredos: ("/segredos", "ro"), saida: ("/saida", "rw")},
     )
+    liberar_para_o_teste(saida)
     pastas = [p for p in saida.iterdir() if p.is_dir() and not p.name.startswith(".")]
     assert len(pastas) == 1, texto
     try:
