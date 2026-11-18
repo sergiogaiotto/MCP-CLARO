@@ -74,7 +74,7 @@ jobs:
         with:
           node-version: "20"
       - run: uv sync --frozen
-      - name: rodar a suite fixada contra o sistema de exemplo e o gateway
+      - name: rodar a suite fixada contra o sistema de exemplo
         run: bash conformidade/rodar.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

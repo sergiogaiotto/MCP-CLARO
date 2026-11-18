@@ -1,0 +1,22 @@
+# Falhas esperadas da suite oficial de conformidade do MCP
+# (@modelcontextprotocol/conformance@0.2.0-alpha.12, --requirements 2026-07-28),
+# no formato do README da suite: listas "server" e "client" com nomes de cenario
+# ("<cenario>") ou de uma verificacao so ("<cenario>:<id-da-verificacao>", sem
+# espaco depois dos dois pontos).
+#
+# Regras deste arquivo:
+# - Cada entrada leva, na linha de cima, um comentario com o motivo escrito ou o
+#   numero do chamado que vai corrigir. Entrada sem motivo nao passa na revisao.
+# - Entrada so entra depois de tentar implementar. Nao e atalho para passar.
+# - A suite falha se uma entrada daqui passar a passar (baseline velho): ao
+#   corrigir, apague a entrada no mesmo pedido de mudanca.
+# - A suite conta aviso (WARNING) como falha aqui, nao so FAILURE.
+#
+# Situacao em 18/11/2026: os 37 cenarios de servidor exigidos pela 2026-07-28
+# passam contra exemplos/conformidade.py, sem nenhuma falha esperada. Os cenarios
+# "not_scored" (extensao tasks e os pendentes) rodam e aparecem no relatorio, mas
+# a suite nao os conta e eles nao entram aqui.
+#
+# A perna "client" nao roda neste script (ele so testa servidor); fica vazia.
+server: []
+client: []
