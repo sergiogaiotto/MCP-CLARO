@@ -42,9 +42,7 @@ FERRAMENTAS = [
 def criar(contagem: Contagem | None = None) -> Starlette:
     contagem = contagem or Contagem()
 
-    async def listar(
-        ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None
-    ) -> types.ListToolsResult:
+    async def listar(ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         return types.ListToolsResult(tools=[types.Tool.model_validate(f) for f in FERRAMENTAS])
 
     async def chamar(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
@@ -62,9 +60,7 @@ def criar(contagem: Contagem | None = None) -> Starlette:
             return types.CallToolResult(content=[types.TextContent(type="text", text="No ar.")])
         raise MCPError(code=types.INVALID_PARAMS, message=f"Ferramenta desconhecida: {p.name}")
 
-    server: Server[Any] = Server(
-        "exemplo-compartilhada", version="1.0.0", on_list_tools=listar, on_call_tool=chamar
-    )
+    server: Server[Any] = Server("exemplo-compartilhada", version="1.0.0", on_list_tools=listar, on_call_tool=chamar)
     return montar_app(server, contagem=contagem)
 
 
