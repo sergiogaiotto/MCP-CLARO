@@ -50,6 +50,17 @@ FRASES: Final[dict[str, Frase]] = {
             "O banco foi restaurado; a porta de saida ficou fechada ate decisao humana.",
         ),
         Frase("ronda_falha", "A ronda das portas achou uma passagem indevida: {motivo}."),
+        # Ronda das portas (Fase 1): fechamento da entrada por etapas.
+        Frase(
+            "ronda_fechou_entrada",
+            "A ronda das portas achou passagem indevida em {rondas} rondas seguidas e deixou a entrada {nivel}."
+            " So o ADMIN reabre, depois de apurar.",
+        ),
+        Frase(
+            "ronda_sem_fechamento",
+            "A ronda das portas achou passagem indevida em {rondas} rondas seguidas. O fechamento sozinho esta"
+            " desligado: a entrada continua {nivel}.",
+        ),
         Frase("chave_guardada", "Chave {dono} guardada cifrada no cofre por {quem}."),
         Frase("politica_mudou", "Politica {chave} mudou para {valor} por {autor}: {motivo}."),
         # Regras (Fase 1): autorizacao nos sistemas, chaves, bloqueio, pausa e estado das portas.
@@ -104,6 +115,41 @@ FRASES: Final[dict[str, Frase]] = {
         ),
         Frase("admin_webhook_cadastrado", "Destino de webhook {destino} cadastrado por {quem}."),
         Frase("admin_webhook_mudou", "Destino de webhook {destino} {situacao} por {quem}."),
+        # Telas (Fase 1): bloqueio, pausa, portas, pessoas, autorizacao e chaves pelo ADMIN.
+        Frase("admin_bloqueio_ligado", "Bloqueio ligado por {quem} em {alcance}."),
+        Frase("admin_bloqueio_encerrado", "Bloqueio encerrado por {quem} em {alcance}."),
+        Frase("admin_pausa_ligada", "Pausa ligada por {quem} em {alcance}."),
+        Frase("admin_pausa_encerrada", "Pausa encerrada por {quem} em {alcance}."),
+        Frase("admin_entrada_mudou", "Entrada do MCP-CLARO deixada {nivel} por {quem}."),
+        Frase("admin_saida_mudou", "Porta de saida {situacao} por {quem}."),
+        Frase("pessoa_desativada", "Conta desativada pelo ADMIN {quem}."),
+        Frase("admin_autorizacao_configurada", "Autorizacao por pessoa do sistema {sistema} configurada por {quem}."),
+        Frase(
+            "admin_segredo_cliente_entregue",
+            "Segredo do MCP-CLARO no sistema {sistema} entregue ao cofre por {quem}; as telas nao o guardam.",
+        ),
+        Frase(
+            "admin_chave_entregue",
+            "Chave {dono} do sistema {sistema} entregue ao cofre por {quem}; as telas nao a guardam.",
+        ),
+        # Continuidade do banco (Fase 1): conferencia na partida do despachante e roteiro de restauracao.
+        Frase(
+            "continuidade_primeira",
+            "Primeira partida neste banco: o identificador e a linha do tempo do PostgreSQL foram guardados.",
+        ),
+        Frase(
+            "continuidade_nao_confere",
+            "A conferencia do banco na partida nao bateu: {motivo}. A porta de saida ficou fechada ate decisao humana.",
+        ),
+        Frase("intervalo_perdido", "Pode faltar no extrato o que aconteceu entre {desde} e {ate}."),
+        Frase(
+            "aplicativo_pausado_continuidade",
+            "O aplicativo {aplicativo} voltou pausado depois da conferencia do banco; reativar e decisao humana.",
+        ),
+        Frase(
+            "restauracao_marcada",
+            "O roteiro de restauracao marcou o banco como restaurado; a porta de saida fecha na proxima partida.",
+        ),
     )
 }
 
