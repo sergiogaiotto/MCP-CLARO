@@ -10,7 +10,9 @@ verificador de cracha (sem cracha, o aplicativo recebe 401 e faz login) e:
 - recusa pedido sem cabecalho de versao, como o ``initialize``, com -32022 e a
   lista de versoes aceitas (ou -32020 se o corpo ja for do envelope novo);
 - recusa outra versao com HTTP 400, erro -32022 e ``data.supported``;
-- recusa ``initialize`` mesmo com cabecalho 2026 (o kit daria -32601);
+- recusa ``initialize`` mesmo com cabecalho 2026: se o corpo pede uma versao
+  antiga, com -32022 e as versoes aceitas; se nao, com o que o padrao manda para
+  metodo retirado na 2026-07-28 (HTTP 404 e -32601, SEP-2575);
 - conta cada recusa em memoria, ja atribuida ao aplicativo do cracha.
 """
 
@@ -23,6 +25,7 @@ from mcp.shared.inbound import ERROR_CODE_HTTP_STATUS, MCP_PROTOCOL_VERSION_HEAD
 from mcp_types import (
     DEFAULT_NEGOTIATED_VERSION,
     HEADER_MISMATCH,
+    METHOD_NOT_FOUND,
     PROTOCOL_VERSION_META_KEY,
     UNSUPPORTED_PROTOCOL_VERSION,
     UnsupportedProtocolVersionErrorData,
@@ -54,6 +57,12 @@ def erro_jsonrpc(id_: Any, codigo: int, mensagem: str, dados: Any = None) -> JSO
 def versao_nao_suportada(id_: Any, pedida: str) -> JSONResponse:
     dados = UnsupportedProtocolVersionErrorData(supported=list(VERSOES_ACEITAS), requested=pedida)
     return erro_jsonrpc(id_, UNSUPPORTED_PROTOCOL_VERSION, MENSAGEM_VERSAO, dados.model_dump(mode="json"))
+
+
+def metodo_retirado(id_: Any, metodo: str) -> JSONResponse:
+    """``initialize`` pedido na 2026-07-28: o metodo nao existe mais nesta versao (HTTP 404, -32601)."""
+    mensagem = f"Method not found: {metodo} foi retirado na {VERSAO_MCP}; a conversa comeca por server/discover."
+    return erro_jsonrpc(id_, METHOD_NOT_FOUND, mensagem)
 
 
 def origem_do_pedido(scope: Scope) -> str:
@@ -133,9 +142,15 @@ class PorteiroDeVersao:
             self._recusar(scope, versoes[0], "cabecalho")
             resposta = versao_nao_suportada(id_, versoes[0])
         elif metodo == "initialize":
-            versao = pedida if isinstance(pedida, str) else versoes[0]
-            self._recusar(scope, versao, "initialize")
-            resposta = versao_nao_suportada(id_, versao)
+            if isinstance(pedida, str) and pedida not in VERSOES_ACEITAS:
+                # Abertura da geracao antiga que veio com o cabecalho novo: recusa legivel com as versoes aceitas.
+                self._recusar(scope, pedida, "initialize")
+                resposta = versao_nao_suportada(id_, pedida)
+            else:
+                # Pedido da 2026-07-28 por um metodo que ela retirou: dizer "versao nao suportada" citando a
+                # propria versao aceita seria contraditorio. Conta igual, como gesto da geracao antiga.
+                self._recusar(scope, "geracao-antiga", "initialize")
+                resposta = metodo_retirado(id_, "initialize")
 
         if resposta is not None:
             await resposta(scope, receive, send)

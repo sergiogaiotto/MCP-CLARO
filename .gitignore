@@ -15,4 +15,5 @@ build/
 .env.*
 node_modules/
 conformidade/resultados/
+conformidade/resultados-gateway/
 sbom*.json

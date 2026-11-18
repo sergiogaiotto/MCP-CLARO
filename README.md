@@ -57,6 +57,28 @@ curl -k --resolve mcp-claro.localhost:443:127.0.0.1 https://mcp-claro.localhost/
 Atrás de um proxy com inspeção de TLS, passe a autoridade da empresa na construção:
 `docker build --secret id=ca_corporativa,src=ca.pem ...`.
 
+## Suíte oficial de conformidade
+
+Requer Docker e Node 22 com `npx`. Contra o sistema de exemplo sozinho:
+
+```bash
+bash conformidade/rodar.sh
+```
+
+Através do gateway, com o sistema de exemplo atrás e um proxy só de teste que põe o crachá de uma pessoa de teste;
+direto na entrada e através do portão (Caddy, com mTLS até a entrada):
+
+```bash
+uv run --frozen python -m conformidade.gateway
+```
+
+```bash
+uv run --frozen python -m conformidade.gateway --portao
+```
+
+O que o desenho do gateway deixa de fora está em `conformidade/falhas-esperadas-gateway.yml`, com o motivo de cada
+entrada. Os resultados ficam em `conformidade/resultados-gateway/`.
+
 ## Conferir os parâmetros
 
 ```bash

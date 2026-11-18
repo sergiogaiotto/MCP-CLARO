@@ -1,0 +1,78 @@
+# Falhas esperadas da suite oficial de conformidade do MCP ATRAVES do gateway MCP-CLARO
+# (@modelcontextprotocol/conformance@0.2.0-alpha.12, --requirements 2026-07-28), rodada por
+# conformidade/gateway.py direto na entrada e atraves do portao (Caddy). As duas rodadas usam esta lista.
+#
+# Mesmo formato e mesmas regras de conformidade/falhas-esperadas.yml, com uma entrada por verificacao
+# ("<cenario>:<id-da-verificacao>", sem espaco depois dos dois pontos), como pedem as "Regras dos testes"
+# do plano:
+# - cada entrada fica de fora POR DESENHO, com o motivo escrito no bloco; nenhuma entrada cobre bug;
+# - entrada so entra depois de tentar fazer passar sem ferir o plano;
+# - a suite falha se uma entrada daqui passar a passar (baseline velho): ao mudar o desenho, apague a
+#   entrada no mesmo pedido de mudanca;
+# - a suite conta aviso (WARNING) como falha, nao so FAILURE.
+#
+# Situacao em 18/11/2026: dos 37 cenarios de servidor exigidos pela 2026-07-28, 10 passam inteiros pelo
+# gateway, direto e pelo portao (server-stateless, tools-list, tools-call-simple-text,
+# tools-call-embedded-resource, tools-call-error, server-sse-multiple-streams, dns-rebinding-protection e
+# tres de input-required-result). Os outros 27 falham so nas verificacoes abaixo. O fixture sozinho passa
+# nos 37 (falhas-esperadas.yml vazio): o que esta aqui vem do desenho do gateway, nao do fixture.
+#
+# A perna "client" nao roda neste roteiro (ele so testa o gateway como servidor); fica vazia.
+server:
+  # --- Vitrine so de ferramentas. Na Fase 1 a vitrine sai do cadastro revisado de ferramentas, pessoa por
+  # pessoa; o gateway nao publica recursos, prompts nem sugestoes de preenchimento, e o server/discover nao
+  # declara essas capacidades. Os metodos respondem -32601 com HTTP 404, como o padrao manda para metodo
+  # nao atendido.
+  - completion-complete:completion-complete
+  - resources-list:resources-list
+  - resources-read-text:resources-read-text
+  - resources-read-binary:resources-read-binary
+  - resources-templates-read:resources-templates-read
+  - prompts-list:prompts-list
+  - prompts-get-simple:prompts-get-simple
+  - prompts-get-with-args:prompts-get-with-args
+  - prompts-get-embedded-resource:prompts-get-embedded-resource
+  - prompts-get-with-image:prompts-get-with-image
+  # Pelo mesmo motivo: as dicas de cache de tools/list passam (ttlMs 0, cacheScope private), mas as de
+  # prompts/list, resources/list e resources/templates/list nao existem porque os metodos nao existem.
+  - caching:sep-2549-prompts-list-caching-hints
+  - caching:sep-2549-resources-list-caching-hints
+  - caching:sep-2549-resources-templates-list-caching-hints
+  # Pelo mesmo motivo: resources/read de uma URI desconhecida da -32601 (metodo nao atendido), nao -32602
+  # com data.uri (SEP-2164 vale para quem atende recursos).
+  - sep-2164-resource-not-found:sep-2164-error-code
+  - sep-2164-resource-not-found:sep-2164-data-uri
+
+  # --- Resposta inteira. MCP_RESPONSE_MODE=inteira e o unico modo que a partida aceita ate o fluxo ser
+  # testado nos portoes (Caddy hoje, Apigee depois): a entrada responde em JSON, de uma vez, e o despachante
+  # faz uma chamada so ao sistema. Notificacoes de progresso do sistema nao chegam ao aplicativo.
+  - tools-call-with-progress:tools-call-with-progress
+
+  # --- Leitura com medida (src/mcp_claro/despachante/medida.py). Imagem, audio, blob e link de recurso nao
+  # tem mascara de campo pessoal: sao retirados, e o resultado ganha um texto avisando quantas partes sairam.
+  # Texto e recurso embutido de texto passam mascarados (tools-call-embedded-resource passa).
+  - tools-call-image:tools-call-image
+  - tools-call-audio:tools-call-audio
+  - tools-call-mixed-content:tools-call-mixed-content
+
+  # --- Sem pedidos do sistema ao aplicativo (SEP-2322, InputRequiredResult). O gateway nao repassa pedido
+  # de dados do sistema a pessoa ou ao modelo (elicitacao, amostragem, raizes), nao responde sozinho e nao
+  # faz segunda volta. Como cliente, ele nao declara essas capacidades ao sistema, que responde -32021. O
+  # gateway devolve ao aplicativo -32021 se o aplicativo tambem nao declarou a capacidade (server-stateless
+  # passa por isso) ou, se declarou, um resultado de erro dizendo que o MCP-CLARO nao repassa esses pedidos.
+  # Os cenarios abaixo esperam um InputRequiredResult, que o gateway nunca emite; inputResponses e
+  # requestState nao seguem ao sistema.
+  - input-required-result-basic-elicitation:sep-2322-elicitation-incomplete
+  - input-required-result-basic-sampling:sep-2322-sampling-incomplete
+  - input-required-result-basic-list-roots:sep-2322-list-roots-incomplete
+  - input-required-result-request-state:sep-2322-request-state-incomplete
+  - input-required-result-multiple-input-requests:sep-2322-multiple-inputs-incomplete
+  - input-required-result-multi-round:sep-2322-multi-round-r1
+  - input-required-result-missing-input-response:sep-2322-missing-response-rerequests
+  - input-required-result-result-type:sep-2322-result-type-included
+  - input-required-result-capability-check:sep-2322-respect-client-capabilities
+  # Sem o primeiro InputRequiredResult, nao ha requestState para adulterar.
+  - input-required-result-tampered-state:sep-2322-reject-tampered-state
+  # O pedido fora de ferramenta e um prompts/get: sem prompts na vitrine, ele da -32601.
+  - input-required-result-non-tool-request:sep-2322-non-tool-incomplete
+client: []

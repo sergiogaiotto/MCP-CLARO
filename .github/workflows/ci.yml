@@ -83,6 +83,36 @@ jobs:
           path: conformidade/resultados/
           if-no-files-found: ignore
 
+  conformidade-gateway:
+    # Prova de saida de "Provar a base": a mesma suite fixada ATRAVES do gateway (entrada e despachante, com o
+    # sistema de exemplo atras e um proxy so de teste que poe o cracha), direto e pelo portao (Caddy com mTLS).
+    name: suite oficial atraves do gateway
+    runs-on: ubuntu-24.04
+    needs: qualidade
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"  # a suite 0.2.0-alpha.12 usa fs.globSync (Node 22+)
+      - run: uv sync --frozen
+      - name: construir a imagem do portao (docker/caddy)
+        run: docker build -t mcp-claro-portao:conformidade docker/caddy
+      - name: direto na entrada
+        run: uv run --frozen python -m conformidade.gateway
+      - name: atraves do portao (Caddy do produto, mTLS ate a entrada)
+        if: success() || failure()  # roda mesmo se a rodada direta falhar
+        run: uv run --frozen python -m conformidade.gateway --portao --imagem-portao mcp-claro-portao:conformidade
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: conformidade-gateway
+          path: conformidade/resultados-gateway/
+          if-no-files-found: ignore
+
   seguranca:
     name: dependencias, segredos, imagens e componentes
     runs-on: ubuntu-24.04

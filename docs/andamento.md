@@ -33,7 +33,8 @@ conferido (não fala a 2026-07-28); ambiente de teste sobe numa máquina limpa; 
 | OpenBao sobre PostgreSQL com Transit | Feito: cliente fino, AppRole por papel, selo `static` em teste |
 | Caddy na frente, com mTLS na porta interna | Feito: cada porta interna aceita só quem pode chamá-la |
 | Simulado do dia ruim | Roteiro em `docs/simulado-dia-ruim.md`; falta rodar com os pilotos |
-| Suíte oficial através do Caddy, com o gateway na frente do exemplo | A fazer (próxima entrega) |
+| Suíte oficial através do Caddy, com o gateway na frente do exemplo | Feito (`conformidade/gateway.py`): 10 dos 37 cenários exigidos passam inteiros, direto na entrada e pelo portão; os outros 27 falham só no que o desenho deixa de fora, com motivo em `conformidade/falhas-esperadas-gateway.yml` |
 
-Provas de saída automatizadas em `tests/integracao/test_provar_a_base.py`, `test_cofre.py`, `test_keycloak.py` e
-`tests/unidade/test_ligacao_classifica.py`.
+Provas de saída automatizadas em `tests/integracao/test_provar_a_base.py`, `test_cofre.py`, `test_keycloak.py`,
+`test_conformidade_gateway.py` e `tests/unidade/test_ligacao_classifica.py`. A suíte oficial através do gateway roda
+no CI, no job "suite oficial atraves do gateway".
