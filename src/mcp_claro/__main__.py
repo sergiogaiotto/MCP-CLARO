@@ -44,17 +44,30 @@ def _subir(papel: Papel, p: Parametros) -> None:
 
     import uvicorn
 
+    from mcp_claro.db.engine import criar_engine
     from mcp_claro.papeis.app import criar_app
 
     porta = int(getattr(p, _PORTAS[papel])) if papel in _PORTAS else 9445
     opcoes: dict[str, Any] = {}
     if p.INTERNAL_CERT_FILE and p.INTERNAL_KEY_FILE:
         opcoes = {"ssl_certfile": p.INTERNAL_CERT_FILE, "ssl_keyfile": p.INTERNAL_KEY_FILE}
-        if p.INTERNAL_CA_FILE:
-            # mTLS: so entra quem tem certificado da autoridade interna.
-            opcoes |= {"ssl_ca_certs": p.INTERNAL_CA_FILE, "ssl_cert_reqs": ssl.CERT_REQUIRED}
+        autoridade_clientes = p.INTERNAL_CLIENT_CA_FILE or p.INTERNAL_CA_FILE
+        if autoridade_clientes:
+            # mTLS: cada porta interna aceita so o certificado de quem pode chama-la.
+            opcoes |= {"ssl_ca_certs": autoridade_clientes, "ssl_cert_reqs": ssl.CERT_REQUIRED}
+    app: Any
+    if papel is Papel.ENTRADA:
+        from mcp_claro.entrada.app import criar_app_entrada
+
+        app = criar_app_entrada(p, criar_engine(p))
+    elif papel is Papel.DESPACHANTE:
+        from mcp_claro.despachante.app import criar_app_despachante
+
+        app = criar_app_despachante(p, criar_engine(p))
+    else:
+        app = criar_app(papel, p)
     uvicorn.run(
-        criar_app(papel, p),
+        app,
         # Escuta so na rede interna do Docker; o portao e a unica peca exposta.
         host="0.0.0.0",  # noqa: S104  # nosec B104
         port=porta,

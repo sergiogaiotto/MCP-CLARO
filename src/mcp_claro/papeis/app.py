@@ -34,9 +34,7 @@ def criar_app(papel: Papel, parametros: Parametros) -> Starlette:
 
     @asynccontextmanager
     async def ciclo(_: Starlette) -> AsyncIterator[None]:
-        log.info(
-            "partida", papel=str(papel), versao=__version__, mcp=VERSAO_MCP, ambiente=str(parametros.APP_ENV)
-        )
+        log.info("partida", papel=str(papel), versao=__version__, mcp=VERSAO_MCP, ambiente=str(parametros.APP_ENV))
         yield
         log.info("parada", papel=str(papel))
 

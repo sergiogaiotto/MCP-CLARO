@@ -40,6 +40,7 @@ def test_producao_exige_verify_full(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "producao")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://mcp.claro.exemplo")
     monkeypatch.setenv("INTERNAL_CA_FILE", "/run/secrets/ca.pem")
+    monkeypatch.setenv("INTERNAL_CLIENT_CA_FILE", "/run/secrets/ca_clientes.pem")
     monkeypatch.setenv("DB_SSLMODE", "require")
     with pytest.raises(ConfiguracaoInvalida, match="verify-full"):
         carregar()

@@ -19,9 +19,7 @@ def main() -> int:
     p = Parametros()
     papel = sys.argv[1] if len(sys.argv) > 1 else None
     portas = (
-        [int(getattr(p, _PORTAS[papel]))]
-        if papel in _PORTAS
-        else [int(getattr(p, nome)) for nome in _PORTAS.values()]
+        [int(getattr(p, _PORTAS[papel]))] if papel in _PORTAS else [int(getattr(p, nome)) for nome in _PORTAS.values()]
     )
     tls = bool(p.INTERNAL_CERT_FILE and p.INTERNAL_KEY_FILE)
     contexto: ssl.SSLContext | None = None

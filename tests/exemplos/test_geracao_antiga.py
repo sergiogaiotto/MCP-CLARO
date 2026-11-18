@@ -2,60 +2,20 @@
 
 from __future__ import annotations
 
-import os
-import shutil
-import subprocess
-import sys
-import time
 from collections.abc import Iterator
-from pathlib import Path
 
 import httpx2
 import pytest
 
-from tests.apoio import cabecalhos_2026, pedido_2026, porta_livre
+from tests.apoio import cabecalhos_2026, pedido_2026, sistema_geracao_antiga
 
-RAIZ = Path(__file__).resolve().parents[2]
 pytestmark = pytest.mark.integracao
 
 
 @pytest.fixture(scope="module")
 def antigo() -> Iterator[str]:
-    uv = shutil.which("uv")
-    if uv is None:
-        pytest.skip("uv nao encontrado")
-    porta = porta_livre()
-    ambiente = os.environ | {"PORTA": str(porta), "HOST": "127.0.0.1"}
-    proc = subprocess.Popen(  # noqa: S603 - comando fixo de teste
-        [
-            uv,
-            "run",
-            "--no-project",
-            "--python",
-            sys.executable,
-            "--with",
-            "mcp==1.30.0",
-            "python",
-            str(RAIZ / "exemplos/geracao_antiga/servidor.py"),
-        ],
-        env=ambiente,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    url = f"http://127.0.0.1:{porta}/mcp"
-    try:
-        for _ in range(300):
-            try:
-                httpx2.get(f"http://127.0.0.1:{porta}/", timeout=0.5)
-                break
-            except httpx2.TransportError:
-                if proc.poll() is not None:
-                    pytest.fail(f"o exemplo antigo nao subiu: {proc.stderr.read().decode()[-2000:]}")  # type: ignore[union-attr]
-                time.sleep(0.2)
+    with sistema_geracao_antiga() as url:
         yield url
-    finally:
-        proc.terminate()
-        proc.wait(timeout=10)
 
 
 def test_fala_a_geracao_antiga(antigo: str) -> None:
@@ -82,7 +42,5 @@ def test_nao_fala_2026(antigo: str) -> None:
         timeout=10,
     )
     corpo = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-    discover_ok = r.status_code == 200 and "2026-07-28" in str(
-        corpo.get("result", {}).get("supportedVersions", [])
-    )
+    discover_ok = r.status_code == 200 and "2026-07-28" in str(corpo.get("result", {}).get("supportedVersions", []))
     assert not discover_ok, f"o exemplo antigo nao deveria falar 2026-07-28: {r.status_code} {r.text[:300]}"

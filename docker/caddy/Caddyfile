@@ -25,7 +25,7 @@
 
 	reverse_proxy https://entrada:{$GATEWAY_INTERNAL_PORT:8443} {
 		transport http {
-			tls_client_auth /run/secrets/portao_cert.pem /run/secrets/portao_key.pem
+			tls_client_auth /run/secrets/portao_cliente_cert.pem /run/secrets/portao_cliente_key.pem
 			tls_trust_pool file /run/secrets/ca_interna.pem
 			tls_server_name entrada
 		}
