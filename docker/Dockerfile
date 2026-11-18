@@ -19,7 +19,15 @@ RUN --mount=type=secret,id=ca_corporativa,required=false \
 FROM python:3.14-slim@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
 LABEL org.opencontainers.image.title="mcp-claro" \
       org.opencontainers.image.description="MCP-CLARO, o gateway MCP independente (MCP 2026-07-28)"
-RUN groupadd --system --gid 10001 mcp && useradd --system --uid 10001 --gid mcp --no-create-home mcp
+# Correcoes de seguranca do Debian e sem pip na imagem final (o produto nao instala nada em tempo de execucao).
+RUN --mount=type=secret,id=ca_corporativa,required=false \
+    if [ -s /run/secrets/ca_corporativa ]; then \
+      printf 'Acquire::https::CaInfo "/run/secrets/ca_corporativa";\n' > /etc/apt/apt.conf.d/99ca; fi; \
+    apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99ca \
+ && python -m pip uninstall -y pip \
+ && groupadd --system --gid 10001 mcp && useradd --system --uid 10001 --gid mcp --no-create-home mcp
 WORKDIR /app
 COPY --from=construcao /app/.venv /app/.venv
 COPY --from=construcao /app/src /app/src

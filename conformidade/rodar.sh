@@ -28,7 +28,7 @@ falhas="conformidade/falhas-esperadas.yml"
 url="http://127.0.0.1:${porta}/mcp"
 
 rm -rf "$resultados"
-mkdir -p "$resultados"
+mkdir -p "$resultados/cenarios"
 
 porta_aberta() {
   (exec 3<>"/dev/tcp/127.0.0.1/${porta}") 2>/dev/null
