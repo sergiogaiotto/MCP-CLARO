@@ -1,0 +1,12 @@
+.git
+.venv
+.segredos
+**/__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.hypothesis
+tests
+exemplos
+docs
+node_modules

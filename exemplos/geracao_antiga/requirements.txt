@@ -1,0 +1,2 @@
+# Kit 1.x, so para este exemplo da geracao antiga.
+mcp==1.30.0

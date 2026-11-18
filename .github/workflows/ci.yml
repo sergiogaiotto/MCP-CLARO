@@ -1,0 +1,156 @@
+# CI do MCP-CLARO: testes, varreduras e lista de componentes a cada mudanca.
+# Acoes fixadas por commit; imagens por digest; dependencias pelo uv.lock.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"  # rodada diaria: varredura e testes longos
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.13.9"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  qualidade:
+    name: estilo, tipos e unidade
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: ruff (estilo e regras S de seguranca)
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: mypy
+        run: uv run mypy
+      - name: bandit
+        run: uv run bandit -q -r src -c pyproject.toml
+      - name: testes de unidade
+        run: uv run pytest -m "not integracao and not lento" -q
+
+  integracao:
+    name: integracao com Docker
+    runs-on: ubuntu-24.04
+    needs: qualidade
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: testes de integracao (PostgreSQL 18.7 real)
+        run: uv run pytest -m "integracao and not lento" -q
+      - name: testes longos (so na rodada diaria)
+        if: github.event_name == 'schedule'
+        run: uv run pytest -m lento -q
+
+  conformidade:
+    name: suite oficial de conformidade (2026-07-28)
+    runs-on: ubuntu-24.04
+    needs: qualidade
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "20"
+      - run: uv sync --frozen
+      - name: rodar a suite fixada contra o sistema de exemplo e o gateway
+        run: bash conformidade/rodar.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: conformidade
+          path: conformidade/resultados/
+          if-no-files-found: ignore
+
+  seguranca:
+    name: dependencias, segredos, imagens e componentes
+    runs-on: ubuntu-24.04
+    needs: qualidade
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: uv sync --frozen
+      - name: pip-audit (falhas conhecidas nas dependencias do produto)
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt > /tmp/requisitos.txt
+          uv run pip-audit --strict --disable-pip -r /tmp/requisitos.txt
+      - name: varredura de segredos (gitleaks)
+        run: >
+          docker run --rm -v "$PWD:/repo" -w /repo
+          zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git --redact --no-banner -v .
+      - name: construir as imagens
+        run: |
+          docker build -t mcp-claro:ci -f docker/Dockerfile .
+          docker build -t mcp-claro-portao:ci docker/caddy
+          docker build -t mcp-claro-postgres:ci docker/postgres
+      - name: a imagem recusa versao errada na partida
+        run: |
+          docker run --rm mcp-claro:ci conferir
+          if docker run --rm -e MCP_ACCEPTED_VERSIONS=2025-11-25 mcp-claro:ci conferir; then
+            echo "a partida deveria recusar"; exit 1
+          fi
+      - name: lista de componentes (Syft)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: mcp-claro:ci
+          format: spdx-json
+          output-file: sbom-mcp-claro.spdx.json
+          upload-artifact: true
+      - name: varredura da imagem (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: mcp-claro:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+  ambiente:
+    name: ambiente de teste sobe numa maquina limpa
+    runs-on: ubuntu-24.04
+    needs: qualidade
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: gerar segredos de teste e subir o Compose
+        run: |
+          bash scripts/gerar-segredos-dev.sh
+          docker compose -f docker/compose.yml up -d --build
+      - name: saude pelo portao proprio, com mTLS ate a entrada
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsk --resolve mcp-claro.localhost:443:127.0.0.1 https://mcp-claro.localhost/saude; then exit 0; fi
+            sleep 5
+          done
+          echo "o gateway nao respondeu pelo portao"; exit 1
+      - name: logs em caso de falha
+        if: failure()
+        run: docker compose -f docker/compose.yml logs --no-color | tail -200
+      - name: derrubar
+        if: always()
+        run: docker compose -f docker/compose.yml down -v
