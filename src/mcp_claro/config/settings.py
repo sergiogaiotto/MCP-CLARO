@@ -153,6 +153,8 @@ class Parametros(BaseSettings):
     INTERNAL_CLIENT_CA_FILE: str | None = None
     INTERNAL_CLIENT_CERT_FILE: str | None = None
     INTERNAL_CLIENT_KEY_FILE: str | None = None
+    INTERNAL_HEALTH_CERT_FILE: str | None = None
+    INTERNAL_HEALTH_KEY_FILE: str | None = None
     DISPATCHER_INTERNAL_URL: str = "https://despachante:9443"
     GATEWAY_WORKERS: int = Field(default=2, ge=1, le=64)
 
@@ -162,7 +164,7 @@ class Parametros(BaseSettings):
     DB_SSLMODE: SslBanco = SslBanco.VERIFY_FULL
     DB_SSLROOTCERT: str | None = None
     IDP_KIND: TipoProvedor = TipoProvedor.KEYCLOAK
-    IDP_ISSUER_URL: str = "https://login.mcp-claro.localhost/realms/mcp-claro"
+    IDP_ISSUER_URL: str = "https://mcp-claro.localhost/login/realms/mcp-claro"
     IDP_JWKS_URL: str | None = None
     IDP_JWKS_CACHE_SECONDS: int = Field(default=300, ge=30, le=86400)
     IDP_ALGORITHMS: ListaTexto = Field(default_factory=lambda: ["RS256", "ES256", "PS256", "EdDSA"])

@@ -72,6 +72,10 @@ for papel in entrada despachante rotinas; do
   done
 done
 emitir_cliente ca_clientes_despachante rotinas_cliente
+# Conferencia de saude de cada papel: aceita so pela propria porta.
+emitir_cliente ca_clientes_entrada entrada_saude
+emitir_cliente ca_clientes_despachante despachante_saude
+emitir_cliente ca_clientes_rotinas rotinas_saude
 
 chmod 644 "$DEST"/*  # a pasta fica 700; os conteineres leem como usuarios sem privilegio
 echo "Segredos de desenvolvimento em $DEST/ (fora do Git)."

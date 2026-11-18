@@ -1,0 +1,75 @@
+# MCP-CLARO: provedor de login (Keycloak 26.8.2), fragmento do Compose.
+# Modo de desenvolvimento e teste: start-dev, realm importado de realm-mcp-claro.json,
+# banco PostgreSQL `login` (criado por docker/postgres/iniciar/10-papeis.sh), com TLS verify-full.
+#
+# Usar junto do Compose principal (caminhos relativos a docker/, como no compose.yml):
+#   docker compose -f docker/compose.yml -f docker/login/compose.login.yml up -d
+# ou copiar o servico `login` e o segredo `login_admin` para docker/compose.yml.
+#
+# O emissor dos crachas e o endereco publico atras do Caddy:
+#   https://mcp-claro.localhost/login/realms/mcp-claro
+# A entrada busca a lista JWKS pela rede interna, sem passar pelo portao:
+#   http://login:8080/login/realms/mcp-claro/protocol/openid-connect/certs
+# A importacao so cria o realm se ele ainda nao existe no banco: depois de mudar o JSON,
+# apague o banco `login` (desenvolvimento) ou mude pela administracao do Keycloak.
+# Os clientes so de teste (mcp-claro-teste-cc, outro-servico) ficam desligados aqui.
+services:
+  login:
+    image: keycloak/keycloak:26.8.2@sha256:c68e286cacd87b942ac1939a0a1481461109d6acd3a57dc496969a319a76bbf0
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    # O Keycloak nao le senha de arquivo (_FILE): o envelope le os segredos e chama o kc.sh.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        KC_DB_PASSWORD="$$(< /run/secrets/db_login)"
+        KC_BOOTSTRAP_ADMIN_PASSWORD="$$(< /run/secrets/login_admin)"
+        export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD
+        exec /opt/keycloak/bin/kc.sh "$$@"
+      - kc
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_HOSTNAME: https://mcp-claro.localhost/login
+      KC_HTTP_RELATIVE_PATH: /login
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+      KC_HEALTH_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_DB: postgres
+      KC_DB_URL_HOST: banco
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: login
+      KC_DB_URL_PROPERTIES: "?sslmode=verify-full&sslrootcert=/run/secrets/ca_interna.pem"
+      KC_DB_USERNAME: login
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin-login
+      # Audiencia dos crachas: PUBLIC_BASE_URL + /mcp (MCP_RESOURCE_ID do gateway).
+      MCP_CLARO_RECURSO: https://mcp-claro.localhost/mcp
+      MCP_CLARO_CLIENTES_DE_TESTE: "false"
+    secrets: [db_login, login_admin, ca_interna.pem]
+    volumes:
+      - ./login/realm-mcp-claro.json:/opt/keycloak/data/import/realm-mcp-claro.json:ro
+    depends_on:
+      banco:
+        condition: service_healthy
+    healthcheck:
+      # Porta de gerencia (9000), que nao passa pelo portao. A imagem nao tem curl.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          read -r linha <&3 && [[ "$$linha" == *" 200 "* ]]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    logging:
+      driver: local
+    networks: [borda, interna]
+
+secrets:
+  login_admin: { file: ../.segredos/login_admin }
