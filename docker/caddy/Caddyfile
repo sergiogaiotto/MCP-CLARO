@@ -1,0 +1,42 @@
+# Portao proprio do MCP-CLARO (EDGE_MODE=proprio).
+# Atende a internet com TLS, aplica o limite grosso por endereco de origem e chama
+# a entrada com mTLS. Nao repete pedidos e nao decide nada por cabecalhos MCP.
+{
+	order rate_limit before reverse_proxy
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+{$PUBLIC_HOST:mcp-claro.localhost} {
+	encode zstd gzip
+
+	rate_limit {
+		zone por_origem {
+			key {remote_host}
+			events {$EDGE_RATE_PER_IP_PER_MINUTE:120}
+			window 1m
+		}
+	}
+
+	request_body {
+		max_size 4MB
+	}
+
+	reverse_proxy https://entrada:{$GATEWAY_INTERNAL_PORT:8443} {
+		transport http {
+			tls_client_auth /run/secrets/portao_cert.pem /run/secrets/portao_key.pem
+			tls_trust_pool file /run/secrets/ca_interna.pem
+			tls_server_name entrada
+		}
+		# Sem novas tentativas: o portao nunca repete um pedido.
+		lb_retries 0
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+}

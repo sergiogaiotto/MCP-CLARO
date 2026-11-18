@@ -1,0 +1,100 @@
+[project]
+name = "mcp-claro"
+version = "0.1.0"
+description = "MCP-CLARO: gateway MCP independente, ponto comum para aplicativos de IA usarem ferramentas de sistemas, so na versao 2026-07-28 do MCP."
+readme = "README.md"
+requires-python = ">=3.14"
+license = { text = "Proprietario - uso interno" }
+authors = [{ name = "Equipe MCP-CLARO" }]
+classifiers = ["Private :: Do Not Upload"]
+dependencies = [
+  "mcp==2.3.0",
+  "mcp-types==2.3.0",
+  "starlette==1.10.0",
+  "uvicorn==0.54.0",
+  "httpx2==2.16.2",
+  "pydantic==2.14.3",
+  "pydantic-settings==2.16.3",
+  "sqlalchemy[asyncio]==2.1.9",
+  "alembic==1.20.1",
+  "asyncpg==0.32.0",
+  "pyjwt[crypto]==2.15.1",
+  "cryptography==50.0.2",
+  "jsonschema==4.26.0",
+  "jinja2==3.1.6",
+  "structlog==26.1.0",
+  "aiosmtplib==5.1.3",
+  "standardwebhooks==1.3.0",
+  "webauthn==3.0.1",
+  "anyio==4.16.0",
+]
+
+[project.optional-dependencies]
+rastros = ["opentelemetry-sdk==1.45.2", "opentelemetry-exporter-otlp-proto-http==1.45.2"]
+
+[project.scripts]
+mcp-claro = "mcp_claro.__main__:main"
+
+[dependency-groups]
+dev = [
+  "ruff==0.17.5",
+  "mypy==2.4.1",
+  "pytest==9.2.0",
+  "hypothesis==6.170.15",
+  "testcontainers==4.15.0",
+  "respx==0.23.1",
+  "bandit==1.9.4",
+  "pip-audit==2.10.1",
+]
+
+[build-system]
+requires = ["hatchling==1.33.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_claro"]
+
+[tool.uv]
+# Exemplos e testes usam FastMCP e o kit 1.x em ambientes separados (exemplos/),
+# nunca na imagem do produto.
+package = true
+
+[tool.ruff]
+line-length = 110
+target-version = "py314"
+src = ["src", "tests", "exemplos"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "BLE", "RUF", "SIM", "PT", "TRY"]
+ignore = [
+  "TRY003",  # mensagens legiveis em portugues ficam na propria excecao
+  "RUF001", "RUF002", "RUF003",  # acentos em textos e comentarios em portugues
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106", "S311", "TRY", "BLE001"]
+"exemplos/**" = ["S105", "S106", "S104"]
+"migrations/**" = ["E501"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src/mcp_claro"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["standardwebhooks.*", "asyncpg.*", "webauthn.*", "aiosmtplib.*", "jsonschema.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+  "integracao: precisa de Docker (PostgreSQL, OpenBao, Caddy)",
+  "lento: roda so na rodada diaria",
+]
+filterwarnings = ["error::DeprecationWarning:mcp_claro.*"]
+
+[tool.bandit]
+exclude_dirs = ["tests", "exemplos"]

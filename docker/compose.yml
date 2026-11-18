@@ -1,0 +1,164 @@
+# MCP-CLARO: ambiente de desenvolvimento e teste.
+# Antes de subir: scripts/gerar-segredos-dev.sh (segredos SO de teste, em .segredos/).
+#   docker compose -f docker/compose.yml up --build
+# Redes: borda (sai para a internet), interna (sem saida), saida (so quem chama para fora).
+name: mcp-claro
+
+x-gateway: &gateway
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: mcp-claro:dev
+  read_only: true
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  logging:
+    driver: local
+  environment: &ambiente
+    APP_ENV: teste
+    PUBLIC_BASE_URL: https://mcp-claro.localhost
+    DATABASE_URL: postgresql://mcp_claro_entrada@banco:5432/mcp_claro
+    DB_SSLMODE: verify-full
+    DB_SSLROOTCERT: /run/secrets/ca_interna.pem
+    INTERNAL_CA_FILE: /run/secrets/ca_interna.pem
+    IDP_KIND: keycloak
+    IDP_ISSUER_URL: https://mcp-claro.localhost/login/realms/mcp-claro
+    VAULT_ADDR: https://cofre:8200
+    VAULT_SEAL_MODE: static
+  depends_on:
+    migrar:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD", "python", "-m", "mcp_claro.saude"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+  networks: [interna]
+
+services:
+  banco:
+    build: ./postgres
+    image: mcp-claro-postgres:dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcp_claro_migracao
+      POSTGRES_DB: mcp_claro
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_migracao
+    secrets:
+      [db_migracao, db_entrada, db_despachante, db_rotinas, db_grafana_leitor, db_cofre, db_login, db_grafana,
+       banco_cert.pem, banco_key.pem, ca_interna.pem]
+    volumes: ["banco:/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp_claro_migracao -d mcp_claro -h 127.0.0.1"]
+      interval: 5s
+      retries: 20
+    logging:
+      driver: local
+    networks: [interna]
+
+  migrar:
+    <<: *gateway
+    restart: "no"
+    command: ["migrar"]
+    healthcheck:
+      disable: true
+    environment:
+      <<: *ambiente
+      DATABASE_URL: postgresql://mcp_claro_migracao@banco:5432/mcp_claro
+      DATABASE_PASSWORD_FILE: /run/secrets/db_migracao
+    secrets: [db_migracao, ca_interna.pem]
+    depends_on:
+      banco:
+        condition: service_healthy
+
+  entrada:
+    <<: *gateway
+    command: ["entrada"]
+    environment:
+      <<: *ambiente
+      DATABASE_PASSWORD_FILE: /run/secrets/db_entrada
+      INTERNAL_CERT_FILE: /run/secrets/entrada_cert.pem
+      INTERNAL_KEY_FILE: /run/secrets/entrada_key.pem
+    secrets: [db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem]
+
+  despachante:
+    <<: *gateway
+    command: ["despachante"]
+    environment:
+      <<: *ambiente
+      DATABASE_URL: postgresql://mcp_claro_despachante@banco:5432/mcp_claro
+      DATABASE_PASSWORD_FILE: /run/secrets/db_despachante
+      INTERNAL_CERT_FILE: /run/secrets/despachante_cert.pem
+      INTERNAL_KEY_FILE: /run/secrets/despachante_key.pem
+    secrets: [db_despachante, ca_interna.pem, despachante_cert.pem, despachante_key.pem]
+    networks: [interna, saida]
+
+  rotinas:
+    <<: *gateway
+    command: ["rotinas"]
+    environment:
+      <<: *ambiente
+      DATABASE_URL: postgresql://mcp_claro_rotinas@banco:5432/mcp_claro
+      DATABASE_PASSWORD_FILE: /run/secrets/db_rotinas
+      INTERNAL_CERT_FILE: /run/secrets/rotinas_cert.pem
+      INTERNAL_KEY_FILE: /run/secrets/rotinas_key.pem
+      SMTP_HOST: correio
+      SMTP_PORT: "1025"
+      SMTP_FROM: mcp-claro@mcp-claro.localhost
+      SMTP_STARTTLS: desligado
+    secrets: [db_rotinas, ca_interna.pem, rotinas_cert.pem, rotinas_key.pem]
+    networks: [interna, saida]
+
+  portao:
+    build: ./caddy
+    image: mcp-claro-portao:dev
+    restart: unless-stopped
+    environment:
+      PUBLIC_HOST: mcp-claro.localhost
+      GATEWAY_INTERNAL_PORT: "8443"
+      EDGE_RATE_PER_IP_PER_MINUTE: "120"
+    secrets: [portao_cert.pem, portao_key.pem, ca_interna.pem]
+    ports: ["443:443"]
+    volumes: ["portao_dados:/data"]
+    depends_on: [entrada]
+    logging:
+      driver: local
+    networks: [borda, interna]
+
+  correio:
+    # Mailpit: recebe os avisos nos testes. So desenvolvimento.
+    image: axllent/mailpit:v1.34.0@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
+    ports: ["127.0.0.1:8025:8025"]
+    networks: [saida]
+
+networks:
+  borda: {}
+  interna:
+    internal: true
+  saida: {}
+
+volumes:
+  banco: {}
+  portao_dados: {}
+
+secrets:
+  db_migracao: { file: ../.segredos/db_migracao }
+  db_entrada: { file: ../.segredos/db_entrada }
+  db_despachante: { file: ../.segredos/db_despachante }
+  db_rotinas: { file: ../.segredos/db_rotinas }
+  db_grafana_leitor: { file: ../.segredos/db_grafana_leitor }
+  db_cofre: { file: ../.segredos/db_cofre }
+  db_login: { file: ../.segredos/db_login }
+  db_grafana: { file: ../.segredos/db_grafana }
+  ca_interna.pem: { file: ../.segredos/ca_interna.pem }
+  banco_cert.pem: { file: ../.segredos/banco_cert.pem }
+  banco_key.pem: { file: ../.segredos/banco_key.pem }
+  portao_cert.pem: { file: ../.segredos/portao_cert.pem }
+  portao_key.pem: { file: ../.segredos/portao_key.pem }
+  entrada_cert.pem: { file: ../.segredos/entrada_cert.pem }
+  entrada_key.pem: { file: ../.segredos/entrada_key.pem }
+  despachante_cert.pem: { file: ../.segredos/despachante_cert.pem }
+  despachante_key.pem: { file: ../.segredos/despachante_key.pem }
+  rotinas_cert.pem: { file: ../.segredos/rotinas_cert.pem }
+  rotinas_key.pem: { file: ../.segredos/rotinas_key.pem }

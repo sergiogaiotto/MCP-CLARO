@@ -1,0 +1,329 @@
+"""Parametros de implantacao do MCP-CLARO.
+
+Vem do ambiente e de segredos do Docker (variaveis terminadas em ``_FILE``).
+Mudam com um reinicio. Valores de politica ficam na tabela ``politica`` do
+PostgreSQL (ver ``mcp_claro.config.politica``).
+
+A partida recusa combinacoes invalidas: o gateway nao sobe com versao do MCP
+diferente de 2026-07-28, com ``EDGE_MODE=apigee`` (reservado, decisao 7) nem,
+em piloto ou producao, com banco sem ``verify-full``.
+"""
+
+from __future__ import annotations
+
+import enum
+from functools import cached_property
+from pathlib import Path
+from typing import Annotated, Any
+from urllib.parse import urlsplit
+
+from pydantic import BeforeValidator, Field, SecretStr, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from mcp_claro.versao import VERSAO_MCP
+
+_VERDADE = {"ligado", "verdadeiro", "sim", "true", "1", "on", "yes"}
+_FALSO = {"desligado", "falso", "nao", "não", "false", "0", "off", "no"}
+
+
+def _liga_desliga(valor: Any) -> Any:
+    """Aceita ``ligado``/``desligado`` e ``verdadeiro``/``falso``, como no plano."""
+    if isinstance(valor, str):
+        v = valor.strip().lower()
+        if v in _VERDADE:
+            return True
+        if v in _FALSO:
+            return False
+        raise ValueError(f"valor '{valor}' nao e liga/desliga; use ligado ou desligado")
+    return valor
+
+
+Chave = Annotated[bool, BeforeValidator(_liga_desliga)]
+
+
+def _lista(valor: Any) -> Any:
+    if isinstance(valor, str):
+        return [p.strip() for p in valor.split(",") if p.strip()]
+    return valor
+
+
+ListaTexto = Annotated[list[str], NoDecode, BeforeValidator(_lista)]
+
+
+class Ambiente(enum.StrEnum):
+    DESENVOLVIMENTO = "desenvolvimento"
+    TESTE = "teste"
+    PILOTO = "piloto"
+    PRODUCAO = "producao"
+
+
+class ModoPortao(enum.StrEnum):
+    PROPRIO = "proprio"
+    APIGEE = "apigee"  # reservado: a partida recusa (decisao 7)
+
+
+class OrigemPortao(enum.StrEnum):
+    INTERNET = "internet"
+    APIGEE_MTLS = "apigee_mtls"
+
+
+class ModoResposta(enum.StrEnum):
+    INTEIRA = "inteira"
+    FLUXO = "fluxo"  # so depois de testado nos portoes; a partida recusa por ora
+
+
+class SslBanco(enum.StrEnum):
+    DISABLE = "disable"
+    REQUIRE = "require"
+    VERIFY_CA = "verify-ca"
+    VERIFY_FULL = "verify-full"
+
+
+class TipoProvedor(enum.StrEnum):
+    KEYCLOAK = "keycloak"
+    LOGTO = "logto"
+    OIDC = "oidc"  # provedor generico com JWKS; usado nos testes
+
+
+class ModoCofre(enum.StrEnum):
+    STATIC = "static"
+    SHAMIR = "shamir"
+    TRANSIT = "transit"
+    KMS = "kms"
+
+
+class PropagacaoRastro(enum.StrEnum):
+    NUNCA = "nunca"
+    SISTEMAS_PROPRIOS = "sistemas_proprios"
+
+
+class ExportaRastros(enum.StrEnum):
+    DESLIGADO = "desligado"
+    OTLP = "otlp"
+
+
+class ConfiguracaoInvalida(Exception):
+    """A partida recusa erro: uma ou mais combinacoes de parametros sao invalidas."""
+
+    def __init__(self, problemas: list[str]) -> None:
+        self.problemas = problemas
+        texto = "\n".join(f"- {p}" for p in problemas)
+        super().__init__(f"Configuracao recusada na partida:\n{texto}")
+
+
+def _ler_segredo(caminho: str | None) -> SecretStr | None:
+    if not caminho:
+        return None
+    conteudo = Path(caminho).read_text(encoding="utf-8").strip()
+    return SecretStr(conteudo)
+
+
+class Parametros(BaseSettings):
+    """Todos os parametros de implantacao, com os valores iniciais do plano."""
+
+    model_config = SettingsConfigDict(
+        env_file=None,
+        case_sensitive=True,
+        extra="ignore",
+        frozen=True,
+    )
+
+    # Ambiente
+    APP_ENV: Ambiente = Ambiente.DESENVOLVIMENTO
+
+    # Portao, endereco e versao
+    EDGE_MODE: ModoPortao = ModoPortao.PROPRIO
+    EDGE_ORIGIN_AUTH: OrigemPortao = OrigemPortao.INTERNET
+    EDGE_TOKEN_PRECHECK: Chave = False
+    PUBLIC_BASE_URL: str = "https://mcp-claro.localhost"
+    MCP_RESOURCE_ID: str | None = None
+    MCP_ACCEPTED_VERSIONS: ListaTexto = Field(default_factory=lambda: [VERSAO_MCP])
+    MCP_UPSTREAM_VERSION: str = VERSAO_MCP
+    MCP_RESPONSE_MODE: ModoResposta = ModoResposta.INTEIRA
+    RESPONSE_MAX_WAIT_SECONDS: int = Field(default=20, ge=1, le=120)
+    ALLOWED_HOSTS: ListaTexto = Field(default_factory=list)
+    FORWARDED_ALLOW_IPS: ListaTexto = Field(default_factory=lambda: ["127.0.0.1"])
+    GATEWAY_INTERNAL_PORT: int = 8443
+    DISPATCHER_INTERNAL_PORT: int = 9443
+    ROUTINES_INTERNAL_PORT: int = 9444
+    INTERNAL_CA_FILE: str | None = None
+    INTERNAL_CERT_FILE: str | None = None
+    INTERNAL_KEY_FILE: str | None = None
+    GATEWAY_WORKERS: int = Field(default=2, ge=1, le=64)
+
+    # Banco, login e cofre
+    DATABASE_URL: str = "postgresql://mcp_claro_entrada@localhost:5432/mcp_claro"
+    DATABASE_PASSWORD_FILE: str | None = None
+    DB_SSLMODE: SslBanco = SslBanco.VERIFY_FULL
+    DB_SSLROOTCERT: str | None = None
+    IDP_KIND: TipoProvedor = TipoProvedor.KEYCLOAK
+    IDP_ISSUER_URL: str = "https://login.mcp-claro.localhost/realms/mcp-claro"
+    IDP_JWKS_URL: str | None = None
+    IDP_JWKS_CACHE_SECONDS: int = Field(default=300, ge=30, le=86400)
+    IDP_ALGORITHMS: ListaTexto = Field(default_factory=lambda: ["RS256", "ES256", "PS256", "EdDSA"])
+    VAULT_ADDR: str = "https://cofre:8200"
+    VAULT_SEAL_MODE: ModoCofre = ModoCofre.STATIC
+    VAULT_AUTH_METHOD: str = "approle"
+    VAULT_ROLE_ID_FILE: str | None = None
+    VAULT_SECRET_ID_FILE: str | None = None
+    VAULT_TRANSIT_MOUNT: str = "transit"
+    REQUEST_STATE_KEY_ROTATION_DAYS: int = Field(default=30, ge=1, le=365)
+
+    # Chaves de liga e desliga
+    FEATURE_PHASE1_READ: Chave = False
+    FEATURE_PHASE2_ACT: Chave = False
+    FEATURE_PHASE3_THIRD_PARTY: Chave = False
+    FEATURE_PHASE4_BADGES: Chave = False
+    FEATURE_TASKS: Chave = False
+    FEATURE_PASSKEY: Chave = True
+    FEATURE_TOOL_SEARCH: Chave = False
+    PATROL_AUTOCLOSE_ENABLED: Chave = True
+    AUTH_ENTERPRISE_ASSERTION_ENABLED: Chave = False
+
+    # Programas que rodam sozinhos (decisao 9, camada 1)
+    PROGRAM_AUTH_METHODS: ListaTexto = Field(default_factory=lambda: ["private_key_jwt"])
+    PROGRAM_TOKEN_TTL_SECONDS: int = Field(default=300, ge=60, le=3600)
+    PROGRAM_KEY_MAX_AGE_DAYS: int = Field(default=90, ge=1, le=365)
+    PROGRAM_KEY_EXPIRY_WARN_DAYS: int = Field(default=14, ge=1, le=90)
+    PROGRAM_ACTIONS_ENABLED: Chave = False
+    PROGRAM_PENDING_TIMEOUT_HOURS: int = Field(default=24, ge=1, le=168)
+    PROGRAM_OWNER_RECERT_DAYS: int = Field(default=90, ge=7, le=365)
+    PROGRAM_IDLE_PAUSE_DAYS: int = Field(default=30, ge=1, le=365)
+    PROGRAM_MAX_REQUESTS_PER_MINUTE: int = Field(default=30, ge=1, le=10000)
+
+    # Avisos, ronda, vigia e backup
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_FROM: str | None = None
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD_FILE: str | None = None
+    SMTP_STARTTLS: Chave = True
+    WEBHOOK_SECRET_FILE: str | None = None
+    NOTIFY_PENDING_AFTER_MINUTES: int = Field(default=5, ge=1, le=1440)
+    NOTIFY_RETRY_MAX: int = Field(default=5, ge=0, le=50)
+    PATROL_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=86400)
+    PATROL_FAILS_TO_CLOSE: int = Field(default=2, ge=1, le=10)
+    CLOSING_INTERVAL_HOURS: int = Field(default=6, ge=1, le=24)
+    WATCH_PUBLIC_URL: str | None = None
+    WATCH_PROBE_INTERVAL_SECONDS: int = Field(default=600, ge=30, le=86400)
+    WATCH_SILENCE_ALARM_SECONDS: int = Field(default=900, ge=60, le=86400)
+    BACKUP_RESTORE_DRILL_DAYS: int = Field(default=30, ge=1, le=365)
+
+    # Limites de pedidos e medicoes
+    EDGE_RATE_PER_IP_PER_MINUTE: int = Field(default=120, ge=1)
+    RATE_PER_APP_PER_MINUTE: int = Field(default=60, ge=1)
+    RATE_PER_PERSON_PER_MINUTE: int = Field(default=30, ge=1)
+    MAX_REQUEST_BYTES: int = Field(default=4 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    METRICS_FLUSH_SECONDS: int = Field(default=30, ge=5, le=3600)
+    METRICS_MINUTE_RETENTION_DAYS: int = Field(default=31, ge=1)
+    METRICS_HOUR_RETENTION_MONTHS: int = Field(default=13, ge=1)
+    METRICS_DAY_RETENTION_YEARS: int = Field(default=5, ge=1)
+    OBS_TRACE_ACCEPT_INBOUND: Chave = True
+    OBS_TRACE_PROPAGATE_DOWNSTREAM: PropagacaoRastro = PropagacaoRastro.SISTEMAS_PROPRIOS
+    OBS_TRACES_EXPORT: ExportaRastros = ExportaRastros.DESLIGADO
+    OBS_EXPORT_CONTENT: Chave = False
+    LOG_LEVEL: str = "INFO"
+
+    @field_validator("PUBLIC_BASE_URL", "IDP_ISSUER_URL")
+    @classmethod
+    def _sem_barra_final(cls, valor: str) -> str:
+        return valor.rstrip("/")
+
+    @model_validator(mode="after")
+    def _derivados(self) -> Parametros:
+        if self.MCP_RESOURCE_ID is None:
+            object.__setattr__(self, "MCP_RESOURCE_ID", f"{self.PUBLIC_BASE_URL}/mcp")
+        if not self.ALLOWED_HOSTS:
+            host = urlsplit(self.PUBLIC_BASE_URL).hostname or ""
+            object.__setattr__(self, "ALLOWED_HOSTS", [host] if host else [])
+        if self.WATCH_PUBLIC_URL is None:
+            object.__setattr__(self, "WATCH_PUBLIC_URL", self.PUBLIC_BASE_URL)
+        return self
+
+    @property
+    def recurso(self) -> str:
+        """Identificador do recurso que o crachá precisa citar como audiencia."""
+        if self.MCP_RESOURCE_ID is None:  # preenchido em _derivados; nunca deveria faltar
+            raise ConfiguracaoInvalida(["MCP_RESOURCE_ID ficou vazio."])
+        return self.MCP_RESOURCE_ID
+
+    @property
+    def em_producao(self) -> bool:
+        return self.APP_ENV in (Ambiente.PILOTO, Ambiente.PRODUCAO)
+
+    @cached_property
+    def senha_banco(self) -> SecretStr | None:
+        return _ler_segredo(self.DATABASE_PASSWORD_FILE)
+
+    @cached_property
+    def senha_smtp(self) -> SecretStr | None:
+        return _ler_segredo(self.SMTP_PASSWORD_FILE)
+
+    @cached_property
+    def segredo_webhook(self) -> SecretStr | None:
+        return _ler_segredo(self.WEBHOOK_SECRET_FILE)
+
+    def problemas(self) -> list[str]:
+        """Lista as combinacoes que a partida recusa. Vazia quando tudo esta certo."""
+        erros: list[str] = []
+        if self.MCP_ACCEPTED_VERSIONS != [VERSAO_MCP]:
+            erros.append(
+                f"MCP_ACCEPTED_VERSIONS deve ser exatamente {VERSAO_MCP} (decisao 8). "
+                "Abrir outra versao pede mudanca de codigo revisada."
+            )
+        if self.MCP_UPSTREAM_VERSION != VERSAO_MCP:
+            erros.append(f"MCP_UPSTREAM_VERSION deve ser {VERSAO_MCP} (decisao 8).")
+        if self.EDGE_MODE is ModoPortao.APIGEE:
+            erros.append("EDGE_MODE=apigee esta reservado e ainda nao e aceito (decisao 7).")
+        if self.EDGE_ORIGIN_AUTH is OrigemPortao.APIGEE_MTLS and self.EDGE_MODE is not ModoPortao.APIGEE:
+            erros.append("EDGE_ORIGIN_AUTH=apigee_mtls so vale com EDGE_MODE=apigee.")
+        if self.EDGE_TOKEN_PRECHECK:
+            erros.append("EDGE_TOKEN_PRECHECK so pode ligar com o Apigee, depois de testado.")
+        if self.MCP_RESPONSE_MODE is ModoResposta.FLUXO:
+            erros.append("MCP_RESPONSE_MODE=fluxo ainda nao foi testado nos portoes; use inteira.")
+        if not self.PUBLIC_BASE_URL.startswith("https://"):
+            erros.append("PUBLIC_BASE_URL deve comecar com https://.")
+        if self.em_producao:
+            if self.DB_SSLMODE is not SslBanco.VERIFY_FULL:
+                erros.append("Em piloto ou producao, DB_SSLMODE deve ser verify-full.")
+            if self.VAULT_SEAL_MODE is ModoCofre.KMS:
+                erros.append("VAULT_SEAL_MODE=kms usa servico comercial; fora da regra do codigo aberto.")
+            if not self.INTERNAL_CA_FILE:
+                erros.append("Em piloto ou producao, INTERNAL_CA_FILE e obrigatorio (mTLS interno).")
+            if "localhost" in self.PUBLIC_BASE_URL:
+                erros.append("Em piloto ou producao, PUBLIC_BASE_URL nao pode ser localhost.")
+        if self.FEATURE_TASKS:
+            erros.append("FEATURE_TASKS so liga com implementacao propria sobre PostgreSQL (decisao 13).")
+        if self.AUTH_ENTERPRISE_ASSERTION_ENABLED:
+            erros.append("AUTH_ENTERPRISE_ASSERTION_ENABLED so liga com provedor da organizacao.")
+        if self.FEATURE_PHASE2_ACT and not self.FEATURE_PHASE1_READ:
+            erros.append("FEATURE_PHASE2_ACT exige FEATURE_PHASE1_READ.")
+        if self.FEATURE_PHASE3_THIRD_PARTY and not self.FEATURE_PHASE2_ACT:
+            erros.append("FEATURE_PHASE3_THIRD_PARTY exige FEATURE_PHASE2_ACT (decisao 10).")
+        if self.FEATURE_PHASE4_BADGES and not self.FEATURE_PHASE3_THIRD_PARTY:
+            erros.append("FEATURE_PHASE4_BADGES exige FEATURE_PHASE3_THIRD_PARTY (decisao 10).")
+        if self.PROGRAM_ACTIONS_ENABLED and not self.FEATURE_PHASE2_ACT:
+            erros.append("PROGRAM_ACTIONS_ENABLED exige FEATURE_PHASE2_ACT (decisao 9).")
+        if self.OBS_EXPORT_CONTENT:
+            erros.append("OBS_EXPORT_CONTENT nao muda no comeco: rastros saem sem conteudo.")
+        metodos_ok = {"private_key_jwt", "client_secret"}
+        if not set(self.PROGRAM_AUTH_METHODS) <= metodos_ok:
+            erros.append("PROGRAM_AUTH_METHODS aceita so private_key_jwt e client_secret.")
+        if self.PROGRAM_KEY_EXPIRY_WARN_DAYS >= self.PROGRAM_KEY_MAX_AGE_DAYS:
+            erros.append("PROGRAM_KEY_EXPIRY_WARN_DAYS deve ser menor que PROGRAM_KEY_MAX_AGE_DAYS.")
+        portas = [self.GATEWAY_INTERNAL_PORT, self.DISPATCHER_INTERNAL_PORT, self.ROUTINES_INTERNAL_PORT]
+        if len(set(portas)) != len(portas):
+            erros.append("As portas internas da entrada, do despachante e das rotinas devem ser diferentes.")
+        return erros
+
+    def conferir(self) -> Parametros:
+        """Levanta ``ConfiguracaoInvalida`` se houver qualquer problema."""
+        erros = self.problemas()
+        if erros:
+            raise ConfiguracaoInvalida(erros)
+        return self
+
+
+def carregar(**valores: Any) -> Parametros:
+    """Le os parametros do ambiente (ou dos valores dados) e confere tudo."""
+    return Parametros(**valores).conferir()
