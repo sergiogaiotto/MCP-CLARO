@@ -284,6 +284,10 @@ async def conferir_continuidade(
             dados={"desde": desde.isoformat(), "ate": ate.isoformat(), "fechamentos_perdidos": perdidos},
         )
         pausados = await _pausar_aplicativos(c, papel, poupados)
+        # Fase 2: o que estava "enviando" fica nao confirmado; o que esperava na fila para por restauracao.
+        from mcp_claro.saida.fila import parar_por_restauracao
+
+        await parar_por_restauracao(c, papel=papel)
         linha_id = await _gravar(c, atual, fechamento_banco, ultimo_fechamento_no_vigia, "nao_confere", motivos)
     log.warning("continuidade_nao_confere", motivos=list(motivos), aplicativos_pausados=len(pausados))
     return Resultado(

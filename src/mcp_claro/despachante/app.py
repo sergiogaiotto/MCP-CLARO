@@ -6,10 +6,14 @@ Rotas internas (nunca expostas ao portao):
 - ``POST /interno/sondar``: sondagem de versao no cadastro de um sistema;
 - ``POST /interno/declaracoes``: le o que o sistema declara (revisao e mudou-parou);
 - ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN).
+
+Na partida, depois da conferencia de continuidade, sobe a porta unica de saida (``saida.despachante``):
+a fila de acoes e enviada por um despachante so, mesmo com varias copias do papel no ar.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
@@ -29,6 +33,7 @@ from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.despachante.servico import DeclaracoesIndisponiveis, Despachante, LeituraRecusada, PedidoLeitura
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
+from mcp_claro.saida.despachante import PortaDeSaida
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
 
@@ -86,6 +91,12 @@ async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) 
     log.info("continuidade", desfecho=str(getattr(resultado, "desfecho", resultado)))
 
 
+async def _parar_tarefa(tarefa: asyncio.Task[None]) -> None:
+    tarefa.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tarefa
+
+
 def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | None = None) -> Starlette:
     """Sem ``cifra`` dada, o papel entra no cofre (OpenBao, AppRole do despachante) na partida."""
     p.conferir()
@@ -94,6 +105,14 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         do_cofre = _CifraDoCofre()
         cifra = do_cofre
     despachante = Despachante(engine, cifra, prazo_leitura=float(p.RESPONSE_MAX_WAIT_SECONDS))
+    porta = PortaDeSaida(
+        engine,
+        cifra,
+        prazo_envio=float(p.RESPONSE_MAX_WAIT_SECONDS),
+        varredura=float(p.OUTBOX_SWEEP_SECONDS),
+        acoes_de_programas=p.PROGRAM_ACTIONS_ENABLED,
+        limite_exige_passkey=p.FEATURE_PASSKEY,
+    )
 
     async def ler(pedido: Request) -> JSONResponse:
         try:
@@ -174,6 +193,10 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
                 do_cofre.alvo = cofre.cifra()
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
             await _conferir_continuidade_na_partida(p, engine)
+            # Porta unica de saida (Fase 2): so depois da conferencia de continuidade, que para a fila se o
+            # banco voltou de um backup. Varias copias do papel podem subir; so uma envia por vez.
+            tarefa = asyncio.create_task(porta.rodar(), name="porta-de-saida")
+            pilha.push_async_callback(_parar_tarefa, tarefa)
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 

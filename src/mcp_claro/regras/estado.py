@@ -120,8 +120,15 @@ async def mudar_entrada(c: AsyncConnection, nivel: str, quem: str, motivo: str, 
 
 
 async def mudar_saida(c: AsyncConnection, *, aberta: bool, quem: str, motivo: str, papel: str = "despachante") -> None:
-    """Abre ou fecha a porta de saida e registra no extrato."""
+    """Abre ou fecha a porta de saida e registra no extrato.
+
+    Fechar toma a trava exclusiva de ``tudo``: um envio em andamento termina de ser marcado antes, e
+    nenhum outro comeca depois.
+    """
     autor_de(quem)
+    from mcp_claro.saida import travas
+
+    await travas.exclusiva(c, [travas.TUDO])
     await c.execute(
         text("UPDATE estado_saida SET aberta = :a, motivo = :m, mudou_em = now(), mudou_por = :q WHERE id = 1"),
         {"a": aberta, "m": motivo[:500], "q": quem},

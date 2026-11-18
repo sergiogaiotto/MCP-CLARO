@@ -43,6 +43,46 @@ FRASES: Final[dict[str, Frase]] = {
             "Resultado nao confirmado para o protocolo {protocolo}; nada sera reenviado.",
         ),
         Frase("acao_cancelada", "Acao do protocolo {protocolo} cancelada antes de sair."),
+        # Fase 2: porta unica de saida, fichas, limites e "estamos confirmando".
+        Frase(
+            "acao_repetida",
+            "Pedido igual ao do protocolo {protocolo}: devolvida a operacao original, nada novo saiu.",
+        ),
+        Frase("acao_recusada", "Acao em {ferramenta} recusada antes de virar protocolo: {motivo}."),
+        Frase("ficha_confirmada", "Ficha do protocolo {protocolo} confirmada pela pessoa ({como})."),
+        Frase("ficha_recusada", "Ficha do protocolo {protocolo} recusada pela pessoa; nada saiu."),
+        Frase("ficha_vencida", "A ficha do protocolo {protocolo} venceu sem resposta; nada saiu."),
+        Frase("ficha_avisada", "A pessoa foi avisada da ficha pendente do protocolo {protocolo}."),
+        Frase("seguir_agora", "A pessoa pediu para a acao do protocolo {protocolo} seguir agora, sem esperar."),
+        Frase("acao_parada", "Acao do protocolo {protocolo} parada antes de sair: {motivo}."),
+        Frase("acao_nao_saiu", "Acao do protocolo {protocolo} nao saiu: {motivo}. Nada aconteceu no sistema."),
+        Frase(
+            "acao_sistema_pediu_dados",
+            "O sistema pediu dados no meio da acao do protocolo {protocolo}; o MCP-CLARO nao repassa nem reenvia.",
+        ),
+        Frase("nao_confirmada_decidida", "A pessoa registrou sobre o protocolo {protocolo}: {decisao}."),
+        Frase(
+            "comprovante_bloqueio",
+            "Comprovante do bloqueio: {paradas} acoes paradas antes de sair; {ja_saidas} ja tinham saido.",
+        ),
+        Frase(
+            "fila_parada_restauracao",
+            "Banco restaurado: {paradas} acoes paradas na fila e {duvida} nao confirmadas; nada sai sem nova"
+            " confirmacao.",
+        ),
+        Frase(
+            "teto_confirmacoes",
+            "O aplicativo {aplicativo} passou do teto de {teto} fichas por hora e foi pausado.",
+        ),
+        Frase(
+            "despachante_assumiu",
+            "Um despachante assumiu a porta de saida; {retomadas} acoes em envio ficaram nao confirmadas.",
+        ),
+        Frase("limite_criado", "A pessoa criou um limite de {por_dia} por dia para {ferramenta}, com passkey."),
+        Frase("limite_ampliado", "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, com passkey."),
+        Frase("limite_encerrado", "O limite de {ferramenta} foi encerrado: {motivo}."),
+        Frase("passkey_cadastrada", "A pessoa cadastrou uma passkey."),
+        Frase("passkey_desativada", "Uma passkey da pessoa foi desativada."),
         Frase("bloqueio", "Bloqueio ligado por {quem}: {alcance}."),
         Frase("fechamento", "Fechamento {numero} calculado com {linhas} linhas."),
         Frase(

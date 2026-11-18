@@ -182,6 +182,7 @@ class Ambiente:
     ordens: dict[str, uuid.UUID]
     fatura: str
     cadastro: str
+    vitrine: dict[str, str] = field(default_factory=dict)
 
     def cracha(self, sujeito: str = "pessoa-ana") -> str:
         return self.idp.cracha(audiencia=RECURSO, sujeito=sujeito)
@@ -277,13 +278,27 @@ class Ambiente:
         self.sistema_app.state.contagem.chamadas.clear()
 
 
+# Revisao de uma ferramenta no arranjo: (nome original, prefixo do nome na vitrine, classe, risco).
+Revisao = tuple[str, str, str, str]
+LEITURAS: tuple[Revisao, ...] = (("consultar_fatura", "fatura", "le", "medio"), ("ver_cadastro", "cadastro", "le", "medio"))
+
+
 @contextlib.asynccontextmanager
-async def subir(banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Ambiente]:
+async def subir(
+    banco_migrado: Parametros,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    criar_sistema: Any = None,
+    revisoes: tuple[Revisao, ...] = LEITURAS,
+    extra: dict[str, Any] | None = None,
+) -> AsyncIterator[Ambiente]:
+    """Sobe o arranjo. ``criar_sistema`` troca o sistema de exemplo (o padrao e ``leitura_por_pessoa``) e
+    ``revisoes`` diz o que entra na vitrine; ``Ambiente.vitrine`` guarda nome original -> nome na vitrine."""
     monkeypatch.setenv("EXEMPLO_CHAVES", json.dumps(mapa_de_chaves()))
     porta_idp, porta_desp = porta_livre(), porta_livre()
     idp = IdpFalso(emissor=f"http://127.0.0.1:{porta_idp}/realms/mcp-claro")
     oauth = OAuthFalso()
-    sistema_app = leitura_por_pessoa.criar()
+    sistema_app = (criar_sistema or leitura_por_pessoa.criar)()
     p = Parametros(
         **(
             banco_migrado.model_dump()
@@ -299,6 +314,7 @@ async def subir(banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch) -> A
                 "DISPATCHER_INTERNAL_URL": f"http://127.0.0.1:{porta_desp}",
                 "RESPONSE_MAX_WAIT_SECONDS": 5,
             }
+            | (extra or {})
         )
     )
     admin = criar_engine(p, pool_size=3, max_overflow=3)
@@ -353,6 +369,7 @@ async def subir(banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch) -> A
             finally:
                 await despachante.fechar()
             por_nome = {f["name"]: f for f in declaradas}
+            vitrine = {original: f"{prefixo}_{sufixo}" for original, prefixo, _, _ in revisoes}
             fatura, cadastro = f"fatura_{sufixo}", f"cadastro_{sufixo}"
             async with entrada_db.begin() as c:
                 await autorizacao.configurar(
@@ -365,22 +382,23 @@ async def subir(banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch) -> A
                         "escopos": ["leitura"],
                     },
                 )
-                for nome_original, vitrine in (("consultar_fatura", fatura), ("ver_cadastro", cadastro)):
+                for nome_original, _, classe, risco in revisoes:
                     await repositorio.revisar_ferramenta(
                         c,
                         sistema_id=sistema_id,
                         definicao_declarada=por_nome[nome_original],
-                        nome_vitrine=vitrine,
-                        descricao="Leitura de teste.",
-                        classe="le",
+                        nome_vitrine=vitrine[nome_original],
+                        descricao="Leitura de teste." if classe == "le" else "Acao de teste.",
+                        classe=classe,
+                        risco=risco,
                         revisado_por="admin-teste",
-                        campos_pessoais=["cpf", "email"],
+                        campos_pessoais=["cpf", "email"] if classe == "le" else [],
                     )
                 modelo = await repositorio.criar_modelo_ordem(
                     c,
                     nome=f"leitura-{sufixo}",
                     descricao="Ordem de servico de teste",
-                    ferramentas=[(sistema_id, "consultar_fatura"), (sistema_id, "ver_cadastro")],
+                    ferramentas=[(sistema_id, original) for original, _, _, _ in revisoes],
                     validade_dias=30,
                     criado_por="admin-teste",
                 )
@@ -410,6 +428,7 @@ async def subir(banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch) -> A
                 ordens=ordens,
                 fatura=fatura,
                 cadastro=cadastro,
+                vitrine=vitrine,
             )
     finally:
         for engine in (admin, entrada_db, despachante_db, rotinas_db):

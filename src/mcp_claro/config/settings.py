@@ -149,6 +149,8 @@ class Parametros(BaseSettings):
     MCP_RESPONSE_MODE: ModoResposta = ModoResposta.INTEIRA
     MCP_SCOPES: ListaTexto = Field(default_factory=list)
     RESPONSE_MAX_WAIT_SECONDS: int = Field(default=20, ge=1, le=120)
+    # Varredura de reserva da porta de saida (alem do LISTEN/NOTIFY), em segundos.
+    OUTBOX_SWEEP_SECONDS: int = Field(default=5, ge=1, le=300)
     ALLOWED_HOSTS: ListaTexto = Field(default_factory=list)
     FORWARDED_ALLOW_IPS: ListaTexto = Field(default_factory=lambda: ["127.0.0.1"])
     GATEWAY_INTERNAL_PORT: int = 8443
