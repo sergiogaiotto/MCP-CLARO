@@ -6,6 +6,12 @@
 - ``tools/call`` recusa ferramenta fora da vitrine, confere os argumentos
   contra o esquema revisado e manda leituras ao despachante pela porta
   interna. Acoes so entram com a Fase 2.
+
+Antes de cada pedido, a entrada consulta o estado da entrada (fechada recusa
+tudo; so de leitura aceita so a classe "le") e os bloqueios ativos (pessoa,
+aplicativo, par, sistema ou tudo). A vitrine esconde as ferramentas de sistema
+bloqueado ou pausado. Cada leitura passa pela catraca diaria da ordem de
+servico. Toda recusa vai ao extrato com frase legivel.
 """
 
 from __future__ import annotations
@@ -29,6 +35,9 @@ from mcp_claro.entrada.cracha import Cracha, cracha_atual
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
+from mcp_claro.regras import bloqueios, catraca, estado, revisao
+from mcp_claro.regras.bloqueios import Vigentes
+from mcp_claro.regras.estado import EstadoEntrada
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.entrada.servidor")
@@ -93,10 +102,35 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             await repositorio.marcar_versao_vista(c, aplicativo.id, VERSAO_MCP)
         return Quem(cracha, aplicativo, pessoa)
 
+    async def portas(q: Quem) -> tuple[EstadoEntrada, Vigentes]:
+        async with engine.connect() as c:
+            entrada = await estado.ler_entrada(c)
+            vigentes = await bloqueios.ativos(c, pessoa_id=q.pessoa.id, aplicativo_id=q.aplicativo.id)
+        return entrada, vigentes
+
+    async def recusar_pedido(q: Quem, metodo: str, motivo: str, mensagem: str) -> Recusa:
+        async with engine.begin() as c:
+            await registrar(
+                c,
+                papel="entrada",
+                tipo="pedido_recusado",
+                campos={"metodo": metodo, "motivo": motivo},
+                aplicativo_id=q.aplicativo.id,
+                pessoa_id=q.pessoa.id,
+            )
+        CONTADORES.somar("pedidos_recusados", motivo=motivo)
+        return Recusa(mensagem, motivo)
+
     async def listar(ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         q = await quem(ctx)
+        entrada, vigentes = await portas(q)
+        if entrada.fechada:
+            raise await recusar_pedido(q, "tools/list", entrada.motivo_recusa(), entrada.mensagem())
+        if vigentes.geral is not None:
+            raise await recusar_pedido(q, "tools/list", vigentes.geral.motivo_recusa(), vigentes.geral.mensagem())
         async with engine.connect() as c:
             ferramentas = await repositorio.vitrine(c, q.pessoa.id, q.aplicativo.id, VERSAO_MCP)
+        ferramentas = [f for f in ferramentas if entrada.permite(f.classe) and vigentes.para(f.sistema.id) is None]
         CONTADORES.somar("vitrine_listada")
         return types.ListToolsResult(
             tools=[types.Tool.model_validate(f.como_tool()) for f in ferramentas],
@@ -122,6 +156,12 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
     async def chamar(ctx: ServerRequestContext[Any], params: types.CallToolRequestParams) -> types.CallToolResult:
         q = await quem(ctx)
         trace = _traceparent(ctx, p)
+        entrada, vigentes = await portas(q)
+        if entrada.fechada:
+            raise await recusar(q, params.name, entrada.motivo_recusa(), entrada.mensagem(), trace)
+        if vigentes.geral is not None:
+            b = vigentes.geral
+            raise await recusar(q, params.name, b.motivo_recusa(), b.mensagem(), trace)
         async with engine.connect() as c:
             ferramenta: FerramentaVitrine | None = await repositorio.ferramenta_na_vitrine(
                 c, q.pessoa.id, q.aplicativo.id, params.name, VERSAO_MCP
@@ -144,6 +184,16 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 f"Argumentos fora do esquema revisado: {erro}",
                 trace,
             ) from erro
+        if not entrada.permite(ferramenta.classe):
+            raise await recusar(q, params.name, entrada.motivo_recusa(), entrada.mensagem(), trace)
+        if not revisao.classe_permitida(ferramenta.sistema.tipo_chave, ferramenta.classe):
+            raise await recusar(
+                q,
+                params.name,
+                "acao_em_sistema_compartilhado",
+                "Este sistema usa chave compartilhada e so aceita leitura. Nada foi enviado.",
+                trace,
+            )
         if ferramenta.classe != "le":
             raise await recusar(
                 q,
@@ -152,6 +202,13 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 "Acoes ainda nao estao ligadas neste MCP-CLARO (Fase 2). Nada foi enviado.",
                 trace,
             )
+        bloqueio = vigentes.para(ferramenta.sistema.id)
+        if bloqueio is not None:
+            raise await recusar(q, params.name, bloqueio.motivo_recusa(), bloqueio.mensagem(), trace)
+        async with engine.begin() as c:
+            passagem = await catraca.passar(c, ferramenta.ordem_id)
+        if not passagem.passou:
+            raise await recusar(q, params.name, "catraca", passagem.mensagem(), trace)
         resultado = await ler(
             PedidoLeitura(
                 pessoa_id=q.pessoa.id,

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block titulo %}Modelos de ordem{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Modelos de ordem de serviço</h1>
+<p>Cada modelo junta ferramentas revisadas. A pessoa escolhe um modelo para um aplicativo.</p>
+{% for m in modelos %}
+<section class="cartao">
+  <h2>{{ m.nome }}</h2>
+  <p>{{ m.descricao }}</p>
+  <p class="dica">Prazo de até {{ m.validade_dias }} dias.</p>
+  <ul class="ferramentas">
+    {% for f in m.ferramentas %}<li><code>{{ f.nome_vitrine or f.nome_original }}</code> (sistema {{ f.sistema }}){% if f.classe %}: {{ f.classe | classe }}{% endif %}</li>{% endfor %}
+  </ul>
+</section>
+{% else %}
+<p class="cartao">Nenhum modelo ainda.</p>
+{% endfor %}
+
+<h2>Criar um modelo</h2>
+{% if not ferramentas %}
+<p class="cartao">Ainda não há ferramenta revisada. Revise as ferramentas de um sistema primeiro.</p>
+{% else %}
+<form method="post" action="/telas/admin/modelos" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="nome">Nome do modelo</label>
+  <input type="text" id="nome" name="nome" required maxlength="80" value="{{ valores.get('nome', '') }}">
+  <label for="descricao">Explicação para a pessoa</label>
+  <textarea id="descricao" name="descricao" required maxlength="500">{{ valores.get('descricao', '') }}</textarea>
+  <label for="validade_dias">Prazo máximo, em dias (até {{ maximo_dias }})</label>
+  <input type="number" id="validade_dias" name="validade_dias" min="1" max="{{ maximo_dias }}" required value="{{ valores.get('validade_dias', maximo_dias) }}">
+  <fieldset>
+    <legend>Ferramentas</legend>
+    {% if so_leitura %}<p class="dica">Nesta fase, só ferramentas que só leem.</p>{% endif %}
+    {% for f in ferramentas %}
+    <label class="opcao"><input type="checkbox" name="ferramentas" value="{{ f.id }}" {% if f.id|string in valores.get("ferramentas", []) %}checked{% endif %} {% if so_leitura and f.classe != "le" %}disabled{% endif %}>
+      <span><code>{{ f.nome_vitrine }}</code> (sistema {{ f.sistema }}): {{ f.descricao }} <span class="dica">{{ f.classe | classe }}</span></span></label>
+    {% endfor %}
+  </fieldset>
+  <button type="submit">Criar o modelo</button>
+</form>
+{% endif %}
+{% endblock %}

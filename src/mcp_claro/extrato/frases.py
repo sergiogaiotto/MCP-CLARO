@@ -51,6 +51,58 @@ FRASES: Final[dict[str, Frase]] = {
         ),
         Frase("ronda_falha", "A ronda das portas achou uma passagem indevida: {motivo}."),
         Frase("politica_mudou", "Politica {chave} mudou para {valor} por {autor}: {motivo}."),
+        # Regras (Fase 1): autorizacao nos sistemas, chaves, bloqueio, pausa e estado das portas.
+        Frase("autorizacao_configurada", "A autorizacao por pessoa do sistema {sistema} foi configurada."),
+        Frase("segredo_cliente_guardado", "O segredo do MCP-CLARO no sistema {sistema} foi guardado cifrado."),
+        Frase("autorizacao_iniciada", "A pessoa comecou a autorizar o sistema {sistema}."),
+        Frase(
+            "autorizacao_concluida",
+            "A pessoa autorizou o sistema {sistema}; a chave foi guardada cifrada no cofre do gateway.",
+        ),
+        Frase("autorizacao_recusada", "Autorizacao no sistema {sistema} recusada: {motivo}."),
+        Frase("autorizacao_derrubada", "Autorizacao da pessoa no sistema {sistema} derrubada: {motivo}."),
+        Frase("chave_renovada", "A chave da pessoa no sistema {sistema} foi renovada antes do uso."),
+        Frase("renovacao_falhou", "A chave da pessoa no sistema {sistema} nao foi renovada: {motivo}."),
+        Frase("pedido_recusado", "Pedido {metodo} recusado: {motivo}."),
+        Frase("bloqueio_ligado", "{quem} ligou um bloqueio em {alcance}."),
+        Frase("bloqueio_encerrado", "{quem} encerrou um bloqueio em {alcance}."),
+        Frase("pausa_ligada", "{quem} ligou uma pausa em {alcance}."),
+        Frase("pausa_encerrada", "{quem} encerrou uma pausa em {alcance}."),
+        Frase("estado_entrada_mudou", "{quem} deixou a entrada {nivel}."),
+        Frase("estado_saida_mudou", "{quem} {acao} a porta de saida."),
+        # Rotinas e avisos (Fase 1): vencimentos, mudou-parou, avisos e alertas.
+        Frase("ordem_vencida", "A ordem de servico {modelo} chegou ao fim do prazo e deixou de valer."),
+        Frase("ordem_inativa", "A ordem de servico {modelo} ficou inativa: {dias} dias sem uso."),
+        Frase("ordem_a_vencer", "A ordem de servico {modelo} vence em {fim}; a pessoa foi avisada."),
+        Frase(
+            "ferramenta_suspensa",
+            "Ferramenta {ferramenta} suspensa: mudou, parou. O sistema passou a pedir mais que o revisado.",
+        ),
+        Frase("ferramenta_mudou", "Ferramenta {ferramenta} mudou no sistema sem pedir mais; so registramos."),
+        Frase("aviso_desistiu", "Aviso {evento} nao foi entregue depois de {tentativas} tentativas; desistimos."),
+        Frase("resumo_semanal", "Resumo da semana {semana} posto na fila para o ADMIN."),
+        Frase("alerta_grafana", "Alerta do Grafana {alerta} recebido: {situacao}."),
+        # Telas (Fase 1): login, ordens de servico, extrato alheio e cadastro do ADMIN.
+        Frase("telas_entrada", "Entrada nas telas do MCP-CLARO."),
+        Frase("telas_saida", "Saida das telas do MCP-CLARO."),
+        Frase("ordem_concedida", "Ordem de servico {modelo} dada ao aplicativo {aplicativo}, valida ate {fim}."),
+        Frase("ordem_revogada", "Ordem de servico {modelo} do aplicativo {aplicativo} revogada pela pessoa."),
+        Frase("extrato_alheio_aberto", "O ADMIN {quem} abriu este extrato. Motivo: {motivo}."),
+        Frase("admin_aplicativo_habilitado", "Aplicativo {aplicativo} habilitado por {quem}."),
+        Frase("admin_sistema_cadastrado", "Sistema {sistema} cadastrado por {quem}; falta a sondagem de versao."),
+        Frase("admin_sondagem_pedida", "Sondagem de versao do sistema {sistema} pedida por {quem}: {desfecho}."),
+        Frase("admin_declaracoes_lidas", "Ferramentas do sistema {sistema} lidas por {quem}: {quantas} declaradas."),
+        Frase(
+            "admin_ferramenta_revisada",
+            "Ferramenta {ferramenta} do sistema {sistema} revisada por {quem}: classe {classe}, risco {risco}.",
+        ),
+        Frase("admin_modelo_criado", "Modelo de ordem {modelo} criado por {quem}, com {quantas} ferramentas."),
+        Frase(
+            "admin_programa_cadastrado",
+            "Programa {aplicativo} cadastrado por {quem}; responsavel {responsavel}, substituto {substituto}.",
+        ),
+        Frase("admin_webhook_cadastrado", "Destino de webhook {destino} cadastrado por {quem}."),
+        Frase("admin_webhook_mudou", "Destino de webhook {destino} {situacao} por {quem}."),
     )
 }
 

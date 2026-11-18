@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block titulo %}Aplicativos{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Aplicativos</h1>
+<p>Só aplicativo habilitado aqui pode se ligar ao MCP-CLARO.</p>
+{% if aplicativos %}
+<table>
+  <thead><tr><th>Nome</th><th>client_id</th><th>Família</th><th>Tipo</th><th>Situação</th><th>Última versão vista</th></tr></thead>
+  <tbody>
+  {% for a in aplicativos %}
+    <tr><td>{{ a.nome }}</td><td><code>{{ a.client_id }}</code></td><td>{{ a.familia }}</td>
+      <td>{% if a.tipo == "programa" %}Programa{% else %}Assistente{% endif %}</td>
+      <td>{{ a.situacao | situacao }}</td><td>{{ a.versao_mcp_vista or "ainda não se ligou" }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="cartao">Nenhum aplicativo habilitado ainda.</p>
+{% endif %}
+
+<h2>Habilitar um aplicativo</h2>
+<form method="post" action="/telas/admin/aplicativos" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="client_id">client_id no provedor de login</label>
+  <input type="text" id="client_id" name="client_id" required maxlength="200" value="{{ valores.get('client_id', '') }}">
+  <label for="nome">Nome que as pessoas veem</label>
+  <input type="text" id="nome" name="nome" required maxlength="120" value="{{ valores.get('nome', '') }}">
+  <label for="familia">Família</label>
+  <input type="text" id="familia" name="familia" required maxlength="60" value="{{ valores.get('familia', '') }}">
+  <p class="dica">Por exemplo: claude-code, goose, inspector.</p>
+  <label for="tipo">Tipo</label>
+  <select id="tipo" name="tipo">
+    <option value="assistente" {% if valores.get('tipo', 'assistente') == 'assistente' %}selected{% endif %}>Assistente usado por pessoas</option>
+    <option value="programa" {% if valores.get('tipo') == 'programa' %}selected{% endif %}>Programa que roda sozinho</option>
+  </select>
+  <p class="dica">Programa que roda sozinho tem cadastro próprio, em <a href="/telas/admin/programas">Programas</a>.</p>
+  <button type="submit">Habilitar</button>
+</form>
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block titulo %}Sistemas{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Sistemas</h1>
+<p>Um sistema só entra se falar a versão 2026-07-28 do MCP. O MCP-CLARO confere isso na hora do cadastro.</p>
+{% if sistemas %}
+<table>
+  <thead><tr><th>Nome</th><th>Endereço</th><th>Chave</th><th>Situação</th></tr></thead>
+  <tbody>
+  {% for s in sistemas %}
+    <tr><td><a href="/telas/admin/sistemas/{{ s.id }}">{{ s.nome }}</a></td><td><code>{{ s.endereco }}</code></td>
+      <td>{{ s.tipo_chave | tipo_chave }}</td>
+      <td><span class="etiqueta {% if s.situacao == 'ativo' %}bom{% elif s.situacao == 'recusado' %}ruim{% endif %}">{{ s.situacao | situacao }}</span></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="cartao">Nenhum sistema cadastrado ainda.</p>
+{% endif %}
+
+<h2>Cadastrar um sistema</h2>
+<form method="post" action="/telas/admin/sistemas" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="nome">Nome do sistema</label>
+  <input type="text" id="nome" name="nome" required maxlength="80" value="{{ valores.get('nome', '') }}">
+  <label for="endereco">Endereço MCP do sistema</label>
+  <input type="url" id="endereco" name="endereco" required maxlength="500" placeholder="https://sistema.exemplo/mcp" value="{{ valores.get('endereco', '') }}">
+  <label for="tipo_chave">Tipo de chave</label>
+  <select id="tipo_chave" name="tipo_chave" required>
+    {% for valor, texto in [("por_pessoa", "Uma chave por pessoa (cada pessoa autoriza)"), ("compartilhada", "Uma chave para todos (só leitura)"), ("programa", "Chave do programa")] %}
+    <option value="{{ valor }}" {% if valores.get('tipo_chave') == valor %}selected{% endif %}>{{ texto }}</option>
+    {% endfor %}
+  </select>
+  <label for="chave_sondagem">Chave de teste (se o sistema pedir)</label>
+  <input type="password" id="chave_sondagem" name="chave_sondagem" autocomplete="off" maxlength="4096">
+  <p class="dica">Usada só nesta conferência, pelo despachante. Não fica guardada.</p>
+  <button type="submit">Cadastrar e conferir a versão</button>
+</form>
+{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block titulo %}Sistema {{ sistema.nome }}{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin/sistemas">Sistemas</a></p>
+<h1>Sistema {{ sistema.nome }}</h1>
+<p><code>{{ sistema.endereco }}</code> · {{ sistema.tipo_chave | tipo_chave }}</p>
+
+{% if sistema.situacao == "ativo" %}
+<div class="aviso" role="status">
+  <p><strong>Aceito.</strong> Este sistema fala a versão {{ sistema.versao_mcp }} do MCP.</p>
+  <p>Próximo passo: ler as ferramentas que ele declara e revisar cada uma.</p>
+</div>
+{% elif sistema.situacao == "recusado" %}
+<div class="recusa" role="alert">
+  <p><strong>Este sistema foi recusado.</strong></p>
+  <p>Ele só fala a geração antiga do MCP. O MCP-CLARO só aceita a versão 2026-07-28.</p>
+  <p>Peça à equipe do sistema para atualizar o kit MCP. Depois, peça a conferência de novo.</p>
+  {% if sistema.motivo %}<p class="dica">Resposta da conferência: {{ sistema.motivo }}.</p>{% endif %}
+</div>
+{% elif sistema.situacao == "pendente" %}
+<div class="atencao" role="status">
+  {% if sistema.motivo %}
+  <p><strong>Ainda não conseguimos falar com o sistema.</strong> ({{ sistema.motivo }})</p>
+  <p>Confira o endereço e a chave de teste. Depois, peça a conferência de novo.</p>
+  {% else %}
+  <p><strong>Falta conferir a versão do sistema.</strong></p>
+  {% endif %}
+</div>
+{% else %}
+<div class="atencao" role="status"><p>Situação: {{ sistema.situacao | situacao }}.{% if sistema.motivo %} {{ sistema.motivo }}.{% endif %}</p></div>
+{% endif %}
+{% if sistema.sondado_em %}<p class="dica">Última conferência: {{ sistema.sondado_em | data_hora }}.</p>{% endif %}
+
+{% if sistema.situacao in ("pendente", "recusado", "ativo") %}
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/sondar" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="chave_sondagem_s">Chave de teste (se o sistema pedir)</label>
+  <input type="password" id="chave_sondagem_s" name="chave_sondagem" autocomplete="off" maxlength="4096">
+  <button type="submit" class="secundario">Conferir a versão de novo</button>
+</form>
+{% endif %}
+
+{% if sistema.situacao in ("ativo", "quarentena") %}
+<h2>Ferramentas que o sistema declara</h2>
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/declaracoes" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="chave_sondagem_d">Chave de teste (se o sistema pedir)</label>
+  <input type="password" id="chave_sondagem_d" name="chave_sondagem" autocomplete="off" maxlength="4096">
+  <button type="submit">Ler as ferramentas agora</button>
+</form>
+{% if vistas %}
+<p class="dica">O texto de cada ferramenta vem do sistema e não foi escrito por nós. Na revisão, você escreve o texto que as pessoas e os aplicativos vão ver.</p>
+<table>
+  <thead><tr><th>Nome no sistema</th><th>O que o sistema diz</th><th>Revisão</th><th></th></tr></thead>
+  <tbody>
+  {% for v in vistas %}
+    <tr>
+      <td><code>{{ v.nome }}</code></td>
+      <td class="estranho">{{ v.definicao.get("description", "") }}</td>
+      <td>{% if not v.revisada_id %}<span class="etiqueta">Sem revisão</span>
+          {% elif v.impressao != v.impressao_revisada %}<span class="etiqueta ruim">Mudou desde a revisão</span>
+          {% else %}<span class="etiqueta bom">Revisada</span> <code>{{ v.nome_vitrine }}</code> · {{ v.classe | classe }}{% endif %}</td>
+      <td><a href="/telas/admin/sistemas/{{ sistema.id }}/ferramenta?nome={{ v.nome | urlencode }}">Revisar</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="cartao">Ainda não lemos as ferramentas deste sistema.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

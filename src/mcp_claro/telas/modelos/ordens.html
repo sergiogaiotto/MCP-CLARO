@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block titulo %}Minhas ordens de serviço{% endblock %}
+{% block conteudo %}
+<h1>Minhas ordens de serviço</h1>
+<p>Uma ordem de serviço diz o que um aplicativo de IA pode ler por você, e até quando.</p>
+<p>Ela termina sozinha no prazo. Você pode revogar antes, quando quiser.</p>
+
+<h2>Valendo agora</h2>
+{% if not ativas %}
+<p class="cartao">Nenhum aplicativo tem ordem sua agora. Nenhum deles pode ler nada por você.</p>
+{% endif %}
+{% for o in ativas %}
+<section class="cartao" id="ordem-{{ o.id }}">
+  <h3>{{ o.aplicativo }}: {{ o.modelo }}</h3>
+  <p>{{ o.descricao }}</p>
+  <p><strong>O que ele pode ler:</strong></p>
+  <ul class="ferramentas">
+    {% for f in o.ferramentas %}
+    <li>{% if f.descricao %}{{ f.descricao }}{% else %}{{ f.nome_original }} (ainda sem revisão){% endif %} <span class="dica">(sistema {{ f.sistema }})</span></li>
+    {% endfor %}
+  </ul>
+  <p><strong>Até quando:</strong> {{ o.fim | data_hora }}.
+    {% if o.ultimo_uso %}Usada pela última vez em {{ o.ultimo_uso | data_hora }}.{% else %}Ainda não foi usada.{% endif %}</p>
+  <form method="post" action="/telas/ordens/{{ o.id }}/revogar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Revogar esta ordem</button>
+  </form>
+</section>
+{% endfor %}
+
+<h2>Dar uma nova ordem</h2>
+{% if not aplicativos or not modelos %}
+<p class="cartao">Ainda não há aplicativo habilitado ou modelo de ordem. Fale com o ADMIN.</p>
+{% else %}
+<form method="post" action="/telas/ordens" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <fieldset>
+    <legend>1. Para qual aplicativo?</legend>
+    {% for a in aplicativos %}
+    <label class="opcao"><input type="radio" name="aplicativo" value="{{ a.id }}" required {% if valores.get("aplicativo") == a.id|string %}checked{% endif %}> {{ a.nome }}</label>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>2. O que ele pode fazer?</legend>
+    {% for m in modelos %}
+    <label class="opcao"><input type="radio" name="modelo" value="{{ m.id }}" required {% if valores.get("modelo") == m.id|string %}checked{% endif %}>
+      <span><strong>{{ m.nome }}</strong>: {{ m.descricao }}
+        <span class="dica">Pode ler: {% for f in m.ferramentas %}{{ f.descricao or f.nome_original }}{% if not loop.last %}; {% endif %}{% endfor %}. Prazo de até {{ m.validade_dias }} dias.</span>
+      </span>
+    </label>
+    {% endfor %}
+  </fieldset>
+  <label for="dias">3. Por quantos dias? (de 1 a {{ maximo_dias }})</label>
+  <input type="number" id="dias" name="dias" min="1" max="{{ maximo_dias }}" value="{{ valores.get('dias', '7') }}" required>
+  <p class="dica">Depois do prazo, a ordem termina sozinha.</p>
+  <button type="submit">Dar a ordem</button>
+</form>
+{% endif %}
+
+{% if terminadas %}
+<h2>Ordens que já terminaram</h2>
+<table>
+  <thead><tr><th>Aplicativo</th><th>Ordem</th><th>Até</th><th>Situação</th></tr></thead>
+  <tbody>
+  {% for o in terminadas %}
+    <tr><td>{{ o.aplicativo }}</td><td>{{ o.modelo }}</td><td>{{ o.fim | data_hora }}</td><td>{{ o.situacao | situacao }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

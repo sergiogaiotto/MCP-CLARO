@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  {# htmx sem eval, sem script vindo do servidor, sem copia das paginas no navegador; respostas de erro tambem aparecem. #}
+  <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false,"allowScriptTags":false,"historyCacheSize":0,"refreshOnHistoryMiss":true,"selfRequestsOnly":true,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":false}]}'>
+  <title>{% block titulo %}MCP-CLARO{% endblock %} · MCP-CLARO</title>
+  <link rel="stylesheet" href="/telas/estaticos/telas.css">
+  <script src="/telas/estaticos/htmx.min.js" defer></script>
+</head>
+<body hx-boost="true">
+  <a class="pular" href="#conteudo">Pular para o conteúdo</a>
+  <header class="topo">
+    <div class="faixa">
+      <a class="marca" href="/telas">MCP-CLARO</a>
+      {% if sessao %}
+      <nav class="menu" aria-label="Menu principal">
+        <a href="/telas/ordens" {% if caminho.startswith("/telas/ordens") %}aria-current="page"{% endif %}>Minhas ordens de serviço</a>
+        <a href="/telas/extrato" {% if caminho == "/telas/extrato" %}aria-current="page"{% endif %}>Meu extrato</a>
+        {# Lugares reservados: bloqueio de um toque, pausa e autorizar sistema chegam na proxima etapa. #}
+        {% block menu_reservado %}
+        <a class="em-breve" href="{{ reservadas.bloqueio.caminho }}">{{ reservadas.bloqueio.titulo }} (em breve)</a>
+        {% endblock %}
+        {% if sessao.admin %}
+        <a href="/telas/admin" {% if caminho.startswith("/telas/admin") %}aria-current="page"{% endif %}>Área do ADMIN</a>
+        {% endif %}
+      </nav>
+      <form class="em-linha" method="post" action="/telas/sair">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secundario">Sair</button>
+      </form>
+      {% endif %}
+    </div>
+  </header>
+  <main id="conteudo">
+    {% if aviso %}<p class="aviso" role="status">{{ aviso }}</p>{% endif %}
+    {% if erros %}
+    <div class="erros" role="alert">
+      <strong>Falta corrigir:</strong>
+      <ul>{% for e in erros %}<li>{{ e }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+    {% block conteudo %}{% endblock %}
+  </main>
+  <footer class="rodape">
+    MCP-CLARO: o ponto por onde os aplicativos de IA usam os sistemas, sempre em seu nome e com registro de tudo.
+  </footer>
+</body>
+</html>

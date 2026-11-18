@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block titulo %}Extrato de outra pessoa{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Abrir o extrato de outra pessoa</h1>
+<p>Só com motivo. O motivo e o seu nome ficam no extrato da pessoa, e ela vê.</p>
+<form method="post" action="/telas/admin/extrato" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="pessoa">Pessoa</label>
+  <select id="pessoa" name="pessoa" required>
+    <option value="">Escolha a pessoa</option>
+    {% for pe in pessoas %}
+    <option value="{{ pe.id }}" {% if valores.get('pessoa') == pe.id|string %}selected{% endif %}>{{ pe.nome or "sem nome" }}{% if pe.papel == "admin" %} (ADMIN){% endif %}{% if pe.situacao != "ativa" %} ({{ pe.situacao | situacao }}){% endif %}</option>
+    {% endfor %}
+  </select>
+  <label for="motivo">Motivo</label>
+  <textarea id="motivo" name="motivo" required minlength="10" maxlength="300">{{ valores.get('motivo', '') }}</textarea>
+  <p class="dica">Por exemplo: a pessoa pediu ajuda para entender uma leitura, no chamado CH-123.</p>
+  <button type="submit">Abrir o extrato</button>
+</form>
+{% endblock %}

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block titulo %}Avisos por webhook{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Avisos por webhook</h1>
+<p>O MCP-CLARO manda avisos assinados para estes endereços.</p>
+{% if destinos %}
+<table>
+  <thead><tr><th>Nome</th><th>Endereço</th><th>Eventos</th><th>Situação</th><th></th></tr></thead>
+  <tbody>
+  {% for d in destinos %}
+    <tr><td>{{ d.nome }}</td><td><code>{{ d.url }}</code></td>
+      <td>{% if d.eventos %}{{ d.eventos | join(", ") }}{% else %}todos{% endif %}</td>
+      <td>{% if d.ativo %}Ligado{% else %}Desligado{% endif %}</td>
+      <td><form class="em-linha" method="post" action="/telas/admin/webhooks/{{ d.id }}/situacao">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="ativo" value="{% if d.ativo %}nao{% else %}sim{% endif %}">
+        <button type="submit" class="secundario">{% if d.ativo %}Desligar{% else %}Ligar{% endif %}</button>
+      </form></td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="cartao">Nenhum destino cadastrado.</p>
+{% endif %}
+
+<h2>Cadastrar um destino</h2>
+<form method="post" action="/telas/admin/webhooks" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="nome">Nome</label>
+  <input type="text" id="nome" name="nome" required maxlength="80" value="{{ valores.get('nome', '') }}">
+  <label for="url">Endereço (https://)</label>
+  <input type="url" id="url" name="url" required maxlength="500" value="{{ valores.get('url', '') }}">
+  <label for="eventos">Eventos (separados por vírgula)</label>
+  <input type="text" id="eventos" name="eventos" maxlength="1000" value="{{ valores.get('eventos', '') }}">
+  <p class="dica">Deixe vazio para receber todos os avisos.</p>
+  <button type="submit">Cadastrar</button>
+</form>
+{% endblock %}

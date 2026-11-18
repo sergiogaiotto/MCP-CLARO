@@ -3,6 +3,10 @@
 A porta interna de leituras so atende ferramenta da classe "le" do cadastro
 revisado e da ordem de servico. Acao pedida por aqui e recusada e vai ao
 extrato, mesmo que a entrada tenha sido alterada de proposito.
+
+Regras da Fase 1 (``_conferir_regras`` e ``_chave_da_pessoa``): bloqueios ativos e
+porta de saida antes de abrir a chave; chave por pessoa renovada antes do envio,
+fora de qualquer conexao aberta; 401 no envio nao e reenviado.
 """
 
 from __future__ import annotations
@@ -17,12 +21,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.impressao import impressao
-from mcp_claro.despachante import chaves, medida
+from mcp_claro.despachante import chaves, medida, renovacao
 from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
+from mcp_claro.regras import bloqueios, estado
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.despachante")
@@ -87,6 +92,44 @@ class Despachante:
         CONTADORES.somar("leituras_recusadas_despachante", motivo=motivo)
         return LeituraRecusada(motivo, mensagem)
 
+    async def _conferir_regras(self, pedido: PedidoLeitura, sistema_id: uuid.UUID, nome: str | None) -> None:
+        """Bloqueios ativos (pessoa, aplicativo, par, sistema ou tudo) e porta de saida, antes de abrir a chave."""
+        async with self.engine.connect() as c:
+            vigentes = await bloqueios.ativos(c, pessoa_id=pedido.pessoa_id, aplicativo_id=pedido.aplicativo_id)
+            saida = await estado.ler_saida(c)
+        bloqueio = vigentes.para(sistema_id)
+        if bloqueio is not None:
+            raise await self._recusar(pedido, bloqueio.motivo_recusa(), bloqueio.mensagem(), nome)
+        if not saida.aberta:
+            raise await self._recusar(pedido, "saida_fechada", estado.MENSAGEM_SAIDA_FECHADA, nome)
+
+    async def _chave_da_pessoa(
+        self, pedido: PedidoLeitura, sistema_id: uuid.UUID, sistema_nome: str, nome: str | None
+    ) -> renovacao.ChaveAberta:
+        """Chave por pessoa pronta para o envio: renovada antes, com trava, se venceu ou vai vencer."""
+        try:
+            return await renovacao.chave_pronta(
+                self.engine, self.cifra, sistema_id=sistema_id, pessoa_id=pedido.pessoa_id
+            )
+        except chaves.ChaveAusente:
+            raise await self._recusar(pedido, "sem_chave", "Voce ainda nao autorizou este sistema.", nome) from None
+        except renovacao.AutorizacaoVencida:
+            raise await self._recusar(
+                pedido,
+                "autorizacao_vencida",
+                f"Sua autorizacao no sistema {sistema_nome} venceu. Autorize de novo nas telas do MCP-CLARO. "
+                "Nada foi enviado.",
+                nome,
+            ) from None
+        except renovacao.RenovacaoIndisponivel:
+            raise await self._recusar(
+                pedido,
+                "renovacao_indisponivel",
+                f"Nao deu para renovar a sua chave no sistema {sistema_nome} agora. Nada foi enviado. "
+                "Tente de novo em instantes.",
+                nome,
+            ) from None
+
     async def ler(self, pedido: PedidoLeitura) -> dict[str, Any]:
         async with self.engine.connect() as c:
             ferramenta = await repositorio.ferramenta_por_id(c, pedido.ferramenta_id)
@@ -121,6 +164,12 @@ class Despachante:
         sistema = ferramenta.sistema
         if sistema.situacao != "ativo" or sistema.versao_mcp != VERSAO_MCP:
             raise await self._recusar(pedido, "sistema_indisponivel", "O sistema nao esta ativo na 2026-07-28.", nome)
+        await self._conferir_regras(pedido, sistema.id, nome)
+        aberta = (
+            await self._chave_da_pessoa(pedido, sistema.id, sistema.nome, nome)
+            if sistema.tipo_chave == "por_pessoa"
+            else None
+        )
 
         async with self.engine.connect() as c:
             discover_json = (
@@ -128,7 +177,7 @@ class Despachante:
             ).scalar_one_or_none()
             try:
                 if sistema.tipo_chave == "por_pessoa":
-                    chave = await chaves.abrir(c, self.cifra, sistema_id=sistema.id, pessoa_id=pedido.pessoa_id)
+                    chave = aberta.segredo if aberta else None
                 elif sistema.tipo_chave == "compartilhada":
                     chave = await chaves.abrir(c, self.cifra, sistema_id=sistema.id)
                 else:
@@ -159,6 +208,15 @@ class Despachante:
             else:
                 resultado = medida.aplicar(bruto, ferramenta.campos_pessoais)
                 resultado.pop("resultType", None)
+        elif resposta.tipo == "recusado_http" and 401 in resposta.status_http and aberta is not None:
+            await renovacao.marcar_vencida(
+                self.engine, sistema_id=sistema.id, pessoa_id=pedido.pessoa_id, cifrada=aberta.cifrada
+            )
+            resultado = _resultado_de_erro(
+                f"O sistema {sistema.nome} recusou a sua chave. Nada foi reenviado. Tente de novo: o MCP-CLARO "
+                "renova a chave antes; se nao der, autorize de novo nas telas.",
+                "chave_recusada",
+            )
         else:
             resultado = _resultado_de_erro(
                 f"O sistema {sistema.nome} nao respondeu a leitura ({resposta.tipo}).",
