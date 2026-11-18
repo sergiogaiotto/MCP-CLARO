@@ -61,11 +61,15 @@ class PedidoLeitura:
         )
 
 
+_PROPRIO = "__mcp_claro_proprio"
+
+
 def _resultado_de_erro(texto: str, motivo: str) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": texto}],
         "isError": True,
         "_meta": {PREFIXO_META + "motivo": motivo},
+        _PROPRIO: True,
     }
 
 
@@ -132,29 +136,25 @@ class Despachante:
 
     async def ler(self, pedido: PedidoLeitura) -> dict[str, Any]:
         async with self.engine.connect() as c:
-            ferramenta = await repositorio.ferramenta_por_id(c, pedido.ferramenta_id)
-            ordem_ok = await repositorio.ordem_valida(c, pedido.ordem_id, pedido.pessoa_id, pedido.aplicativo_id)
-            na_ordem = (
-                await c.execute(
-                    text(
-                        "SELECT 1 FROM ordens_servico o"
-                        " JOIN modelos_ordem_ferramentas mf ON mf.modelo_id = o.modelo_id"
-                        " JOIN ferramentas_revisadas f ON f.sistema_id = mf.sistema_id"
-                        " AND f.nome_original = mf.nome_original "
-                        "WHERE o.id = :o AND f.id = :f"
-                    ),
-                    {"o": pedido.ordem_id, "f": pedido.ferramenta_id},
-                )
-            ).first() is not None
+            ferramenta = await repositorio.ferramenta_da_ordem(
+                c,
+                pessoa_id=pedido.pessoa_id,
+                aplicativo_id=pedido.aplicativo_id,
+                ordem_id=pedido.ordem_id,
+                ferramenta_id=pedido.ferramenta_id,
+                versao=VERSAO_MCP,
+            )
             pessoa = (
                 await c.execute(text("SELECT situacao FROM pessoas WHERE id = :p"), {"p": pedido.pessoa_id})
             ).scalar_one_or_none()
             app = (
                 await c.execute(text("SELECT situacao FROM aplicativos WHERE id = :a"), {"a": pedido.aplicativo_id})
             ).scalar_one_or_none()
-        nome = ferramenta.nome_vitrine if ferramenta else None
-        if ferramenta is None or not ordem_ok or not na_ordem:
-            raise await self._recusar(pedido, "fora_da_ordem", "Ferramenta fora da ordem de servico.", nome)
+        if ferramenta is None:
+            # Vale so a versao revisada vigente ('ativa'), de modelo ativo, na ordem vigente da pessoa e do
+            # aplicativo, de sistema ativo na 2026-07-28: a mesma regra da vitrine.
+            raise await self._recusar(pedido, "fora_da_ordem", "Ferramenta fora da ordem de servico.", None)
+        nome = ferramenta.nome_vitrine
         if pessoa != "ativa" or app != "ativo":
             raise await self._recusar(pedido, "bloqueado", "Pessoa ou aplicativo bloqueado ou pausado.", nome)
         if ferramenta.classe != "le":
@@ -175,6 +175,7 @@ class Despachante:
             discover_json = (
                 await c.execute(text("SELECT sondagem FROM sistemas WHERE id = :s"), {"s": sistema.id})
             ).scalar_one_or_none()
+            declarado = await repositorio.esquema_declarado(c, sistema.id, ferramenta.nome_original)
             try:
                 if sistema.tipo_chave == "por_pessoa":
                     chave = aberta.segredo if aberta else None
@@ -197,6 +198,7 @@ class Despachante:
             pedido.argumentos,
             traceparent=None,
             prazo=self.prazo_leitura,
+            esquema_declarado=declarado,
         )
         if resposta.tipo == "resultado" and resposta.resultado is not None:
             bruto = resposta.resultado.model_dump(by_alias=True, exclude_none=True, mode="json")
@@ -222,8 +224,10 @@ class Despachante:
                 f"O sistema {sistema.nome} nao respondeu a leitura ({resposta.tipo}).",
                 "falha_" + resposta.tipo,
             )
-        meta = dict(resultado.get("_meta") or {})
-        meta.pop("io.modelcontextprotocol/serverInfo", None)
+        # O _meta do sistema nao passa ao aplicativo: pode trazer dado pessoal, instrucao ou chave forjada
+        # com o nosso prefixo. So vale o que o proprio MCP-CLARO escreveu (resultado de erro montado aqui).
+        meta: dict[str, Any] = dict(resultado.get("_meta") or {}) if resultado.get(_PROPRIO) else {}
+        resultado.pop(_PROPRIO, None)
         meta[PREFIXO_META + "sistema"] = sistema.nome
         meta[PREFIXO_META + "selo"] = sistema.selo
         if sistema.tipo_chave == "compartilhada":
@@ -259,8 +263,11 @@ class Despachante:
             if sondagem.aceito:
                 await c.execute(
                     text(
+                        # So pendente ou recusado viram ativo: quarentena e desativado continuam como estao.
                         "UPDATE sistemas SET versao_mcp = :v, sondagem = CAST(:s AS jsonb), sondado_em = now(),"
-                        " situacao = 'ativo', motivo = NULL, atualizado_em = now() WHERE id = :i"
+                        " situacao = CASE WHEN situacao IN ('pendente', 'recusado') THEN 'ativo' ELSE situacao END,"
+                        " motivo = CASE WHEN situacao IN ('pendente', 'recusado') THEN NULL ELSE motivo END,"
+                        " atualizado_em = now() WHERE id = :i"
                     ),
                     {"v": VERSAO_MCP, "s": sondagem.discover_json, "i": sistema_id},
                 )
@@ -272,7 +279,8 @@ class Despachante:
             else:
                 await c.execute(
                     text(
-                        "UPDATE sistemas SET situacao = 'recusado', versao_mcp = NULL, motivo = :m, sondado_em = now(),"
+                        "UPDATE sistemas SET situacao = CASE WHEN situacao = 'desativado' THEN situacao"
+                        " ELSE 'recusado' END, versao_mcp = NULL, motivo = :m, sondado_em = now(),"
                         " atualizado_em = now() WHERE id = :i"
                     ),
                     {"m": sondagem.motivo, "i": sistema_id},

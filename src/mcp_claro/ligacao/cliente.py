@@ -29,6 +29,7 @@ import httpx2
 import mcp_types as types
 from mcp import ClientSession, MCPError
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.inbound import mcp_param_headers, x_mcp_header_map
 from pydantic import TypeAdapter, ValidationError
 
 from mcp_claro import __version__
@@ -44,6 +45,7 @@ _RESULTADO_CHAMADA: TypeAdapter[types.CallToolResult | types.InputRequiredResult
 _RESULTADO_LISTA: TypeAdapter[types.ListToolsResult] = TypeAdapter(types.ListToolsResult)
 _NAO_ENVIADO = (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout, httpx2.UnsupportedProtocol)
 _META_PERMITIDA = ("traceparent",)
+_SEM_VEREDITO = frozenset({401, 403, 407, 408, 429})
 _IDENTIDADE = types.Implementation(name="mcp-claro", version=__version__)
 
 
@@ -57,14 +59,30 @@ class Tentativa:
 _TENTATIVA: contextvars.ContextVar[Tentativa | None] = contextvars.ContextVar("mcp_claro_tentativa", default=None)
 
 
+TETO_RESPOSTA_PADRAO = 8 * 1024 * 1024
+
+
+class RespostaGrandeDemais(httpx2.StreamError):
+    pass
+
+
 class _CorpoVigiado(httpx2.AsyncByteStream):
-    def __init__(self, interno: httpx2.AsyncByteStream, tentativa: Tentativa | None) -> None:
+    """Le o corpo da resposta com teto de tamanho; falha no meio do corpo e sempre "duvida"."""
+
+    def __init__(self, interno: httpx2.AsyncByteStream, tentativa: Tentativa | None, teto: int) -> None:
         self._interno = interno
         self._tentativa = tentativa
+        self._teto = teto
 
     async def __aiter__(self) -> AsyncGenerator[bytes]:
+        lidos = 0
         try:
             async for pedaco in self._interno:
+                lidos += len(pedaco)
+                if lidos > self._teto:
+                    if self._tentativa is not None:
+                        self._tentativa.fase, self._tentativa.excecao = "duvida", "RespostaGrandeDemais"
+                    raise RespostaGrandeDemais(f"resposta acima de {self._teto} bytes")
                 yield pedaco
         except httpx2.TransportError as erro:
             if self._tentativa is not None:
@@ -75,43 +93,60 @@ class _CorpoVigiado(httpx2.AsyncByteStream):
         await self._interno.aclose()
 
 
-class _TransporteQueClassifica(httpx2.AsyncBaseTransport):
-    """Converte falha de rede em resposta JSON-RPC marcada, para a sessao sobreviver e a fase ficar exata."""
+def _erro_sintetico(request: httpx2.Request, status: int, fase: Fase) -> httpx2.Response:
+    return httpx2.Response(
+        status,
+        request=request,
+        json={"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "transporte", "data": {"fase": fase}}},
+    )
 
-    def __init__(self, interno: httpx2.AsyncBaseTransport) -> None:
+
+class _TransporteQueClassifica(httpx2.AsyncBaseTransport):
+    """Converte falha de rede em resposta JSON-RPC marcada, para a sessao sobreviver e a fase ficar exata.
+
+    Regras: so o primeiro pedido da tentativa pode virar "nao_enviado"; depois de qualquer resposta, ou
+    se a fase ja for "duvida", toda falha e "duvida" (nunca rebaixa). Pedido que nao seja POST (o GET de
+    retomada de stream do kit) nem sai: na 2026-07-28 o gateway so fala por POST.
+    """
+
+    def __init__(self, interno: httpx2.AsyncBaseTransport, teto_resposta: int) -> None:
         self._interno = interno
+        self._teto = teto_resposta
 
     async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
         tentativa = _TENTATIVA.get()
+        if request.method != "POST":
+            if tentativa is not None and tentativa.status_http:
+                tentativa.fase = "duvida"
+            return _erro_sintetico(request, 405, "duvida")
+        ja_respondeu = tentativa is not None and (bool(tentativa.status_http) or tentativa.fase == "duvida")
         fase: Fase
         excecao: httpx2.TransportError
         try:
             resposta = await self._interno.handle_async_request(request)
         except _NAO_ENVIADO as erro:
-            fase, excecao = "nao_enviado", erro
+            fase, excecao = ("duvida" if ja_respondeu else "nao_enviado"), erro
         except httpx2.TransportError as erro:
             fase, excecao = "duvida", erro
         else:
             if tentativa is not None:
                 tentativa.status_http.append(resposta.status_code)
+            tamanho = resposta.headers.get("content-length")
+            if tamanho is not None and tamanho.isdigit() and int(tamanho) > self._teto:
+                await resposta.aclose()
+                if tentativa is not None:
+                    tentativa.fase, tentativa.excecao = "duvida", "RespostaGrandeDemais"
+                return _erro_sintetico(request, 502, "duvida")
             return httpx2.Response(
                 status_code=resposta.status_code,
                 headers=resposta.headers,
-                stream=_CorpoVigiado(resposta.stream, tentativa),  # type: ignore[arg-type]
+                stream=_CorpoVigiado(resposta.stream, tentativa, self._teto),  # type: ignore[arg-type]
                 extensions=resposta.extensions,
                 request=request,
             )
         if tentativa is not None:
             tentativa.excecao, tentativa.fase = type(excecao).__name__, fase
-        return httpx2.Response(
-            502,
-            request=request,
-            json={
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32000, "message": "transporte", "data": {"fase": fase}},
-            },
-        )
+        return _erro_sintetico(request, 502, fase)
 
     async def aclose(self) -> None:
         await self._interno.aclose()
@@ -134,12 +169,20 @@ def _cookies_recusados() -> http.cookiejar.CookieJar:
     return http.cookiejar.CookieJar(policy=http.cookiejar.DefaultCookiePolicy(allowed_domains=[]))
 
 
-def http_para_sistema(segredo: Segredo, *, prazo_leitura: float = 35.0) -> httpx2.AsyncClient:
+def http_para_sistema(
+    segredo: Segredo,
+    *,
+    prazo_leitura: float = 35.0,
+    teto_resposta: int = TETO_RESPOSTA_PADRAO,
+    cabecalhos: dict[str, str] | None = None,
+) -> httpx2.AsyncClient:
     """Cliente HTTP de saida, um por chamada: TLS do sistema operacional, sem proxy do ambiente."""
     return httpx2.AsyncClient(
-        transport=_TransporteQueClassifica(httpx2.AsyncHTTPTransport(retries=0, verify=ssl.create_default_context())),
+        transport=_TransporteQueClassifica(
+            httpx2.AsyncHTTPTransport(retries=0, verify=ssl.create_default_context()), teto_resposta
+        ),
         auth=_ChaveDoCofre(segredo),
-        headers={"User-Agent": f"mcp-claro/{__version__}"},
+        headers={"User-Agent": f"mcp-claro/{__version__}"} | (cabecalhos or {}),
         timeout=httpx2.Timeout(connect=3.0, read=prazo_leitura, write=10.0, pool=3.0),
         follow_redirects=False,
         max_redirects=0,
@@ -196,8 +239,14 @@ async def sondar(endereco: str, segredo: Segredo, *, prazo: float = 10.0) -> Son
                     try:
                         bruto = await sessao.send_discover(VERSAO_MCP)
                     except MCPError as erro:
+                        status = tentativa.status_http[-1] if tentativa.status_http else None
                         if tentativa.fase is not None or erro.code == types.REQUEST_TIMEOUT:
                             return Sondagem(False, "sistema inalcancavel", codigo=erro.code, inalcancavel=True)
+                        if status in _SEM_VEREDITO or (status is not None and status >= 500):
+                            # O sistema respondeu, mas nao disse nada sobre versao: sem acesso ou fora do ar.
+                            return Sondagem(
+                                False, f"sem resposta de versao (HTTP {status})", codigo=erro.code, inalcancavel=True
+                            )
                         return Sondagem(False, "o sistema nao fala a versao 2026-07-28", codigo=erro.code)
                     try:
                         resultado = types.DiscoverResult.model_validate(bruto)
@@ -250,14 +299,20 @@ async def chamar_ferramenta(
     *,
     traceparent: str | None = None,
     prazo: float = 30.0,
+    esquema_declarado: dict[str, Any] | None = None,
+    teto_resposta: int = TETO_RESPOSTA_PADRAO,
 ) -> Resposta:
     """Exatamente um POST ``tools/call``. Devolve o resultado cru ou a classificacao da falha."""
     tentativa = Tentativa()
     marca = _TENTATIVA.set(tentativa)
     meta = {"traceparent": traceparent} if traceparent else None
+    # Cabecalhos Mcp-Param-* que o sistema exige quando o esquema dele marca x-mcp-header.
+    cabecalhos = mcp_param_headers(x_mcp_header_map(esquema_declarado), argumentos) if esquema_declarado else {}
     try:
         async with (
-            http_para_sistema(segredo, prazo_leitura=prazo + 5) as http,
+            http_para_sistema(
+                segredo, prazo_leitura=prazo + 5, teto_resposta=teto_resposta, cabecalhos=cabecalhos
+            ) as http,
             streamable_http_client(endereco, http_client=http, terminate_on_close=False) as (
                 leitura,
                 escrita,
@@ -276,7 +331,8 @@ async def chamar_ferramenta(
                     return Resposta(tentativa.fase, erro=erro.error, status_http=status, excecao=tentativa.excecao)
                 if erro.code in (types.REQUEST_TIMEOUT, -32000):
                     return Resposta("duvida", erro=erro.error, status_http=status)
-                if status and status[-1] >= 500:
+                if status and (status[-1] >= 500 or 200 <= status[-1] < 300):
+                    # 5xx, 202, corpo invalido ou erro dentro de um 2xx: o sistema pode ter executado.
                     return Resposta("duvida", erro=erro.error, status_http=status)
                 if status and (status[-1] in (401, 403) or 300 <= status[-1] < 400):
                     return Resposta("recusado_http", erro=erro.error, status_http=status)

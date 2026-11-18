@@ -84,12 +84,7 @@ def _png_1x1(r: int, g: int, b: int) -> bytes:
 
     cabecalho = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)  # 8 bits, RGB, sem entrelacamento
     linha = b"\x00" + bytes((r, g, b))  # filtro 0 + um pixel
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + bloco(b"IHDR", cabecalho)
-        + bloco(b"IDAT", zlib.compress(linha))
-        + bloco(b"IEND", b"")
-    )
+    return b"\x89PNG\r\n\x1a\n" + bloco(b"IHDR", cabecalho) + bloco(b"IDAT", zlib.compress(linha)) + bloco(b"IEND", b"")
 
 
 def _wav_silencio(milissegundos: int = 10, taxa: int = 8000) -> bytes:
@@ -311,18 +306,12 @@ def criar() -> Starlette:
         return _resultado("This is a simple text response for testing.")
 
     async def imagem(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
-        return types.CallToolResult(
-            content=[types.ImageContent(type="image", data=PNG_B64, mime_type="image/png")]
-        )
+        return types.CallToolResult(content=[types.ImageContent(type="image", data=PNG_B64, mime_type="image/png")])
 
     async def audio(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
-        return types.CallToolResult(
-            content=[types.AudioContent(type="audio", data=WAV_B64, mime_type="audio/wav")]
-        )
+        return types.CallToolResult(content=[types.AudioContent(type="audio", data=WAV_B64, mime_type="audio/wav")])
 
-    async def embutido(
-        ctx: ServerRequestContext[Any], p: types.CallToolRequestParams
-    ) -> types.CallToolResult:
+    async def embutido(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
         recurso = types.TextResourceContents(
             uri="test://embedded-resource",
             mime_type="text/plain",
@@ -344,14 +333,10 @@ def criar() -> Starlette:
             ]
         )
 
-    async def com_erro(
-        ctx: ServerRequestContext[Any], p: types.CallToolRequestParams
-    ) -> types.CallToolResult:
+    async def com_erro(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
         return _resultado("This tool intentionally returns an error for testing", erro=True)
 
-    async def com_progresso(
-        ctx: ServerRequestContext[Any], p: types.CallToolRequestParams
-    ) -> types.CallToolResult:
+    async def com_progresso(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
         # Sem progressToken no pedido o kit nao manda nada; as pausas acontecem igual.
         for i, valor in enumerate((0, 50, 100)):
             if i:
@@ -384,16 +369,12 @@ def criar() -> Starlette:
             return pedir({"confirm": _PEDE_CONFIRMACAO})
         return _resultado("Confirmed.")
 
-    async def muda_ferramentas(
-        ctx: ServerRequestContext[Any], p: types.CallToolRequestParams
-    ) -> types.CallToolResult:
+    async def muda_ferramentas(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
         geracao["ferramentas"] += 1
         await barramento.publish(ToolsListChanged())
         return _resultado(f"Tool list changed (generation {geracao['ferramentas']}).")
 
-    async def muda_prompts(
-        ctx: ServerRequestContext[Any], p: types.CallToolRequestParams
-    ) -> types.CallToolResult:
+    async def muda_prompts(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:
         geracao["prompts"] += 1
         await barramento.publish(PromptsListChanged())
         return _resultado(f"Prompt list changed (generation {geracao['prompts']}).")
@@ -607,9 +588,7 @@ def criar() -> Starlette:
             resource_templates=[types.ResourceTemplate.model_validate(m) for m in MODELOS]
         )
 
-    async def ler(
-        ctx: ServerRequestContext[Any], p: types.ReadResourceRequestParams
-    ) -> types.ReadResourceResult:
+    async def ler(ctx: ServerRequestContext[Any], p: types.ReadResourceRequestParams) -> types.ReadResourceResult:
         return ler_recurso(str(p.uri))
 
     sugestoes: dict[tuple[str, str], list[str]] = {
@@ -618,14 +597,10 @@ def criar() -> Starlette:
         ("test://template/{id}/data", "id"): ["123", "456", "789"],
     }
 
-    async def completar(
-        ctx: ServerRequestContext[Any], p: types.CompleteRequestParams
-    ) -> types.CompleteResult:
+    async def completar(ctx: ServerRequestContext[Any], p: types.CompleteRequestParams) -> types.CompleteResult:
         alvo = p.ref.name if isinstance(p.ref, types.PromptReference) else p.ref.uri
         valores = [v for v in sugestoes.get((alvo, p.argument.name), []) if v.startswith(p.argument.value)]
-        return types.CompleteResult(
-            completion=types.Completion(values=valores, total=len(valores), has_more=False)
-        )
+        return types.CompleteResult(completion=types.Completion(values=valores, total=len(valores), has_more=False))
 
     esquemas = {f["name"]: f["inputSchema"] for f in ferramentas()}
     server: Server[Any] = Server(

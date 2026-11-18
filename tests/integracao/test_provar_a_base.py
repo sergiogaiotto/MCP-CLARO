@@ -46,9 +46,14 @@ class Ambiente:
     sistema_id: uuid.UUID
     pessoa_id: uuid.UUID
     aplicativo_id: uuid.UUID
+    modelo_id: uuid.UUID
+    ordem_id: uuid.UUID
+    cifra: Any
+    client_id: str
 
     def cracha(self, **kw: Any) -> str:
         kw.setdefault("audiencia", RECURSO)
+        kw.setdefault("client_id", self.client_id)
         return self.idp.cracha(**kw)
 
 
@@ -88,7 +93,7 @@ async def subir(banco_migrado: Parametros) -> AsyncIterator[Ambiente]:
             sufixo = uuid.uuid4().hex[:8]
             async with engine.begin() as c:
                 app_id = await repositorio.habilitar_aplicativo(
-                    c, client_id="claude-code", nome="Claude Code", familia="claude-code"
+                    c, client_id=f"claude-code-{sufixo}", nome="Claude Code", familia="claude-code"
                 )
                 sistema_id = await repositorio.cadastrar_sistema(
                     c, nome=f"leitura-{sufixo}", endereco=f"{url_sistema}/mcp", tipo_chave="por_pessoa"
@@ -135,16 +140,31 @@ async def subir(banco_migrado: Parametros) -> AsyncIterator[Ambiente]:
                     validade_dias=30,
                     criado_por="admin-teste",
                 )
-                await repositorio.conceder_ordem(
+                ordem = await repositorio.conceder_ordem(
                     c, pessoa_id=pessoa.id, aplicativo_id=app_id, modelo_id=modelo, dias=7, max_dias=30
                 )
-            await despachante.post(
-                "/interno/chaves",
-                {"sistema_id": str(sistema_id), "pessoa_id": str(pessoa.id), "segredo": "chave-ana"},
-            )
+            # Chave de pessoa nasce da autorizacao dela no sistema (Fase 1); aqui, direto, como o despachante faria.
+            from mcp_claro.despachante import chaves
+
+            async with engine.begin() as c:
+                await chaves.guardar(c, cifra, sistema_id=sistema_id, pessoa_id=pessoa.id, segredo="chave-ana")
             await despachante.fechar()
             try:
-                yield Ambiente(p, idp, url_entrada, url_desp, url_sistema, sistema_app, sistema_id, pessoa.id, app_id)
+                yield Ambiente(
+                    p,
+                    idp,
+                    url_entrada,
+                    url_desp,
+                    url_sistema,
+                    sistema_app,
+                    sistema_id,
+                    pessoa.id,
+                    app_id,
+                    modelo,
+                    ordem,
+                    cifra,
+                    f"claude-code-{sufixo}",
+                )
             finally:
                 await engine.dispose()
 
@@ -230,12 +250,12 @@ async def test_sem_cracha_401_com_metadados(amb: Ambiente) -> None:
 
 
 async def test_aplicativo_da_geracao_antiga_recebe_recusa_legivel_e_conta(amb: Ambiente) -> None:
-    antes = CONTADORES.recusas_pendentes().get(("aplicativo", "claude-code", "2025-11-25", "initialize"), 0)
+    antes = CONTADORES.recusas_pendentes().get(("aplicativo", amb.client_id, "2025-11-25", "initialize"), 0)
     with pytest.raises(BaseException) as erro:  # noqa: PT011 - o kit embrulha em ExceptionGroup
         async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha(), modo="legacy") as c:
             await c.list_tools()
     assert "-32022" in repr(erro.value) or "Unsupported protocol version" in repr(erro.value)
-    depois = CONTADORES.recusas_pendentes().get(("aplicativo", "claude-code", "2025-11-25", "initialize"), 0)
+    depois = CONTADORES.recusas_pendentes().get(("aplicativo", amb.client_id, "2025-11-25", "initialize"), 0)
     assert depois == antes + 1
 
 
@@ -264,10 +284,158 @@ async def test_ferramenta_fora_da_vitrine_e_argumento_fora_do_esquema(amb: Ambie
             await c.call_tool(nome, {"mes": "2026-10", "extra": 1})
 
 
-async def test_outra_pessoa_nao_alcanca_o_que_e_da_ana(amb: Ambiente) -> None:
+async def test_pessoa_que_nao_e_de_teste_com_fase1_desligada_e_recusada(amb: Ambiente) -> None:
+    async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha(sujeito="pessoa-sem-teste")) as c:
+        with pytest.raises(MCPError, match="Fase 1"):
+            await c.list_tools()
+
+
+async def test_uma_pessoa_nao_alcanca_o_que_e_de_outra(amb: Ambiente) -> None:
+    from mcp_claro.despachante import chaves
+
+    engine = criar_engine(amb.p, pool_size=1, max_overflow=0)
+    async with engine.begin() as c:
+        bia = await repositorio.pessoa_no_login(c, amb.idp.emissor, "pessoa-bia", "Bia")
+        await c.execute(text("UPDATE pessoas SET teste = true WHERE id = :p"), {"p": bia.id})
+        modelo_bia = await repositorio.criar_modelo_ordem(
+            c,
+            nome=f"so-cadastro-{uuid.uuid4().hex[:6]}",
+            descricao="So cadastro",
+            ferramentas=[(amb.sistema_id, "ver_cadastro")],
+            validade_dias=30,
+            criado_por="admin-teste",
+        )
+        await repositorio.conceder_ordem(
+            c, pessoa_id=bia.id, aplicativo_id=amb.aplicativo_id, modelo_id=modelo_bia, dias=7, max_dias=30
+        )
+        await chaves.guardar(c, amb.cifra, sistema_id=amb.sistema_id, pessoa_id=bia.id, segredo="chave-bia")
+    await engine.dispose()
     async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha(sujeito="pessoa-bia")) as c:
-        with pytest.raises(MCPError):
-            await c.list_tools()  # bia nao e pessoa de teste e a Fase 1 esta desligada
+        nomes = [t.name for t in (await c.list_tools()).tools]
+        assert len(nomes) == 1
+        assert nomes[0].startswith("cadastro_")
+        r = await c.call_tool(nomes[0], {})
+        assert r.structured_content["nome"] == "Bia Teste"
+        assert r.structured_content["cpf"] != "987.654.321-00"
+    async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha()) as c:
+        fatura_da_ana = next(t.name for t in (await c.list_tools()).tools if t.name.startswith("fatura_"))
+    async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha(sujeito="pessoa-bia")) as c:
+        with pytest.raises(MCPError, match="nao esta na sua vitrine"):
+            await c.call_tool(fatura_da_ana, {"mes": "2026-10"})
+
+
+@pytest.mark.parametrize(
+    "mudanca",
+    [
+        "UPDATE ordens_servico SET fim = now() - interval '1 second', inicio = now() - interval '2 days'"
+        " WHERE id = :ordem",
+        "UPDATE ordens_servico SET situacao = 'revogada' WHERE id = :ordem",
+        "UPDATE modelos_ordem SET ativo = false WHERE id = :modelo",
+        "UPDATE sistemas SET situacao = 'quarentena' WHERE id = :sistema",
+        "UPDATE sistemas SET situacao = 'recusado' WHERE id = :sistema",
+        "UPDATE ferramentas_revisadas SET situacao = 'suspensa' WHERE sistema_id = :sistema",
+    ],
+)
+async def test_vitrine_vazia_quando_nada_mais_vale(amb: Ambiente, mudanca: str) -> None:
+    engine = criar_engine(amb.p, pool_size=1, max_overflow=0)
+    async with engine.begin() as c:
+        await c.execute(text(mudanca), {"ordem": amb.ordem_id, "modelo": amb.modelo_id, "sistema": amb.sistema_id})
+    await engine.dispose()
+    async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha()) as c:
+        assert (await c.list_tools()).tools == []
+
+
+async def test_aplicativo_pausado_e_recusado(amb: Ambiente) -> None:
+    engine = criar_engine(amb.p, pool_size=1, max_overflow=0)
+    async with engine.begin() as c:
+        await c.execute(text("UPDATE aplicativos SET situacao = 'pausado' WHERE id = :a"), {"a": amb.aplicativo_id})
+    await engine.dispose()
+    async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha()) as c:
+        with pytest.raises(MCPError, match="pausado"):
+            await c.list_tools()
+
+
+async def test_despachante_recusa_versao_substituida_da_ferramenta(amb: Ambiente) -> None:
+    engine = criar_engine(amb.p, pool_size=1, max_overflow=0)
+    async with engine.begin() as c:
+        antiga = (
+            await c.execute(
+                text(
+                    "SELECT id FROM ferramentas_revisadas WHERE sistema_id = :s AND nome_original = 'consultar_fatura'"
+                    " AND situacao = 'ativa'"
+                ),
+                {"s": amb.sistema_id},
+            )
+        ).scalar_one()
+        definicao = dict(
+            (
+                await c.execute(
+                    text(
+                        "SELECT definicao FROM ferramentas_vistas WHERE sistema_id = :s AND nome = 'consultar_fatura'"
+                    ),
+                    {"s": amb.sistema_id},
+                )
+            ).scalar_one()
+        )
+        await repositorio.revisar_ferramenta(
+            c,
+            sistema_id=amb.sistema_id,
+            definicao_declarada=definicao,
+            nome_vitrine=f"fatura_v2_{uuid.uuid4().hex[:4]}",
+            descricao="Agora e acao.",
+            classe="muda",
+            revisado_por="admin-teste",
+        )
+    await engine.dispose()
+    async with httpx2.AsyncClient() as http:
+        r = await http.post(
+            f"{amb.despachante}/interno/ler",
+            json={
+                "pessoa_id": str(amb.pessoa_id),
+                "aplicativo_id": str(amb.aplicativo_id),
+                "ordem_id": str(amb.ordem_id),
+                "ferramenta_id": str(antiga),
+                "argumentos": {"mes": "2026-10"},
+            },
+        )
+    assert r.status_code == 403
+    assert amb.sistema_app.state.contagem.chamadas.get("consultar_fatura", 0) == 0
+
+
+async def test_entrada_nao_ativa_sistema_nem_muda_classe(amb: Ambiente) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    engine = criar_engine(amb.p, pool_size=1, max_overflow=0)
+    async with engine.connect() as c:
+        await c.execute(text("SET ROLE mcp_claro_entrada"))
+        with pytest.raises(DBAPIError):
+            await c.execute(
+                text("UPDATE ferramentas_revisadas SET classe = 'le' WHERE sistema_id = :s"), {"s": amb.sistema_id}
+            )
+        await c.rollback()
+        await c.execute(text("SET ROLE mcp_claro_entrada"))
+        with pytest.raises(DBAPIError):
+            await c.execute(text("UPDATE sistemas SET versao_mcp = '2026-07-28' WHERE id = :s"), {"s": amb.sistema_id})
+        await c.rollback()
+        await c.execute(text("SET ROLE mcp_claro_entrada"))
+        await c.execute(text("UPDATE sistemas SET situacao = 'desativado' WHERE id = :s"), {"s": amb.sistema_id})
+        with pytest.raises(DBAPIError, match="sondagem"):
+            await c.execute(text("UPDATE sistemas SET situacao = 'ativo' WHERE id = :s"), {"s": amb.sistema_id})
+        await c.rollback()
+    await engine.dispose()
+
+
+async def test_dado_pessoal_nao_vaza_por_texto_nem_por_meta(amb: Ambiente) -> None:
+    async with cliente_mcp(f"{amb.entrada}/mcp", amb.cracha()) as c:
+        nome = next(t.name for t in (await c.list_tools()).tools if t.name.startswith("cadastro_"))
+        r = await c.call_tool(nome, {})
+    textos = " ".join(b.text for b in r.content if hasattr(b, "text"))
+    assert "ana@exemplo.test" not in textos
+    assert "123.456.789-09" not in str(r.model_dump())
+    # So chaves do proprio MCP-CLARO: as nossas e o carimbo serverInfo que o kit poe com o nome do gateway.
+    meta = dict(r.meta or {})
+    assert meta.pop("io.modelcontextprotocol/serverInfo", {}).get("name") == "mcp-claro"
+    assert all(k.startswith("br.com.claro.mcp-claro/") for k in meta)
 
 
 async def test_acao_pela_porta_de_leitura_e_recusada_pelo_despachante(amb: Ambiente, banco_migrado: Parametros) -> None:

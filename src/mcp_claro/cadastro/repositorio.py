@@ -11,7 +11,7 @@ from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from mcp_claro.cadastro.impressao import impressao
-from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine, Pessoa, Sistema
+from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
 from mcp_claro.entrada.argumentos import conferir_esquema
 
 
@@ -128,6 +128,36 @@ async def ferramenta_na_vitrine(
         )
     ).first()
     return _ferramenta(linha) if linha else None
+
+
+async def ferramenta_da_ordem(
+    c: AsyncConnection,
+    *,
+    pessoa_id: uuid.UUID,
+    aplicativo_id: uuid.UUID,
+    ordem_id: uuid.UUID,
+    ferramenta_id: uuid.UUID,
+    versao: str,
+) -> FerramentaVitrine | None:
+    """Reconferencia do despachante: a mesma regra da vitrine, presa a ordem e a versao revisada vigente."""
+    linha = (
+        await c.execute(
+            text(_SQL_VITRINE + " AND f.id = :f AND o.id = :o ORDER BY f.id, o.fim DESC"),
+            {"pessoa": pessoa_id, "aplicativo": aplicativo_id, "versao": versao, "f": ferramenta_id, "o": ordem_id},
+        )
+    ).first()
+    return _ferramenta(linha) if linha else None
+
+
+async def esquema_declarado(c: AsyncConnection, sistema_id: uuid.UUID, nome: str) -> dict[str, Any] | None:
+    """Esquema de entrada que o sistema declarou por ultimo (para os cabecalhos Mcp-Param-* de saida)."""
+    valor = (
+        await c.execute(
+            text("SELECT definicao -> 'inputSchema' FROM ferramentas_vistas WHERE sistema_id = :s AND nome = :n"),
+            {"s": sistema_id, "n": nome},
+        )
+    ).scalar_one_or_none()
+    return dict(valor) if isinstance(valor, dict) else None
 
 
 async def ferramenta_por_id(c: AsyncConnection, ferramenta_id: uuid.UUID) -> FerramentaVitrine | None:
@@ -255,7 +285,13 @@ async def revisar_ferramenta(
                         "d": descricao,
                         "ee": json.dumps(esquema),
                         "es": json.dumps(definicao_declarada.get("outputSchema")),
-                        "et": json.dumps(definicao_declarada.get("annotations") or {}),
+                        "et": json.dumps(
+                            {
+                                k: bool(v)
+                                for k, v in (definicao_declarada.get("annotations") or {}).items()
+                                if k in DICAS_CONHECIDAS
+                            }
+                        ),
                         "c": classe,
                         "r": risco,
                         "cp": campos_pessoais or [],

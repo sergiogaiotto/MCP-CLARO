@@ -26,7 +26,11 @@ def main() -> int:
     if tls:
         contexto = ssl.create_default_context(cafile=p.INTERNAL_CA_FILE)
         contexto.check_hostname = False
-        contexto.load_cert_chain(p.INTERNAL_CERT_FILE or "", p.INTERNAL_KEY_FILE or "")
+        # A porta interna so aceita quem pode chama-la; a conferencia de saude tem certificado proprio,
+        # emitido pela autoridade de clientes desta porta e montado so neste conteiner.
+        cert = p.INTERNAL_HEALTH_CERT_FILE or p.INTERNAL_CERT_FILE or ""
+        chave = p.INTERNAL_HEALTH_KEY_FILE or p.INTERNAL_KEY_FILE or ""
+        contexto.load_cert_chain(cert, chave)
     esquema = "https" if tls else "http"
     for porta in portas:
         try:

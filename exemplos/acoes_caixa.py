@@ -71,9 +71,7 @@ def criar(contagem: Contagem | None = None) -> Starlette:
     caixa: list[dict[str, Any]] = []
     numeros = itertools.count(1)
 
-    async def listar(
-        ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None
-    ) -> types.ListToolsResult:
+    async def listar(ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         return types.ListToolsResult(tools=[types.Tool.model_validate(f) for f in FERRAMENTAS])
 
     async def chamar(ctx: ServerRequestContext[Any], p: types.CallToolRequestParams) -> types.CallToolResult:

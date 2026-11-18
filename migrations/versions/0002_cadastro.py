@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _util import sql_em_bloco  # noqa: E402
+from _util import sql_em_bloco
 
 revision = "0002"
 down_revision = "0001"
@@ -144,6 +144,37 @@ CREATE TABLE chaves_cifradas (
   atualizada_em timestamptz NOT NULL DEFAULT now(),
   CHECK (pessoa_id IS NULL OR aplicativo_id IS NULL)
 );
+-- Guardas: so a sondagem (despachante) poe um sistema ativo na 2026-07-28; mudar o endereco exige nova
+-- sondagem; nenhuma ferramenta suspensa ou substituida volta a valer sem nova revisao (nova versao).
+CREATE FUNCTION sistemas_guarda() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.endereco IS DISTINCT FROM OLD.endereco OR NEW.tipo_chave IS DISTINCT FROM OLD.tipo_chave THEN
+    NEW.situacao := 'pendente';
+    NEW.versao_mcp := NULL;
+    NEW.sondagem := NULL;
+  END IF;
+  IF current_user IN ('mcp_claro_entrada', 'mcp_claro_rotinas')
+     AND NEW.situacao = 'ativo' AND OLD.situacao IS DISTINCT FROM 'ativo' THEN
+    RAISE EXCEPTION 'So a sondagem de versao do despachante ativa um sistema' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF current_user = 'mcp_claro_entrada' AND NEW.situacao NOT IN ('desativado', 'pendente')
+     AND NEW.situacao IS DISTINCT FROM OLD.situacao THEN
+    RAISE EXCEPTION 'A entrada so desativa um sistema' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER sistemas_guarda BEFORE UPDATE ON sistemas FOR EACH ROW EXECUTE FUNCTION sistemas_guarda();
+
+CREATE FUNCTION ferramentas_guarda() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.situacao = 'ativa' AND OLD.situacao <> 'ativa' THEN
+    RAISE EXCEPTION 'Ferramenta so volta a valer por nova revisao (nova versao)' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER ferramentas_guarda BEFORE UPDATE ON ferramentas_revisadas
+  FOR EACH ROW EXECUTE FUNCTION ferramentas_guarda();
+
 CREATE UNIQUE INDEX chaves_unicas ON chaves_cifradas
   (sistema_id, coalesce(pessoa_id, '00000000-0000-0000-0000-000000000000'::uuid),
    coalesce(aplicativo_id, '00000000-0000-0000-0000-000000000000'::uuid), tipo);
@@ -153,9 +184,13 @@ GRANTS = r"""
 -- Leitura do cadastro por todos os papeis.
 GRANT SELECT ON aplicativos, pessoas, sistemas, ferramentas_revisadas, modelos_ordem, modelos_ordem_ferramentas,
   ordens_servico, ferramentas_vistas TO mcp_claro_entrada, mcp_claro_despachante, mcp_claro_rotinas;
--- A entrada atende as telas do ADMIN e o primeiro login das pessoas.
-GRANT INSERT, UPDATE ON aplicativos, pessoas, sistemas, ferramentas_revisadas, modelos_ordem,
-  ordens_servico TO mcp_claro_entrada;
+-- A entrada atende as telas do ADMIN e o primeiro login das pessoas. Ela e a peca voltada a internet:
+-- nao muda a versao nem a sondagem de um sistema, nem a classe de uma ferramenta revisada.
+GRANT INSERT, UPDATE ON aplicativos, pessoas, modelos_ordem, ordens_servico TO mcp_claro_entrada;
+GRANT INSERT (nome, endereco, origem, tipo_chave, autorizacao) ON sistemas TO mcp_claro_entrada;
+GRANT UPDATE (nome, endereco, tipo_chave, situacao, motivo, autorizacao, atualizado_em) ON sistemas TO mcp_claro_entrada;
+GRANT INSERT ON ferramentas_revisadas TO mcp_claro_entrada;
+GRANT UPDATE (situacao, motivo) ON ferramentas_revisadas TO mcp_claro_entrada;
 GRANT INSERT, DELETE ON modelos_ordem_ferramentas TO mcp_claro_entrada;
 -- O despachante grava a sondagem de versao, o que os sistemas declaram e as chaves cifradas.
 GRANT UPDATE (versao_mcp, sondagem, sondado_em, situacao, motivo, atualizado_em) ON sistemas TO mcp_claro_despachante;

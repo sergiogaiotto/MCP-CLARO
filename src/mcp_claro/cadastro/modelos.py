@@ -7,6 +7,20 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 Classe = Literal["le", "muda", "tem_volta"]
+
+DICAS_CONHECIDAS = frozenset({"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"})
+"""So estas dicas do fornecedor passam a vitrine; titulo e textos vem do cadastro revisado."""
+
+
+def sem_x_mcp_header(esquema: Any) -> Any:
+    """Tira as anotacoes x-mcp-header: o salto do aplicativo termina na entrada; a saida as recria."""
+    if isinstance(esquema, dict):
+        return {k: sem_x_mcp_header(v) for k, v in esquema.items() if k != "x-mcp-header"}
+    if isinstance(esquema, list):
+        return [sem_x_mcp_header(v) for v in esquema]
+    return esquema
+
+
 TipoChave = Literal["por_pessoa", "compartilhada", "programa"]
 
 
@@ -64,14 +78,14 @@ class FerramentaVitrine:
 
     def como_tool(self) -> dict[str, Any]:
         """Definicao no formato do fio da 2026-07-28, com nomes e textos do cadastro, nao do sistema."""
-        etiquetas = dict(self.etiquetas)
+        etiquetas = {k: bool(v) for k, v in self.etiquetas.items() if k in DICAS_CONHECIDAS}
         etiquetas["readOnlyHint"] = self.classe == "le"
         if self.classe != "le":
             etiquetas.setdefault("destructiveHint", self.classe == "muda")
         tool: dict[str, Any] = {
             "name": self.nome_vitrine,
             "description": self.descricao,
-            "inputSchema": self.esquema_entrada,
+            "inputSchema": sem_x_mcp_header(self.esquema_entrada),
             "annotations": etiquetas,
             "_meta": {
                 "br.com.claro.mcp-claro/sistema": self.sistema.nome,
