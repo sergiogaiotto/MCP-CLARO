@@ -150,7 +150,7 @@ class Pedidos:
                     argumentos=pedido.argumentos,
                     aplicativo_diz=pedido.aplicativo_diz,
                     rota=rota,
-                    prazo_ficha_minutos=valores["CARD_TTL_MINUTES"],
+                    prazo_ficha_minutos=self._prazo_da_ficha(pedido, valores),
                     espera_segundos=valores["OUTBOX_HOLD_SECONDS"],
                     trace_id=pedido.trace_id,
                 )
@@ -162,6 +162,13 @@ class Pedidos:
             )
         CONTADORES.somar("acoes_pedidas", rota=rota.motivo)
         return op, False
+
+    def _prazo_da_ficha(self, pedido: Pedido, valores: dict[str, int]) -> int:
+        """Programa que roda sozinho (decisao 9): a ficha vai as pendencias do responsavel e vence no prazo
+        ``PROGRAM_PENDING_TIMEOUT_HOURS``. Para assistentes, ``CARD_TTL_MINUTES``."""
+        if pedido.aplicativo.tipo == "programa":
+            return int(self.p.PROGRAM_PENDING_TIMEOUT_HOURS) * 60
+        return valores["CARD_TTL_MINUTES"]
 
     async def _rota(self, c: Any, pedido: Pedido, valores: dict[str, int]) -> Rota | None:
         f = pedido.ferramenta

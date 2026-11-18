@@ -121,6 +121,13 @@ BEGIN
       RAISE EXCEPTION 'Mudanca de estado recusada na porta de saida: % -> %', OLD.estado, NEW.estado
         USING ERRCODE = 'check_violation';
     END IF;
+    -- Enviar e so do despachante: so ele marca "enviando", grava o fim do envio e para por restauracao.
+    IF (NEW.estado IN ('enviando', 'parada_por_restauracao') OR OLD.estado = 'enviando')
+       AND current_user <> 'mcp_claro_despachante'
+       AND current_user <> (SELECT relowner::regrole::text FROM pg_class WHERE oid = TG_RELID) THEN
+      RAISE EXCEPTION 'So o despachante muda uma acao para %, ou a partir de enviando', NEW.estado
+        USING ERRCODE = 'insufficient_privilege';
+    END IF;
     NEW.mudou_em := now();
   END IF;
   IF NEW.operacao_id IS DISTINCT FROM OLD.operacao_id THEN
