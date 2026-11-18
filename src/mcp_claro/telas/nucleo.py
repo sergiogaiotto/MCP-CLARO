@@ -5,9 +5,11 @@ from __future__ import annotations
 import functools
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlencode
 
+import httpx2
 from jinja2 import Environment
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from starlette.requests import Request
@@ -46,6 +48,28 @@ class Interrompe(Exception):
     def __init__(self, resposta: Response) -> None:
         self.resposta = resposta
         super().__init__("resposta pronta")
+
+
+@dataclass(frozen=True, slots=True)
+class RespostaInterna:
+    """O que a porta interna do despachante respondeu. ``status`` 0: nao respondeu."""
+
+    status: int
+    dados: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return 200 <= self.status < 300
+
+    @property
+    def motivo(self) -> str:
+        valor = self.dados.get("motivo")
+        return valor if isinstance(valor, str) else ""
+
+    @property
+    def mensagem(self) -> str:
+        valor = self.dados.get("mensagem")
+        return valor if isinstance(valor, str) else ""
 
 
 class Telas:
@@ -91,6 +115,30 @@ class Telas:
 
     def erro(self, pedido: Request, status: int, titulo: str, mensagem: str) -> HTMLResponse:
         return self.pagina(pedido, "erro.html", {"titulo": titulo, "mensagem": mensagem}, status=status)
+
+    # --- Porta interna do despachante ---
+
+    async def porta_interna(self, caminho: str, corpo: dict[str, Any]) -> RespostaInterna:
+        """Um POST na porta interna. Recusa e falta de resposta voltam como ``RespostaInterna``, sem excecao.
+
+        O log leva so o caminho, o status e o codigo do motivo: nunca o corpo, que pode ter chave ou codigo.
+        """
+        try:
+            dados = await self.despachante.post(caminho, corpo)
+        except httpx2.HTTPStatusError as erro:
+            try:
+                devolvido = erro.response.json()
+            except ValueError:
+                devolvido = {}
+            resposta = RespostaInterna(erro.response.status_code, devolvido if isinstance(devolvido, dict) else {})
+            log.info(
+                "telas_porta_interna_recusou", caminho=caminho, status=resposta.status, motivo=resposta.motivo[:60]
+            )
+            return resposta
+        except (httpx2.HTTPError, ValueError) as erro:
+            log.warning("telas_porta_interna_sem_resposta", caminho=caminho, erro=type(erro).__name__)
+            return RespostaInterna(0)
+        return RespostaInterna(200, dados if isinstance(dados, dict) else {})
 
     # --- Sessao ---
 

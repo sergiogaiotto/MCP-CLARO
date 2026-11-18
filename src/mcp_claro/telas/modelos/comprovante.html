@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block titulo %}Comprovante{% endblock %}
+{% block conteudo %}
+<h1>Comprovante {% if p.tipo == "bloqueio" %}do bloqueio{% else %}da pausa{% endif %}</h1>
+<section class="cartao comprovante">
+  <dl>
+    <dt>O que parou</dt><dd>{{ p.o_que }}</dd>
+    <dt>Como</dt><dd>{% if p.tipo == "bloqueio" %}Bloqueado{% else %}Pausado{% endif %}</dd>
+    <dt>Desde</dt><dd>{{ p.desde | data_hora }}</dd>
+    <dt>Quem ligou</dt><dd>{{ p.quem }}</dd>
+    <dt>Número</dt><dd><code>{{ p.id }}</code></dd>
+    <dt>Situação</dt><dd>{% if p.encerrado_em %}Terminou em {{ p.encerrado_em | data_hora }} ({{ p.encerrado_por }}){% else %}Valendo agora{% endif %}</dd>
+  </dl>
+  {% if not p.encerrado_em %}
+  {% if p.tipo == "bloqueio" %}
+  <p>Nada mais é lido por você por aqui. Para desfazer, fale com o ADMIN e diga o número acima.</p>
+  {% else %}
+  <p>Nada é lido por você por aqui até você retomar.</p>
+  <form method="post" action="/telas/pausa/{{ p.id }}/retomar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secundario">Retomar agora</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
+<p>Este passo também está no <a href="/telas/extrato">Meu extrato</a>.</p>
+<p><a href="/telas/bloqueio">Bloquear agora</a> · <a href="/telas/pausa">Pausar</a></p>
+{% endblock %}

@@ -31,6 +31,16 @@ FRASES_DAS_TELAS = {
     "admin_programa_cadastrado": {"aplicativo": "P", "quem": "Carla", "responsavel": "Rui", "substituto": "Sara"},
     "admin_webhook_cadastrado": {"destino": "D", "quem": "Carla"},
     "admin_webhook_mudou": {"destino": "D", "situacao": "desligado", "quem": "Carla"},
+    "admin_bloqueio_ligado": {"quem": "Carla", "alcance": "um aplicativo"},
+    "admin_bloqueio_encerrado": {"quem": "Carla", "alcance": "um sistema"},
+    "admin_pausa_ligada": {"quem": "Carla", "alcance": "uma pessoa"},
+    "admin_pausa_encerrada": {"quem": "Carla", "alcance": "todo o MCP-CLARO"},
+    "admin_entrada_mudou": {"nivel": "fechada", "quem": "Carla"},
+    "admin_saida_mudou": {"situacao": "aberta", "quem": "Carla"},
+    "pessoa_desativada": {"quem": "Carla"},
+    "admin_autorizacao_configurada": {"sistema": "S", "quem": "Carla"},
+    "admin_segredo_cliente_entregue": {"sistema": "S", "quem": "Carla"},
+    "admin_chave_entregue": {"dono": "compartilhada", "sistema": "S", "quem": "Carla"},
 }
 
 

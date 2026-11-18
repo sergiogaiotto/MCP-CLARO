@@ -394,3 +394,177 @@ async def mudar_destino(c: AsyncConnection, destino_id: uuid.UUID, ativo: bool) 
             {"a": ativo, "i": destino_id},
         )
     ).scalar_one_or_none()
+
+
+# --- Bloqueio de um toque e pausa ---
+
+_SQL_BLOQUEIOS = (
+    "SELECT b.id, b.tipo, b.alcance, b.pessoa_id, b.aplicativo_id, b.sistema_id, b.quem, b.criado_em,"
+    " b.encerrado_em, b.encerrado_por, a.nome AS aplicativo, s.nome AS sistema, p.nome AS pessoa"
+    " FROM bloqueios b LEFT JOIN aplicativos a ON a.id = b.aplicativo_id"
+    " LEFT JOIN sistemas s ON s.id = b.sistema_id LEFT JOIN pessoas p ON p.id = b.pessoa_id"
+)
+
+
+async def aplicativos_para_parar(c: AsyncConnection, pessoa_id: uuid.UUID) -> Sequence[Row[Any]]:
+    """Aplicativos de IA que a pessoa pode bloquear ou pausar; os que tem ordem dela valendo vem primeiro."""
+    return (
+        await c.execute(
+            text(
+                "SELECT a.id, a.nome, a.situacao, EXISTS (SELECT 1 FROM ordens_servico o WHERE o.aplicativo_id = a.id"
+                " AND o.pessoa_id = :p AND o.situacao = 'ativa' AND o.fim > now()) AS com_ordem"
+                " FROM aplicativos a WHERE a.tipo = 'assistente' AND a.situacao IN ('ativo', 'pausado')"
+                " ORDER BY com_ordem DESC, a.nome"
+            ),
+            {"p": pessoa_id},
+        )
+    ).all()
+
+
+async def bloqueios_que_tocam(c: AsyncConnection, pessoa_id: uuid.UUID) -> Sequence[Row[Any]]:
+    """Bloqueios e pausas ativos da pessoa e os gerais (aplicativo, sistema, tudo), mais novos primeiro."""
+    return (
+        await c.execute(
+            text(
+                _SQL_BLOQUEIOS + " WHERE b.encerrado_em IS NULL AND (b.pessoa_id = :p"
+                " OR b.alcance IN ('aplicativo', 'sistema', 'tudo')) ORDER BY b.criado_em DESC, b.id LIMIT 200"
+            ),
+            {"p": pessoa_id},
+        )
+    ).all()
+
+
+async def bloqueio_com_nomes(c: AsyncConnection, bloqueio_id: uuid.UUID) -> Row[Any] | None:
+    return (await c.execute(text(_SQL_BLOQUEIOS + " WHERE b.id = :i"), {"i": bloqueio_id})).first()
+
+
+async def bloqueio_igual_ativo(
+    c: AsyncConnection,
+    tipo: str,
+    alcance: str,
+    *,
+    pessoa_id: uuid.UUID | None = None,
+    aplicativo_id: uuid.UUID | None = None,
+    sistema_id: uuid.UUID | None = None,
+) -> uuid.UUID | None:
+    """Toque repetido: o mesmo bloqueio (ou pausa) ja ativo, para nao abrir outro igual."""
+    valor = (
+        await c.execute(
+            text(
+                "SELECT id FROM bloqueios WHERE encerrado_em IS NULL AND tipo = :t AND alcance = :al"
+                " AND pessoa_id IS NOT DISTINCT FROM CAST(:p AS uuid)"
+                " AND aplicativo_id IS NOT DISTINCT FROM CAST(:a AS uuid)"
+                " AND sistema_id IS NOT DISTINCT FROM CAST(:s AS uuid) ORDER BY criado_em LIMIT 1"
+            ),
+            {"t": tipo, "al": alcance, "p": pessoa_id, "a": aplicativo_id, "s": sistema_id},
+        )
+    ).scalar_one_or_none()
+    return uuid.UUID(str(valor)) if valor is not None else None
+
+
+async def todos_bloqueios_ativos(c: AsyncConnection) -> Sequence[Row[Any]]:
+    return (
+        await c.execute(text(_SQL_BLOQUEIOS + " WHERE b.encerrado_em IS NULL ORDER BY b.criado_em DESC LIMIT 500"))
+    ).all()
+
+
+async def estado_das_portas(c: AsyncConnection) -> tuple[Row[Any] | None, Row[Any] | None]:
+    entrada = (await c.execute(text("SELECT nivel, motivo, mudou_em, mudou_por FROM estado_entrada"))).first()
+    saida = (await c.execute(text("SELECT aberta, motivo, mudou_em, mudou_por FROM estado_saida"))).first()
+    return entrada, saida
+
+
+# --- Autorizar sistema (pessoa) ---
+
+
+async def sistemas_para_autorizar(
+    c: AsyncConnection, pessoa_id: uuid.UUID, sistema_id: uuid.UUID | None = None
+) -> Sequence[Row[Any]]:
+    """Sistemas de chave por pessoa que entram nas ordens valendo da pessoa, com a ultima autorizacao feita."""
+    return (
+        await c.execute(
+            text(
+                "SELECT s.id, s.nome, s.situacao, s.autorizacao IS NOT NULL AS configurado,"
+                " (SELECT max(e.criado_em) FROM extrato e WHERE e.pessoa_id = :p AND e.sistema_id = s.id"
+                " AND e.tipo = 'autorizacao_concluida') AS autorizado_em"
+                " FROM sistemas s WHERE s.tipo_chave = 'por_pessoa'"
+                " AND (CAST(:s AS uuid) IS NULL OR s.id = :s) AND EXISTS (SELECT 1 FROM ordens_servico o"
+                " JOIN modelos_ordem_ferramentas mf ON mf.modelo_id = o.modelo_id"
+                " WHERE mf.sistema_id = s.id AND o.pessoa_id = :p AND o.situacao = 'ativa' AND o.fim > now())"
+                " ORDER BY s.nome"
+            ),
+            {"p": pessoa_id, "s": sistema_id},
+        )
+    ).all()
+
+
+# --- Pessoas, autorizacao e chaves (ADMIN) ---
+
+
+async def desativar_pessoa(c: AsyncConnection, pessoa_id: uuid.UUID) -> bool:
+    """Desativa a pessoa e encerra as sessoes dela nas telas. ``False`` se ja estava desativada."""
+    mudou = (
+        await c.execute(
+            text(
+                "UPDATE pessoas SET situacao = 'desativada', atualizado_em = now()"
+                " WHERE id = :p AND situacao <> 'desativada' RETURNING id"
+            ),
+            {"p": pessoa_id},
+        )
+    ).first()
+    await c.execute(
+        text("UPDATE sessoes_telas SET encerrada_em = now() WHERE pessoa_id = :p AND encerrada_em IS NULL"),
+        {"p": pessoa_id},
+    )
+    return mudou is not None
+
+
+async def autorizacao_do_sistema(c: AsyncConnection, sistema_id: uuid.UUID) -> dict[str, Any] | None:
+    valor = (
+        await c.execute(text("SELECT autorizacao FROM sistemas WHERE id = :s"), {"s": sistema_id})
+    ).scalar_one_or_none()
+    return dict(valor) if isinstance(valor, dict) else None
+
+
+async def ultimas_entregas(c: AsyncConnection, sistema_id: uuid.UUID) -> dict[str, Any]:
+    """Quando o ADMIN entregou ao cofre, pela ultima vez, cada tipo de chave deste sistema (o valor nunca volta)."""
+    linhas = (
+        await c.execute(
+            text(
+                "SELECT dados->>'entrega' AS entrega, max(criado_em) AS em FROM extrato WHERE sistema_id = :s"
+                " AND tipo IN ('admin_segredo_cliente_entregue', 'admin_chave_entregue') GROUP BY 1"
+            ),
+            {"s": sistema_id},
+        )
+    ).all()
+    return {linha.entrega: linha.em for linha in linhas if linha.entrega}
+
+
+async def programas_cadastrados(c: AsyncConnection) -> Sequence[Row[Any]]:
+    """Programas que rodam sozinhos, para guardar a chave de programa de um sistema."""
+    return (
+        await c.execute(
+            text("SELECT id, client_id, nome, situacao FROM aplicativos WHERE tipo = 'programa' ORDER BY nome")
+        )
+    ).all()
+
+
+async def alvos_do_bloqueio(
+    c: AsyncConnection,
+    *,
+    pessoa_id: uuid.UUID | None,
+    aplicativo_id: uuid.UUID | None,
+    sistema_id: uuid.UUID | None,
+) -> dict[str, uuid.UUID | None]:
+    """Confere no cadastro cada alvo pedido; o que nao existe volta como ``None``."""
+    linha = (
+        await c.execute(
+            text(
+                "SELECT (SELECT id FROM pessoas WHERE id = CAST(:p AS uuid)) AS pessoa_id,"
+                " (SELECT id FROM aplicativos WHERE id = CAST(:a AS uuid)) AS aplicativo_id,"
+                " (SELECT id FROM sistemas WHERE id = CAST(:s AS uuid)) AS sistema_id"
+            ),
+            {"p": pessoa_id, "a": aplicativo_id, "s": sistema_id},
+        )
+    ).one()
+    return {"pessoa_id": linha.pessoa_id, "aplicativo_id": linha.aplicativo_id, "sistema_id": linha.sistema_id}

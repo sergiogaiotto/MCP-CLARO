@@ -247,6 +247,37 @@ class Parametros(BaseSettings):
     ROUTINES_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
     TOOL_DRIFT_CHECK_SECONDS: int = Field(default=900, ge=60, le=86400)
 
+    # Ronda das portas e vigia de fora (Fase 1); regras de recusa do papel vigia em vigia/config.py
+    PATROL_CLIENT_ID: str = "mcp-claro-ronda"
+    PATROL_KEY_FILE: str | None = None
+    PATROL_KEY_ID: str | None = None
+    PATROL_TOKEN_URL: str | None = None
+    PATROL_TOKEN_SCOPE: str = "mcp-claro"  # noqa: S105 - nome de escopo OAuth, nao segredo
+    PATROL_OTHER_AUDIENCE_SCOPE: str = "outro-servico"
+    PATROL_CA_FILE: str | None = None
+    WATCH_CLIENT_ID: str = "mcp-claro-vigia"
+    WATCH_KEY_FILE: str | None = None
+    WATCH_KEY_ID: str | None = None
+    WATCH_TOKEN_URL: str | None = None
+    WATCH_TOKEN_SCOPE: str = "mcp-claro"  # noqa: S105 - nome de escopo OAuth, nao segredo
+    WATCH_OTHER_AUDIENCE_SCOPE: str = "outro-servico"
+    WATCH_FOREIGN_TOOL: str = "mcp_claro_vigia_ferramenta_alheia"
+    WATCH_CA_FILE: str | None = None
+    WATCH_PING_SECONDS: int = Field(default=60, ge=10, le=3600)
+    WATCH_ALARM_EMAILS: ListaTexto = Field(default_factory=list)
+    WATCH_SMTP_HOST: str | None = None
+    WATCH_SMTP_PORT: int = 587
+    WATCH_SMTP_FROM: str | None = None
+    WATCH_SMTP_USERNAME: str | None = None
+    WATCH_SMTP_PASSWORD_FILE: str | None = None
+    WATCH_SMTP_STARTTLS: Chave = True
+    WATCH_WEBHOOK_TARGETS: ListaTexto = Field(default_factory=list)
+    WATCH_WEBHOOK_SECRET_FILE: str | None = None
+    WATCH_INTERNAL_PORT: int = 9445
+    WATCH_CONTINUITY_TOKEN_FILE: str | None = None
+    WATCH_CONTINUITY_URL: str | None = None
+    WATCH_CONTINUITY_CA_FILE: str | None = None
+
     # Limites de pedidos e medicoes
     EDGE_RATE_PER_IP_PER_MINUTE: int = Field(default=120, ge=1)
     RATE_PER_APP_PER_MINUTE: int = Field(default=60, ge=1)
@@ -369,6 +400,23 @@ class Parametros(BaseSettings):
                 erros.append("Em piloto ou producao, GRAFANA_WEBHOOK_PASSWORD_FILE e obrigatorio.")
             if self.SMTP_HOST and not self.SMTP_STARTTLS and self.SMTP_PORT != 465:
                 erros.append("Em piloto ou producao, o SMTP exige STARTTLS (ou a porta 465).")
+        if not self.PATROL_CLIENT_ID.strip() or not self.WATCH_CLIENT_ID.strip():
+            erros.append("PATROL_CLIENT_ID e WATCH_CLIENT_ID nao podem ficar vazios.")
+        if 2 * self.WATCH_PING_SECONDS > self.WATCH_SILENCE_ALARM_SECONDS:
+            erros.append("WATCH_PING_SECONDS precisa caber duas vezes em WATCH_SILENCE_ALARM_SECONDS.")
+        if any(not u.startswith("https://") for u in self.WATCH_WEBHOOK_TARGETS):
+            erros.append("WATCH_WEBHOOK_TARGETS aceita so enderecos https://.")
+        if self.WATCH_WEBHOOK_TARGETS and not self.WATCH_WEBHOOK_SECRET_FILE:
+            erros.append("WATCH_WEBHOOK_TARGETS exige WATCH_WEBHOOK_SECRET_FILE.")
+        if any(not _parece_email(e) for e in self.WATCH_ALARM_EMAILS):
+            erros.append("WATCH_ALARM_EMAILS tem endereco invalido.")
+        if self.em_producao:
+            for nome in ("PATROL_TOKEN_URL", "WATCH_TOKEN_URL", "WATCH_CONTINUITY_URL"):
+                valor = getattr(self, nome)
+                if valor and not str(valor).startswith("https://"):
+                    erros.append(f"Em piloto ou producao, {nome} deve comecar com https://.")
+            if self.PATROL_CA_FILE or self.WATCH_CA_FILE:
+                erros.append("PATROL_CA_FILE e WATCH_CA_FILE so valem em desenvolvimento e teste.")
         if self.FEATURE_TASKS:
             erros.append("FEATURE_TASKS so liga com implementacao propria sobre PostgreSQL (decisao 13).")
         if self.AUTH_ENTERPRISE_ASSERTION_ENABLED:

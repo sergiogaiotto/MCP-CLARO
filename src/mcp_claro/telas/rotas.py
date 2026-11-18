@@ -1,8 +1,9 @@
 """Rotas das telas, montadas em ``/telas`` no app da entrada.
 
-Telas da pessoa: inicio, entrar e sair, "Minhas ordens de servico" e "Meu extrato".
-Telas do ADMIN: em ``telas/admin.py``. Bloqueio, pausa e "autorizar sistema" chegam depois;
-os lugares e os caminhos ja ficam reservados (``paginas.RESERVADAS``).
+Telas da pessoa: inicio, entrar e sair, "Minhas ordens de servico", "Meu extrato", "Bloquear agora"
+e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema" (``telas/autorizar.py``).
+Telas do ADMIN: em ``telas/admin.py`` (cadastro) e ``telas/admin_portas.py`` (bloqueios, portas,
+pessoas, autorizacao e chaves dos sistemas).
 """
 
 from __future__ import annotations
@@ -20,11 +21,13 @@ from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada.cracha import ChavesPublicas
 from mcp_claro.logs import logger
-from mcp_claro.telas import admin, consultas
+from mcp_claro.telas import admin, admin_portas, consultas
+from mcp_claro.telas.autorizar import TelasDeAutorizacao
+from mcp_claro.telas.bloqueio import TelasDeBloqueio
 from mcp_claro.telas.config import ConfigTelas
 from mcp_claro.telas.login import LoginRecusado, ProvedorLogin
 from mcp_claro.telas.nucleo import PortaInterna, Telas, numero_pagina, tela, uuid_ou_none, ver_depois
-from mcp_claro.telas.paginas import PASTA_ESTATICOS, RESERVADAS, criar_ambiente
+from mcp_claro.telas.paginas import PASTA_ESTATICOS, criar_ambiente
 from mcp_claro.telas.seguranca import (
     COOKIE_LOGIN,
     COOKIE_SESSAO,
@@ -263,13 +266,6 @@ class TelasDaPessoa:
             {"linhas": linhas, "pagina": pagina, "ha_mais": ha_mais, "alheio": None, "base": "/telas/extrato"},
         )
 
-    # --- Lugares reservados ---
-
-    @tela
-    async def em_breve(self, pedido: Request) -> Response:
-        await self.t.exigir_sessao(pedido)
-        return self.t.pagina(pedido, "em_breve.html")
-
     async def nao_achada(self, scope: Scope, receive: Receive, send: Send) -> None:
         pedido = Request(scope, receive)
         await self.t.sessao(pedido)
@@ -317,8 +313,10 @@ def rotas_telas(
         post("/ordens", pessoa.dar_ordem),
         post("/ordens/{ordem_id:uuid}/revogar", pessoa.revogar),
         g("/extrato", pessoa.extrato),
-        *(g(r["caminho"].removeprefix("/telas"), pessoa.em_breve) for r in RESERVADAS.values()),
+        *TelasDeBloqueio(t).rotas(),
+        *TelasDeAutorizacao(t).rotas(),
         *adm.rotas(),
+        *admin_portas.TelasDoAdminPortas(t).rotas(),
         Mount("/estaticos", app=StaticFiles(directory=PASTA_ESTATICOS), name="estaticos"),
     ]
     protecao = [Middleware(CabecalhosSeguranca, hsts=p.PUBLIC_BASE_URL.startswith("https://"))]

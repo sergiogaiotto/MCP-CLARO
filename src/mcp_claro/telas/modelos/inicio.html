@@ -22,12 +22,19 @@
     <h2><a href="/telas/extrato">Meu extrato</a></h2>
     <p>Veja tudo o que foi feito em seu nome. As linhas mais novas vêm primeiro.</p>
   </section>
-  {% block lugar_bloqueio %}
-  <section class="cartao reservado" aria-label="Lugar reservado">
-    <h2>{{ reservadas.bloqueio.titulo }}</h2>
-    <p>Aqui vai ficar o botão para parar tudo com um toque. Ele chega na próxima etapa.</p>
+  <section class="cartao parar">
+    <h2><a href="/telas/bloqueio">Bloquear agora</a></h2>
+    <p>Viu algo estranho? Pare um aplicativo, ou todos, com um toque.</p>
+    <p>Vale na hora. Só o ADMIN desfaz.</p>
   </section>
-  {% endblock %}
+  <section class="cartao">
+    <h2><a href="/telas/pausa">Pausar um aplicativo</a></h2>
+    <p>Pare um aplicativo por um tempo. Você mesmo retoma quando quiser.</p>
+  </section>
+  <section class="cartao">
+    <h2><a href="/telas/autorizar">Autorizar um sistema</a></h2>
+    <p>Alguns sistemas pedem que você autorize na página deles. Comece por aqui.</p>
+  </section>
   {% if sessao.admin %}
   <section class="cartao">
     <h2><a href="/telas/admin">Área do ADMIN</a></h2>

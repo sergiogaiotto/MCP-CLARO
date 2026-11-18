@@ -100,9 +100,12 @@ def criar_app_entrada(
         Route("/.well-known/oauth-protected-resource", metadados_recurso, methods=["GET"]),
         Route("/saude", saude, methods=["GET"]),
     ]
+    from mcp_claro.entrada.fechamentos import rotas_fechamentos
     from mcp_claro.telas import rotas_telas
 
     rotas.extend(rotas_telas(p, engine, despachante, http_login=http_login))
+    # O vigia busca os fechamentos com o cracha proprio de programa, mesmo com a entrada fechada.
+    rotas.extend(rotas_fechamentos(p, engine, verificador))
     app = Starlette(routes=rotas, lifespan=ciclo)
     app.state.parametros = p
     return app

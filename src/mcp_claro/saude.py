@@ -12,6 +12,7 @@ _PORTAS = {
     "entrada": "GATEWAY_INTERNAL_PORT",
     "despachante": "DISPATCHER_INTERNAL_PORT",
     "rotinas": "ROUTINES_INTERNAL_PORT",
+    "vigia": "WATCH_INTERNAL_PORT",
 }
 
 

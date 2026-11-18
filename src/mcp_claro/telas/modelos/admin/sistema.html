@@ -4,6 +4,7 @@
 <p><a href="/telas/admin/sistemas">Sistemas</a></p>
 <h1>Sistema {{ sistema.nome }}</h1>
 <p><code>{{ sistema.endereco }}</code> · {{ sistema.tipo_chave | tipo_chave }}</p>
+<p><a href="/telas/admin/sistemas/{{ sistema.id }}/acesso">Autorização e chaves deste sistema</a></p>
 
 {% if sistema.situacao == "ativo" %}
 <div class="aviso" role="status">

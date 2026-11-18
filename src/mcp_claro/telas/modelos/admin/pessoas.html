@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block titulo %}Pessoas{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Pessoas</h1>
+<p>Desativar uma pessoa tira o acesso dela na hora: as sessões nas telas acabam e nenhum aplicativo lê mais por ela.</p>
+<p>As autorizações dela nos sistemas são derrubadas: as chaves guardadas são apagadas.</p>
+{% if not pessoas %}
+<p class="cartao">Ninguém entrou ainda.</p>
+{% else %}
+<table>
+  <thead><tr><th>Pessoa</th><th>Papel</th><th>Situação</th><th></th></tr></thead>
+  <tbody>
+  {% for pe in pessoas %}
+    <tr>
+      <td>{{ pe.nome or "sem nome" }}</td>
+      <td>{% if pe.papel == "admin" %}ADMIN{% else %}Pessoa{% endif %}{% if pe.teste %} (teste){% endif %}</td>
+      <td>{{ pe.situacao | situacao }}</td>
+      <td>
+        {% if pe.id == eu %}
+        <span class="dica">É você.</span>
+        {% else %}
+        <form class="em-linha" method="post" action="/telas/admin/pessoas/{{ pe.id }}/desativar">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          {% if pe.situacao == "ativa" %}
+          <label class="opcao"><input type="checkbox" name="confirmo" value="sim" required> Entendo que esta pessoa perde o acesso.</label>
+          <button type="submit">Desativar</button>
+          {% else %}
+          <input type="hidden" name="confirmo" value="sim">
+          <button type="submit" class="secundario">Derrubar as autorizações de novo</button>
+          {% endif %}
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -134,6 +134,12 @@ def criar_app_rotinas(
     cfg = config or ConfigRotinas.de_parametros(p)
     canais: Mapping[str, Envio] = envios if envios is not None else montar_envios(p)
     estado: dict[str, Any] = {"agendador": None}
+    # A ronda das portas nasce aqui: em piloto ou producao sem PATROL_KEY_FILE, a partida recusa.
+    ronda: Tarefa | None = None
+    if tarefas is None:
+        from mcp_claro.ronda.rodada import tarefa_da_ronda
+
+        ronda = tarefa_da_ronda(p, engine, cfg.emails_admin, prazo=cfg.prazo_tarefa)
 
     async def saude(_: Request) -> JSONResponse:
         agendador: Agendador | None = estado["agendador"]
@@ -187,7 +193,9 @@ def criar_app_rotinas(
                 cliente = ClienteDespachante(p)
                 pilha.push_async_callback(cliente.fechar)
                 origem = cliente
-            lista = tarefas if tarefas is not None else montar_tarefas(engine, cfg, origem)
+            lista = (
+                tarefas if tarefas is not None else [*montar_tarefas(engine, cfg, origem), *([ronda] if ronda else [])]
+            )
             agendador = Agendador(
                 engine, lista, primeira_espera=cfg.primeira_espera, ao_mesmo_tempo=cfg.tarefas_ao_mesmo_tempo
             )

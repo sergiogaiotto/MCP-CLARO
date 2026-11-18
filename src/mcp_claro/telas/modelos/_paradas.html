@@ -1,0 +1,39 @@
+{# Bloqueios e pausas que valem agora para a pessoa: os dela (com Retomar nas pausas) e os gerais. #}
+<h2>O que está parado agora</h2>
+{% if not suas and not gerais %}
+<p class="cartao">Nada está parado para você agora. Seus aplicativos leem dentro das suas ordens de serviço.</p>
+{% endif %}
+{% if suas %}
+<table>
+  <thead><tr><th>O quê</th><th>Como</th><th>Desde</th><th>Quem ligou</th><th></th></tr></thead>
+  <tbody>
+  {% for p in suas %}
+    <tr>
+      <td>{{ p.o_que }}</td>
+      <td>{% if p.tipo == "bloqueio" %}<span class="etiqueta ruim">Bloqueado</span>{% else %}<span class="etiqueta">Pausado</span>{% endif %}</td>
+      <td>{{ p.desde | data_hora }}</td>
+      <td>{{ p.quem }}</td>
+      <td>
+        {% if p.retomavel %}
+        <form class="em-linha" method="post" action="/telas/pausa/{{ p.id }}/retomar">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secundario">Retomar</button>
+        </form>
+        {% else %}
+        <span class="dica">Só o ADMIN desfaz.</span>
+        {% endif %}
+        <a href="/telas/bloqueio/{{ p.id }}">Comprovante</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% if gerais %}
+<h3>Parado pelo ADMIN ou pelo MCP-CLARO, para todas as pessoas</h3>
+<ul>
+  {% for p in gerais %}
+  <li>{{ p.o_que }}: {% if p.tipo == "bloqueio" %}bloqueado{% else %}pausado{% endif %} desde {{ p.desde | data_hora }}. {{ p.quem }} ligou. Só o ADMIN desfaz.</li>
+  {% endfor %}
+</ul>
+{% endif %}

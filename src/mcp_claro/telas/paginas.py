@@ -12,13 +12,6 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 PASTA_MODELOS: Final = Path(__file__).resolve().parent / "modelos"
 PASTA_ESTATICOS: Final = Path(__file__).resolve().parent / "estaticos"
 
-# Lugares reservados para as telas que chegam depois (bloqueio, pausa e autorizar sistema).
-RESERVADAS: Final[dict[str, dict[str, str]]] = {
-    "bloqueio": {"caminho": "/telas/bloqueio", "titulo": "Bloquear agora"},
-    "pausa": {"caminho": "/telas/pausa", "titulo": "Pausar um aplicativo"},
-    "autorizar": {"caminho": "/telas/autorizar", "titulo": "Autorizar um sistema"},
-}
-
 # Avisos depois de um passo que deu certo. A URL leva so o codigo, nunca texto livre.
 AVISOS: Final[dict[str, str]] = {
     "saiu": "Você saiu. Até logo.",
@@ -35,6 +28,30 @@ AVISOS: Final[dict[str, str]] = {
         "O despachante não respondeu. O sistema ficou pendente. Peça a conferência de novo daqui a pouco."
     ),
     "motivo_exigido": "Para abrir o extrato de outra pessoa, diga antes o motivo.",
+    # Bloqueio de um toque e pausa (pessoa).
+    "bloqueado": "Pronto. Está bloqueado a partir de agora. Só o ADMIN desfaz.",
+    "pausado": "Pronto. Está pausado a partir de agora. Você retoma quando quiser.",
+    "ja_valia": "Isto já estava valendo. Nada novo foi ligado. Este é o comprovante.",
+    "pausa_retomada": "Pronto. A pausa terminou. O aplicativo volta a poder ler por você, dentro das suas ordens.",
+    "ja_terminou": "Isto já tinha terminado. Nada mudou.",
+    # Autorizar sistema (pessoa).
+    "autorizacao_guardada": (
+        "Pronto. Sua autorização foi guardada, cifrada no cofre. O aplicativo já pode ler nesse sistema por você,"
+        " só dentro das suas ordens de serviço."
+    ),
+    "autorizacao_retirada": "Pronto. Sua autorização neste sistema foi retirada. Nada mais é lido lá por você.",
+    "nada_a_retirar": "Não havia autorização sua guardada neste sistema. Nada mudou.",
+    # Portas, pessoas, autorizacao e chaves (ADMIN).
+    "bloqueio_ligado": "Pronto. O bloqueio foi ligado e vale a partir de agora.",
+    "pausa_ligada": "Pronto. A pausa foi ligada e vale a partir de agora.",
+    "ja_valia_admin": "Já havia um igual valendo. Nada novo foi ligado.",
+    "parada_encerrada": "Pronto. Terminou. O que estava parado volta a funcionar, se nada mais o parar.",
+    "entrada_mudou": "Pronto. A entrada mudou e vale a partir de agora.",
+    "saida_mudou": "Pronto. A porta de saída mudou e vale a partir de agora.",
+    "pessoa_desativada": "Pronto. A pessoa foi desativada e as autorizações dela nos sistemas foram derrubadas.",
+    "autorizacao_configurada": "Pronto. A autorização por pessoa deste sistema foi configurada.",
+    "segredo_guardado": "Pronto. O segredo foi entregue ao cofre. Ele não aparece mais nas telas.",
+    "chave_guardada": "Pronto. A chave foi entregue ao cofre. Ela não aparece mais nas telas.",
 }
 
 SITUACOES: Final[dict[str, str]] = {
@@ -99,5 +116,4 @@ def criar_ambiente(fuso: str) -> Environment:
     ambiente.filters["situacao"] = lambda v: SITUACOES.get(str(v), str(v))
     ambiente.filters["classe"] = lambda v: CLASSES.get(str(v), str(v))
     ambiente.filters["tipo_chave"] = lambda v: TIPOS_CHAVE.get(str(v), str(v))
-    ambiente.globals["reservadas"] = RESERVADAS
     return ambiente

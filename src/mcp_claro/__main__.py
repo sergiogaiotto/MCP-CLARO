@@ -19,6 +19,7 @@ _PORTAS = {
     Papel.ENTRADA: "GATEWAY_INTERNAL_PORT",
     Papel.DESPACHANTE: "DISPATCHER_INTERNAL_PORT",
     Papel.ROTINAS: "ROUTINES_INTERNAL_PORT",
+    Papel.VIGIA: "WATCH_INTERNAL_PORT",
 }
 
 
@@ -47,7 +48,7 @@ def _subir(papel: Papel, p: Parametros) -> None:
     from mcp_claro.db.engine import criar_engine
     from mcp_claro.papeis.app import criar_app
 
-    porta = int(getattr(p, _PORTAS[papel])) if papel in _PORTAS else 9445
+    porta = int(getattr(p, _PORTAS[papel], 9445))
     opcoes: dict[str, Any] = {}
     if p.INTERNAL_CERT_FILE and p.INTERNAL_KEY_FILE:
         opcoes = {"ssl_certfile": p.INTERNAL_CERT_FILE, "ssl_keyfile": p.INTERNAL_KEY_FILE}
@@ -63,6 +64,10 @@ def _subir(papel: Papel, p: Parametros) -> None:
         from mcp_claro.despachante.app import criar_app_despachante
 
         app = criar_app_despachante(p, criar_engine(p))
+    elif papel is Papel.VIGIA:
+        from mcp_claro.vigia.app import criar_app_vigia
+
+        app = criar_app_vigia(p, criar_engine(p))
     elif papel is Papel.ROTINAS:
         from mcp_claro.rotinas.app import criar_app_rotinas
 
@@ -86,7 +91,7 @@ def _subir(papel: Papel, p: Parametros) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="mcp-claro", description="MCP-CLARO, o gateway MCP independente")
-    parser.add_argument("comando", choices=["conferir", "migrar", *[str(p) for p in Papel]])
+    parser.add_argument("comando", choices=["conferir", "migrar", "migrar-vigia", *[str(p) for p in Papel]])
     args = parser.parse_args(argv)
     p = _conferir()
     configurar(p.LOG_LEVEL)
@@ -95,6 +100,11 @@ def main(argv: list[str] | None = None) -> None:
         return
     if args.comando == "migrar":
         _migrar(p)
+        return
+    if args.comando == "migrar-vigia":
+        from mcp_claro.vigia.migrar import migrar_vigia
+
+        migrar_vigia(p)
         return
     _subir(Papel(args.comando), p)
 

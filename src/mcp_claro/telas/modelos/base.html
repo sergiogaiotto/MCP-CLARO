@@ -19,10 +19,9 @@
       <nav class="menu" aria-label="Menu principal">
         <a href="/telas/ordens" {% if caminho.startswith("/telas/ordens") %}aria-current="page"{% endif %}>Minhas ordens de serviço</a>
         <a href="/telas/extrato" {% if caminho == "/telas/extrato" %}aria-current="page"{% endif %}>Meu extrato</a>
-        {# Lugares reservados: bloqueio de um toque, pausa e autorizar sistema chegam na proxima etapa. #}
-        {% block menu_reservado %}
-        <a class="em-breve" href="{{ reservadas.bloqueio.caminho }}">{{ reservadas.bloqueio.titulo }} (em breve)</a>
-        {% endblock %}
+        <a href="/telas/autorizar" {% if caminho.startswith("/telas/autorizar") %}aria-current="page"{% endif %}>Autorizar um sistema</a>
+        <a href="/telas/pausa" {% if caminho.startswith("/telas/pausa") %}aria-current="page"{% endif %}>Pausar</a>
+        <a class="parar" href="/telas/bloqueio" {% if caminho.startswith("/telas/bloqueio") %}aria-current="page"{% endif %}>Bloquear agora</a>
         {% if sessao.admin %}
         <a href="/telas/admin" {% if caminho.startswith("/telas/admin") %}aria-current="page"{% endif %}>Área do ADMIN</a>
         {% endif %}

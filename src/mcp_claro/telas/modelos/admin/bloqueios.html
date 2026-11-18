@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block titulo %}Bloqueios e pausas{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Bloqueios e pausas</h1>
+<p>Um bloqueio ou uma pausa vale na hora. Bloqueio só o ADMIN solta. Pausa de uma pessoa, ela mesma pode retomar.</p>
+
+<h2>Valendo agora</h2>
+{% if not paradas %}
+<p class="cartao">Nada está parado agora.</p>
+{% else %}
+<table>
+  <thead><tr><th>O quê</th><th>Como</th><th>Desde</th><th>Quem ligou</th><th></th></tr></thead>
+  <tbody>
+  {% for p in paradas %}
+    <tr>
+      <td>{{ p.o_que }}</td>
+      <td>{% if p.tipo == "bloqueio" %}<span class="etiqueta ruim">Bloqueio</span>{% else %}<span class="etiqueta">Pausa</span>{% endif %}</td>
+      <td>{{ p.desde | data_hora }}</td>
+      <td>{{ p.quem }}</td>
+      <td><form class="em-linha" method="post" action="/telas/admin/bloqueios/{{ p.id }}/encerrar">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="secundario">Encerrar</button>
+      </form></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Parar agora</h2>
+<form method="post" action="/telas/admin/bloqueios" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <fieldset>
+    <legend>1. Bloqueio ou pausa?</legend>
+    <label class="opcao"><input type="radio" name="tipo" value="bloqueio" {% if valores.get("tipo", "bloqueio") == "bloqueio" %}checked{% endif %}> Bloqueio: só o ADMIN solta.</label>
+    <label class="opcao"><input type="radio" name="tipo" value="pausa" {% if valores.get("tipo") == "pausa" %}checked{% endif %}> Pausa: parar por um tempo.</label>
+  </fieldset>
+  <fieldset>
+    <legend>2. O que parar?</legend>
+    {% for valor, texto in [("pessoa", "Uma pessoa, em todos os aplicativos"), ("aplicativo", "Um aplicativo, para todas as pessoas"), ("pessoa_aplicativo", "Uma pessoa, num aplicativo só"), ("sistema", "Um sistema: nada vai a ele"), ("tudo", "Tudo: o MCP-CLARO inteiro")] %}
+    <label class="opcao"><input type="radio" name="alcance" value="{{ valor }}" required {% if valores.get("alcance") == valor %}checked{% endif %}> {{ texto }}</label>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>3. Escolha o alvo (só o que o passo 2 pede)</legend>
+    <label for="pessoa">Pessoa</label>
+    <select id="pessoa" name="pessoa">
+      <option value="">Nenhuma</option>
+      {% for pe in pessoas %}
+      <option value="{{ pe.id }}" {% if valores.get('pessoa') == pe.id|string %}selected{% endif %}>{{ pe.nome or "sem nome" }}{% if pe.situacao != "ativa" %} ({{ pe.situacao | situacao }}){% endif %}</option>
+      {% endfor %}
+    </select>
+    <label for="aplicativo">Aplicativo</label>
+    <select id="aplicativo" name="aplicativo">
+      <option value="">Nenhum</option>
+      {% for a in aplicativos %}
+      <option value="{{ a.id }}" {% if valores.get('aplicativo') == a.id|string %}selected{% endif %}>{{ a.nome }}</option>
+      {% endfor %}
+    </select>
+    <label for="sistema">Sistema</label>
+    <select id="sistema" name="sistema">
+      <option value="">Nenhum</option>
+      {% for s in sistemas %}
+      <option value="{{ s.id }}" {% if valores.get('sistema') == s.id|string %}selected{% endif %}>{{ s.nome }}</option>
+      {% endfor %}
+    </select>
+  </fieldset>
+  <label for="motivo">4. Motivo</label>
+  <textarea id="motivo" name="motivo" required minlength="5" maxlength="300">{{ valores.get('motivo', '') }}</textarea>
+  <p class="dica">O motivo fica guardado com o bloqueio. No extrato vai só quem fez e o alcance.</p>
+  <button type="submit">Parar agora</button>
+</form>
+{% endblock %}

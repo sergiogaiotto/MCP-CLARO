@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block titulo %}Autorização e chaves de {{ sistema.nome }}{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin/sistemas/{{ sistema.id }}">Sistema {{ sistema.nome }}</a></p>
+<h1>Autorização e chaves de {{ sistema.nome }}</h1>
+<p>{{ sistema.tipo_chave | tipo_chave }}.</p>
+<p class="dica">Chave e segredo vão direto ao despachante, que cifra no cofre. Depois de entregues, não aparecem mais em lugar nenhum, nem aqui.</p>
+
+{% if sistema.tipo_chave == "por_pessoa" %}
+<h2>Autorização de cada pessoa</h2>
+<p>Cada pessoa autoriza o MCP-CLARO na página do sistema (OAuth com PKCE). Preencha com os dados que o sistema deu ao MCP-CLARO.</p>
+<p>No sistema, cadastre este endereço de volta: <code>{{ redirect_uri }}</code></p>
+{% if not configurada %}<p class="atencao">Ainda não configurada: as pessoas não conseguem autorizar este sistema.</p>{% endif %}
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/autorizacao" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="authorization_endpoint">Endereço da página de autorização</label>
+  <input type="url" id="authorization_endpoint" name="authorization_endpoint" required maxlength="500" placeholder="https://sistema.exemplo/oauth/authorize" value="{{ valores.get('authorization_endpoint', '') }}">
+  <label for="token_endpoint">Endereço de troca do código</label>
+  <input type="url" id="token_endpoint" name="token_endpoint" required maxlength="500" placeholder="https://sistema.exemplo/oauth/token" value="{{ valores.get('token_endpoint', '') }}">
+  <label for="client_id">client_id do MCP-CLARO no sistema</label>
+  <input type="text" id="client_id" name="client_id" required maxlength="255" value="{{ valores.get('client_id', '') }}">
+  <label for="escopos">Escopos (separados por espaço)</label>
+  <input type="text" id="escopos" name="escopos" maxlength="1000" value="{{ valores.get('escopos', '') }}">
+  <label for="autenticacao_cliente">Como o MCP-CLARO se apresenta na troca</label>
+  <select id="autenticacao_cliente" name="autenticacao_cliente">
+    {% for valor in autenticacoes %}
+    <option value="{{ valor }}" {% if valores.get('autenticacao_cliente', 'client_secret_basic') == valor %}selected{% endif %}>{% if valor == "client_secret_basic" %}Com segredo, no cabeçalho (client_secret_basic){% elif valor == "client_secret_post" %}Com segredo, no corpo (client_secret_post){% else %}Sem segredo, só PKCE (none){% endif %}</option>
+    {% endfor %}
+  </select>
+  <label for="recurso">Recurso (opcional)</label>
+  <input type="url" id="recurso" name="recurso" maxlength="500" value="{{ valores.get('recurso', '') }}">
+  <p class="dica">Vazio: vale o endereço MCP do sistema.</p>
+  <button type="submit">Guardar a configuração</button>
+</form>
+
+<h2>Segredo do MCP-CLARO no sistema</h2>
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/segredo" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p>{% if entregas.get("segredo_cliente") %}Último segredo entregue ao cofre em {{ entregas["segredo_cliente"] | data_hora }}.{% else %}Nenhum segredo entregue ainda.{% endif %}</p>
+  <label for="segredo_cliente">Segredo do cliente (client_secret)</label>
+  <input type="password" id="segredo_cliente" name="segredo" required autocomplete="off" maxlength="8192">
+  <p class="dica">Entregar de novo troca o segredo guardado.</p>
+  <button type="submit">Entregar ao cofre</button>
+</form>
+{% endif %}
+
+{% if sistema.tipo_chave == "compartilhada" %}
+<h2>Chave compartilhada</h2>
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/chave" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="tipo" value="compartilhada">
+  <p>{% if entregas.get("compartilhada") %}Última chave entregue ao cofre em {{ entregas["compartilhada"] | data_hora }}.{% else %}Nenhuma chave entregue ainda.{% endif %}</p>
+  <p class="dica">Uma chave só para todas as pessoas. Por isso, este sistema só aceita leitura.</p>
+  <label for="chave_compartilhada">Chave</label>
+  <input type="password" id="chave_compartilhada" name="segredo" required autocomplete="off" maxlength="8192">
+  <button type="submit">Entregar ao cofre</button>
+</form>
+{% endif %}
+
+{% if sistema.tipo_chave == "programa" %}
+<h2>Chave de um programa</h2>
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/chave" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="tipo" value="programa">
+  <p>{% if entregas.get("programa") %}Última chave de programa entregue ao cofre em {{ entregas["programa"] | data_hora }}.{% else %}Nenhuma chave de programa entregue ainda.{% endif %}</p>
+  <label for="aplicativo">Programa</label>
+  <select id="aplicativo" name="aplicativo" required>
+    <option value="">Escolha o programa</option>
+    {% for pr in programas %}
+    <option value="{{ pr.id }}">{{ pr.nome }}</option>
+    {% endfor %}
+  </select>
+  <label for="chave_programa">Chave</label>
+  <input type="password" id="chave_programa" name="segredo" required autocomplete="off" maxlength="8192">
+  <button type="submit">Entregar ao cofre</button>
+</form>
+{% endif %}
+
+<h2>Chave só para ler as declarações</h2>
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/chave" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="tipo" value="declaracoes">
+  <p>{% if entregas.get("declaracoes") %}Última chave entregue ao cofre em {{ entregas["declaracoes"] | data_hora }}.{% else %}Nenhuma chave entregue ainda.{% endif %}</p>
+  <p class="dica">Usada pelas rotinas só para ler a lista de ferramentas do sistema (mudou-parou). Não lê dado de ninguém.</p>
+  <label for="chave_declaracoes">Chave</label>
+  <input type="password" id="chave_declaracoes" name="segredo" required autocomplete="off" maxlength="8192">
+  <button type="submit">Entregar ao cofre</button>
+</form>
+{% endblock %}

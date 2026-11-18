@@ -79,6 +79,7 @@ async def test_saude_e_tarefas_rodando(rotinas: tuple[str, Any]) -> None:
     url, _ = rotinas
     esperadas = {
         "vencer_ordens",
+        "ronda",  # a ronda das portas roda nas rotinas (Fase 1)
         "avisar_ordens_a_vencer",
         "fechamento",
         "particoes",

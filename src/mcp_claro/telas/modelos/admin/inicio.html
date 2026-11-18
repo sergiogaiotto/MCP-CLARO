@@ -17,11 +17,11 @@
     <p>Para onde o MCP-CLARO manda avisos assinados.</p></section>
   <section class="cartao"><h2><a href="/telas/admin/extrato">Extrato de outra pessoa</a></h2>
     <p>Só com motivo. A pessoa vê no extrato dela que você abriu.</p></section>
-  {% block lugares_reservados_admin %}
-  <section class="cartao reservado" aria-label="Lugar reservado">
-    <h2>{{ reservadas.pausa.titulo }} e {{ reservadas.autorizar.titulo | lower }}</h2>
-    <p>Estas telas chegam na próxima etapa.</p>
-  </section>
-  {% endblock %}
+  <section class="cartao parar"><h2><a href="/telas/admin/bloqueios">Bloqueios e pausas</a></h2>
+    <p>Pare uma pessoa, um aplicativo, um sistema ou tudo. Veja o que está parado e solte.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/portas">Portas do MCP-CLARO</a></h2>
+    <p>Deixe a entrada aberta, só de leitura ou fechada. Abra ou feche a porta de saída.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/pessoas">Pessoas</a></h2>
+    <p>Desative uma pessoa. As autorizações dela nos sistemas caem na hora.</p></section>
 </div>
 {% endblock %}

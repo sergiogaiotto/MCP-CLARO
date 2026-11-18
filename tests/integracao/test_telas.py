@@ -869,7 +869,7 @@ async def test_cabecalhos_de_seguranca_em_toda_resposta(amb: Ambiente) -> None:
         "estatico": await nav.get("/telas/estaticos/htmx.min.js"),
         "nao existe": await nav.get("/telas/nao-existe"),
         "csrf recusado": await nav.post("/telas/sair"),
-        "reservada": await nav.get("/telas/bloqueio"),
+        "bloqueio": await nav.get("/telas/bloqueio"),
     }
     for caso, r in respostas.items():
         h = r.headers
@@ -883,8 +883,9 @@ async def test_cabecalhos_de_seguranca_em_toda_resposta(amb: Ambiente) -> None:
         assert h["strict-transport-security"].startswith("max-age="), caso
     assert respostas["nao existe"].status_code == 404
     assert respostas["csrf recusado"].status_code == 403
-    assert respostas["reservada"].status_code == 200
-    assert "chega em breve" in respostas["reservada"].text
+    assert respostas["bloqueio"].status_code == 200
+    assert "Bloquear todos agora" in respostas["bloqueio"].text
+    assert "em breve" not in respostas["inicio"].text
     assert respostas["inicio"].headers["cache-control"] == "no-store"
     estatico = respostas["estatico"]
     assert estatico.status_code == 200
