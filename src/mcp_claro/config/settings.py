@@ -140,6 +140,7 @@ class Parametros(BaseSettings):
     MCP_ACCEPTED_VERSIONS: ListaTexto = Field(default_factory=lambda: [VERSAO_MCP])
     MCP_UPSTREAM_VERSION: str = VERSAO_MCP
     MCP_RESPONSE_MODE: ModoResposta = ModoResposta.INTEIRA
+    MCP_SCOPES: ListaTexto = Field(default_factory=list)
     RESPONSE_MAX_WAIT_SECONDS: int = Field(default=20, ge=1, le=120)
     ALLOWED_HOSTS: ListaTexto = Field(default_factory=list)
     FORWARDED_ALLOW_IPS: ListaTexto = Field(default_factory=lambda: ["127.0.0.1"])
@@ -149,6 +150,12 @@ class Parametros(BaseSettings):
     INTERNAL_CA_FILE: str | None = None
     INTERNAL_CERT_FILE: str | None = None
     INTERNAL_KEY_FILE: str | None = None
+    INTERNAL_CLIENT_CA_FILE: str | None = None
+    INTERNAL_CLIENT_CERT_FILE: str | None = None
+    INTERNAL_CLIENT_KEY_FILE: str | None = None
+    INTERNAL_HEALTH_CERT_FILE: str | None = None
+    INTERNAL_HEALTH_KEY_FILE: str | None = None
+    DISPATCHER_INTERNAL_URL: str = "https://despachante:9443"
     GATEWAY_WORKERS: int = Field(default=2, ge=1, le=64)
 
     # Banco, login e cofre
@@ -157,7 +164,7 @@ class Parametros(BaseSettings):
     DB_SSLMODE: SslBanco = SslBanco.VERIFY_FULL
     DB_SSLROOTCERT: str | None = None
     IDP_KIND: TipoProvedor = TipoProvedor.KEYCLOAK
-    IDP_ISSUER_URL: str = "https://login.mcp-claro.localhost/realms/mcp-claro"
+    IDP_ISSUER_URL: str = "https://mcp-claro.localhost/login/realms/mcp-claro"
     IDP_JWKS_URL: str | None = None
     IDP_JWKS_CACHE_SECONDS: int = Field(default=300, ge=30, le=86400)
     IDP_ALGORITHMS: ListaTexto = Field(default_factory=lambda: ["RS256", "ES256", "PS256", "EdDSA"])
@@ -167,6 +174,10 @@ class Parametros(BaseSettings):
     VAULT_ROLE_ID_FILE: str | None = None
     VAULT_SECRET_ID_FILE: str | None = None
     VAULT_TRANSIT_MOUNT: str = "transit"
+    VAULT_TRANSIT_KEY: str = "mcp-claro-chaves"
+    VAULT_KV_MOUNT: str = "kv"
+    VAULT_STATE_KEY_PATH: str = "mcp-claro/estado-confirmacoes"
+    VAULT_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=60)
     REQUEST_STATE_KEY_ROTATION_DAYS: int = Field(default=30, ge=1, le=365)
 
     # Chaves de liga e desliga
@@ -290,8 +301,27 @@ class Parametros(BaseSettings):
                 erros.append("VAULT_SEAL_MODE=kms usa servico comercial; fora da regra do codigo aberto.")
             if not self.INTERNAL_CA_FILE:
                 erros.append("Em piloto ou producao, INTERNAL_CA_FILE e obrigatorio (mTLS interno).")
+            if not self.INTERNAL_CLIENT_CA_FILE:
+                erros.append(
+                    "Em piloto ou producao, INTERNAL_CLIENT_CA_FILE e obrigatorio: cada porta interna "
+                    "aceita so o certificado de quem pode chama-la."
+                )
             if "localhost" in self.PUBLIC_BASE_URL:
                 erros.append("Em piloto ou producao, PUBLIC_BASE_URL nao pode ser localhost.")
+            if not self.VAULT_ADDR.startswith("https://"):
+                erros.append("Em piloto ou producao, VAULT_ADDR deve comecar com https:// (TLS interno).")
+        if self.VAULT_AUTH_METHOD != "approle":
+            erros.append("VAULT_AUTH_METHOD aceita so approle (login de maquina com token curto).")
+        if self.INTERNAL_CERT_FILE and not self.INTERNAL_CLIENT_CA_FILE:
+            erros.append(
+                "Porta interna com TLS exige INTERNAL_CLIENT_CA_FILE: sem ela, qualquer certificado da autoridade "
+                "interna entraria (mTLS falharia aberto)."
+            )
+        if self.em_producao:
+            if not (self.INTERNAL_CERT_FILE and self.INTERNAL_KEY_FILE):
+                erros.append("Em piloto ou producao, a porta interna exige INTERNAL_CERT_FILE e INTERNAL_KEY_FILE.")
+            if not self.DISPATCHER_INTERNAL_URL.startswith("https://"):
+                erros.append("Em piloto ou producao, DISPATCHER_INTERNAL_URL deve usar https (mTLS).")
         if self.FEATURE_TASKS:
             erros.append("FEATURE_TASKS so liga com implementacao propria sobre PostgreSQL (decisao 13).")
         if self.AUTH_ENTERPRISE_ASSERTION_ENABLED:

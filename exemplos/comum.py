@@ -103,9 +103,7 @@ def montar_app(
             yield
 
     async def ver_contagem(_: Request) -> JSONResponse:
-        return JSONResponse(
-            {"chamadas": contagem.chamadas, "autorizacoes": contagem.autorizacoes_vistas[-50:]}
-        )
+        return JSONResponse({"chamadas": contagem.chamadas, "autorizacoes": contagem.autorizacoes_vistas[-50:]})
 
     async def zerar(_: Request) -> JSONResponse:
         contagem.chamadas.clear()

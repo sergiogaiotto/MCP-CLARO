@@ -24,6 +24,9 @@ x-gateway: &gateway
     INTERNAL_CA_FILE: /run/secrets/ca_interna.pem
     IDP_KIND: keycloak
     IDP_ISSUER_URL: https://mcp-claro.localhost/login/realms/mcp-claro
+    # A entrada busca a lista JWKS pela rede interna, sem passar pelo portao.
+    IDP_JWKS_URL: http://login:8080/login/realms/mcp-claro/protocol/openid-connect/certs
+    DISPATCHER_INTERNAL_URL: https://despachante:9443
     VAULT_ADDR: https://cofre:8200
     VAULT_SEAL_MODE: static
   depends_on:
@@ -80,7 +83,25 @@ services:
       DATABASE_PASSWORD_FILE: /run/secrets/db_entrada
       INTERNAL_CERT_FILE: /run/secrets/entrada_cert.pem
       INTERNAL_KEY_FILE: /run/secrets/entrada_key.pem
-    secrets: [db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem]
+      # A porta da entrada aceita so o certificado do portao proprio.
+      INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_entrada.pem
+      # Certificado para chamar o despachante.
+      INTERNAL_CLIENT_CERT_FILE: /run/secrets/entrada_cliente_cert.pem
+      INTERNAL_CLIENT_KEY_FILE: /run/secrets/entrada_cliente_key.pem
+      INTERNAL_HEALTH_CERT_FILE: /run/secrets/entrada_saude_cert.pem
+      INTERNAL_HEALTH_KEY_FILE: /run/secrets/entrada_saude_key.pem
+      VAULT_ROLE_ID_FILE: /run/secrets/cofre_entrada_role_id
+      VAULT_SECRET_ID_FILE: /run/secrets/cofre_entrada_secret_id
+    secrets: [db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem, ca_clientes_entrada.pem,
+              entrada_cliente_cert.pem, entrada_cliente_key.pem, entrada_saude_cert.pem, entrada_saude_key.pem,
+              cofre_entrada_role_id, cofre_entrada_secret_id]
+    depends_on:
+      migrar:
+        condition: service_completed_successfully
+      cofre-iniciar:
+        condition: service_completed_successfully
+      login:
+        condition: service_healthy
 
   despachante:
     <<: *gateway
@@ -91,7 +112,20 @@ services:
       DATABASE_PASSWORD_FILE: /run/secrets/db_despachante
       INTERNAL_CERT_FILE: /run/secrets/despachante_cert.pem
       INTERNAL_KEY_FILE: /run/secrets/despachante_key.pem
-    secrets: [db_despachante, ca_interna.pem, despachante_cert.pem, despachante_key.pem]
+      # A porta do despachante aceita so a entrada e as rotinas.
+      INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_despachante.pem
+      INTERNAL_HEALTH_CERT_FILE: /run/secrets/despachante_saude_cert.pem
+      INTERNAL_HEALTH_KEY_FILE: /run/secrets/despachante_saude_key.pem
+      VAULT_ROLE_ID_FILE: /run/secrets/cofre_despachante_role_id
+      VAULT_SECRET_ID_FILE: /run/secrets/cofre_despachante_secret_id
+    secrets: [db_despachante, ca_interna.pem, despachante_cert.pem, despachante_key.pem, ca_clientes_despachante.pem,
+              despachante_saude_cert.pem, despachante_saude_key.pem, cofre_despachante_role_id,
+              cofre_despachante_secret_id]
+    depends_on:
+      migrar:
+        condition: service_completed_successfully
+      cofre-iniciar:
+        condition: service_completed_successfully
     networks: [interna, saida]
 
   rotinas:
@@ -107,8 +141,140 @@ services:
       SMTP_PORT: "1025"
       SMTP_FROM: mcp-claro@mcp-claro.localhost
       SMTP_STARTTLS: desligado
-    secrets: [db_rotinas, ca_interna.pem, rotinas_cert.pem, rotinas_key.pem]
+      # A porta das rotinas aceita so o Grafana (alertas por webhook interno).
+      INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_rotinas.pem
+      INTERNAL_CLIENT_CERT_FILE: /run/secrets/rotinas_cliente_cert.pem
+      INTERNAL_CLIENT_KEY_FILE: /run/secrets/rotinas_cliente_key.pem
+      INTERNAL_HEALTH_CERT_FILE: /run/secrets/rotinas_saude_cert.pem
+      INTERNAL_HEALTH_KEY_FILE: /run/secrets/rotinas_saude_key.pem
+      VAULT_ROLE_ID_FILE: /run/secrets/cofre_rotinas_role_id
+      VAULT_SECRET_ID_FILE: /run/secrets/cofre_rotinas_secret_id
+    secrets: [db_rotinas, ca_interna.pem, rotinas_cert.pem, rotinas_key.pem, ca_clientes_rotinas.pem,
+              rotinas_cliente_cert.pem, rotinas_cliente_key.pem, rotinas_saude_cert.pem, rotinas_saude_key.pem,
+              cofre_rotinas_role_id, cofre_rotinas_secret_id]
+    depends_on:
+      migrar:
+        condition: service_completed_successfully
+      cofre-iniciar:
+        condition: service_completed_successfully
     networks: [interna, saida]
+
+  cofre:
+    # OpenBao: so as chaves de cifra (Transit) e a chave do estado das confirmacoes (KV v2), sobre o PostgreSQL.
+    # Selo static nos testes (decisao 6): destrava sozinho com o segredo cofre_selo.key. Porta 8200 com mTLS.
+    # Na primeira subida, o servico cofre-iniciar inicia o cofre e cria os AppRoles.
+    image: openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
+    entrypoint: ["/usr/bin/dumb-init", "/bin/sh", "/openbao/mcp-claro/partida.sh"]
+    read_only: true
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp"]
+    volumes: ["./cofre:/openbao/mcp-claro:ro"]
+    secrets: [db_cofre, cofre_selo.key, cofre_cert.pem, cofre_key.pem, ca_interna.pem]
+    depends_on:
+      banco:
+        condition: service_healthy
+    healthcheck:
+      # 0 so quando iniciado e destravado; 2 quando trancado ou ainda nao iniciado.
+      test: ["CMD", "bao", "status", "-address=https://127.0.0.1:8200", "-ca-cert=/run/secrets/ca_interna.pem",
+             "-client-cert=/run/secrets/cofre_cert.pem", "-client-key=/run/secrets/cofre_key.pem"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: local
+    networks: [interna]
+
+  cofre-iniciar:
+    # Uma vez, so desenvolvimento e teste: inicia o cofre, liga Transit e KV v2, grava as politicas, cria os
+    # AppRoles entrada, despachante e rotinas e grava role_id/secret_id em .segredos/. Idempotente.
+    # Roda como root so para gravar em .segredos/ com o dono da pasta.
+    image: openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
+    entrypoint: ["/bin/sh", "/iniciar/iniciar-cofre.sh"]
+    user: "0:0"
+    read_only: true
+    restart: "no"
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    tmpfs: ["/tmp"]
+    environment:
+      BAO_ADDR: https://cofre:8200
+      BAO_CACERT: /run/secrets/ca_interna.pem
+      BAO_CLIENT_CERT: /run/secrets/cofre_cert.pem
+      BAO_CLIENT_KEY: /run/secrets/cofre_key.pem
+      COFRE_SEGREDOS: /segredos
+      COFRE_POLITICAS: /iniciar/politicas
+    volumes:
+      - ../scripts/iniciar-cofre.sh:/iniciar/iniciar-cofre.sh:ro
+      - ./cofre/politicas:/iniciar/politicas:ro
+      - ../.segredos:/segredos
+    secrets: [ca_interna.pem, cofre_cert.pem, cofre_key.pem]
+    depends_on:
+      cofre:
+        condition: service_started
+    logging:
+      driver: local
+    networks: [interna]
+
+  login:
+    image: keycloak/keycloak:26.8.2@sha256:c68e286cacd87b942ac1939a0a1481461109d6acd3a57dc496969a319a76bbf0
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    # O Keycloak nao le senha de arquivo (_FILE): o envelope le os segredos e chama o kc.sh.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -euo pipefail
+        KC_DB_PASSWORD="$$(< /run/secrets/db_login)"
+        KC_BOOTSTRAP_ADMIN_PASSWORD="$$(< /run/secrets/login_admin)"
+        export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD
+        exec /opt/keycloak/bin/kc.sh "$$@"
+      - kc
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_HOSTNAME: https://mcp-claro.localhost/login
+      KC_HTTP_RELATIVE_PATH: /login
+      KC_HTTP_MANAGEMENT_RELATIVE_PATH: /
+      KC_HEALTH_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_DB: postgres
+      KC_DB_URL_HOST: banco
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: login
+      KC_DB_URL_PROPERTIES: "?sslmode=verify-full&sslrootcert=/run/secrets/ca_interna.pem"
+      KC_DB_USERNAME: login
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin-login
+      # Audiencia dos crachas: PUBLIC_BASE_URL + /mcp (MCP_RESOURCE_ID do gateway).
+      MCP_CLARO_RECURSO: https://mcp-claro.localhost/mcp
+      MCP_CLARO_CLIENTES_DE_TESTE: "false"
+    secrets: [db_login, login_admin, ca_interna.pem]
+    volumes:
+      - ./login/realm-mcp-claro.json:/opt/keycloak/data/import/realm-mcp-claro.json:ro
+    depends_on:
+      banco:
+        condition: service_healthy
+    healthcheck:
+      # Porta de gerencia (9000), que nao passa pelo portao. A imagem nao tem curl.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          read -r linha <&3 && [[ "$$linha" == *" 200 "* ]]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    logging:
+      driver: local
+    networks: [borda, interna]
 
   portao:
     build: ./caddy
@@ -118,10 +284,10 @@ services:
       PUBLIC_HOST: mcp-claro.localhost
       GATEWAY_INTERNAL_PORT: "8443"
       EDGE_RATE_PER_IP_PER_MINUTE: "120"
-    secrets: [portao_cert.pem, portao_key.pem, ca_interna.pem]
+    secrets: [portao_cliente_cert.pem, portao_cliente_key.pem, ca_interna.pem]
     ports: ["443:443"]
     volumes: ["portao_dados:/data"]
-    depends_on: [entrada]
+    depends_on: [entrada, login]
     logging:
       driver: local
     networks: [borda, interna]
@@ -154,6 +320,9 @@ secrets:
   ca_interna.pem: { file: ../.segredos/ca_interna.pem }
   banco_cert.pem: { file: ../.segredos/banco_cert.pem }
   banco_key.pem: { file: ../.segredos/banco_key.pem }
+  cofre_selo.key: { file: ../.segredos/cofre_selo.key }
+  cofre_cert.pem: { file: ../.segredos/cofre_cert.pem }
+  cofre_key.pem: { file: ../.segredos/cofre_key.pem }
   portao_cert.pem: { file: ../.segredos/portao_cert.pem }
   portao_key.pem: { file: ../.segredos/portao_key.pem }
   entrada_cert.pem: { file: ../.segredos/entrada_cert.pem }
@@ -162,3 +331,25 @@ secrets:
   despachante_key.pem: { file: ../.segredos/despachante_key.pem }
   rotinas_cert.pem: { file: ../.segredos/rotinas_cert.pem }
   rotinas_key.pem: { file: ../.segredos/rotinas_key.pem }
+  login_admin: { file: ../.segredos/login_admin }
+  ca_clientes_entrada.pem: { file: ../.segredos/ca_clientes_entrada.pem }
+  ca_clientes_despachante.pem: { file: ../.segredos/ca_clientes_despachante.pem }
+  ca_clientes_rotinas.pem: { file: ../.segredos/ca_clientes_rotinas.pem }
+  portao_cliente_cert.pem: { file: ../.segredos/portao_cliente_cert.pem }
+  portao_cliente_key.pem: { file: ../.segredos/portao_cliente_key.pem }
+  entrada_cliente_cert.pem: { file: ../.segredos/entrada_cliente_cert.pem }
+  entrada_cliente_key.pem: { file: ../.segredos/entrada_cliente_key.pem }
+  rotinas_cliente_cert.pem: { file: ../.segredos/rotinas_cliente_cert.pem }
+  rotinas_cliente_key.pem: { file: ../.segredos/rotinas_cliente_key.pem }
+  entrada_saude_cert.pem: { file: ../.segredos/entrada_saude_cert.pem }
+  entrada_saude_key.pem: { file: ../.segredos/entrada_saude_key.pem }
+  despachante_saude_cert.pem: { file: ../.segredos/despachante_saude_cert.pem }
+  despachante_saude_key.pem: { file: ../.segredos/despachante_saude_key.pem }
+  rotinas_saude_cert.pem: { file: ../.segredos/rotinas_saude_cert.pem }
+  rotinas_saude_key.pem: { file: ../.segredos/rotinas_saude_key.pem }
+  cofre_entrada_role_id: { file: ../.segredos/cofre_entrada_role_id }
+  cofre_entrada_secret_id: { file: ../.segredos/cofre_entrada_secret_id }
+  cofre_despachante_role_id: { file: ../.segredos/cofre_despachante_role_id }
+  cofre_despachante_secret_id: { file: ../.segredos/cofre_despachante_secret_id }
+  cofre_rotinas_role_id: { file: ../.segredos/cofre_rotinas_role_id }
+  cofre_rotinas_secret_id: { file: ../.segredos/cofre_rotinas_secret_id }

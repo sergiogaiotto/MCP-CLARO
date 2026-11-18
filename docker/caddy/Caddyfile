@@ -23,14 +23,26 @@
 		max_size 4MB
 	}
 
+	# O console de administracao do Keycloak nunca passa pelo portao publico.
+	handle /login/admin* {
+		respond "Nao disponivel por este endereco." 403
+	}
+
+	# Provedor de login (Keycloak) no mesmo endereco publico: o emissor dos crachas e /login.
+	handle /login/* {
+		reverse_proxy http://login:8080
+	}
+
+	handle {
 	reverse_proxy https://entrada:{$GATEWAY_INTERNAL_PORT:8443} {
 		transport http {
-			tls_client_auth /run/secrets/portao_cert.pem /run/secrets/portao_key.pem
+			tls_client_auth /run/secrets/portao_cliente_cert.pem /run/secrets/portao_cliente_key.pem
 			tls_trust_pool file /run/secrets/ca_interna.pem
 			tls_server_name entrada
 		}
 		# Sem novas tentativas: o portao nunca repete um pedido.
 		lb_retries 0
+	}
 	}
 
 	header {

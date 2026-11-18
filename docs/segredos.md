@@ -14,7 +14,7 @@ varredura de segredos (gitleaks) roda a cada mudança no CI.
 | Certificados internos (mTLS) | Segredos `<peça>_cert.pem` e `<peça>_key.pem`, autoridade `ca_interna.pem` | Cada peça | 90 dias, ou PKI do OpenBao |
 | Chaves das pessoas e dos programas para os sistemas | Tabela `chaves_cifradas`, cifradas pelo Transit do OpenBao | Só o despachante decifra | Renovação pelo próprio sistema |
 | Chave do estado das confirmações | OpenBao, caminho separado | Entrada | `REQUEST_STATE_KEY_ROTATION_DAYS` |
-| Login de máquina no cofre (AppRole) | Segredos `cofre_role_id` e `cofre_secret_id` | Entrada e despachante, cada um o seu | A cada partida, token curto |
+| Login de máquina no cofre (AppRole) | Segredos `cofre_<papel>_role_id` e `cofre_<papel>_secret_id` (entrada, despachante, rotinas) | Cada papel, o seu | Token de 15 min, renovado; máximo de 1 h |
 | Chave de destravar o cofre | `static`: segredo do Docker fora do backup. Piloto: partes Shamir com guardiões | Guardiões | Por decisão |
 | Senha do SMTP e segredo dos webhooks | Segredos `smtp` e `webhook_assinatura` | Rotinas | 180 dias |
 | Credenciais do vigia | Segredos próprios na segunda máquina | Vigia | Separadas das do gateway |

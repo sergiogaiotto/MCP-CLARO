@@ -65,9 +65,7 @@ def criar(contagem: Contagem | None = None) -> Starlette:
             "annotations": {"readOnlyHint": True},
         }
 
-    async def listar(
-        ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None
-    ) -> types.ListToolsResult:
+    async def listar(ctx: ServerRequestContext[Any], _: types.PaginatedRequestParams | None) -> types.ListToolsResult:
         return types.ListToolsResult(tools=[types.Tool.model_validate(ferramenta())])
 
     async def chamar(
@@ -119,9 +117,7 @@ def criar(contagem: Contagem | None = None) -> Starlette:
                 )
             elif modo == "redireciona":
                 contagem.somar("http307")
-                resposta = Response(
-                    status_code=307, headers={"Location": "https://outro-endereco.exemplo/mcp"}
-                )
+                resposta = Response(status_code=307, headers={"Location": "https://outro-endereco.exemplo/mcp"})
             elif modo == "mudo":
                 contagem.somar("mudo")
                 await asyncio.sleep(3600)
@@ -143,9 +139,7 @@ def criar(contagem: Contagem | None = None) -> Starlette:
         estado["versao_definicao"] = 0
         return JSONResponse({"modo": modo})
 
-    server: Server[Any] = Server(
-        "exemplo-mal-comportado", version="1.0.0", on_list_tools=listar, on_call_tool=chamar
-    )
+    server: Server[Any] = Server("exemplo-mal-comportado", version="1.0.0", on_list_tools=listar, on_call_tool=chamar)
     return montar_app(
         server,
         contagem=contagem,

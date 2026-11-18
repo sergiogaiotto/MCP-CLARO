@@ -72,3 +72,53 @@ def cabecalhos_2026(metodo: str, nome: str | None = None, chave: str | None = No
     if chave:
         h["authorization"] = f"Bearer {chave}"
     return h
+
+
+@contextlib.contextmanager
+def sistema_geracao_antiga() -> Any:
+    """Sobe o exemplo da geracao antiga (kit 1.30.0) num ambiente separado do uv e devolve a URL MCP."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    import pytest
+
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv nao encontrado")
+    raiz = Path(__file__).resolve().parents[1]
+    porta = porta_livre()
+    ambiente = os.environ | {"PORTA": str(porta), "HOST": "127.0.0.1"}
+    proc = subprocess.Popen(  # noqa: S603 - comando fixo de teste
+        [
+            uv,
+            "run",
+            "--no-project",
+            "--python",
+            sys.executable,
+            "--with",
+            "mcp==1.30.0",
+            "python",
+            str(raiz / "exemplos/geracao_antiga/servidor.py"),
+        ],
+        env=ambiente,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        for _ in range(300):
+            try:
+                httpx2.get(f"http://127.0.0.1:{porta}/", timeout=0.5)
+                break
+            except httpx2.TransportError:
+                if proc.poll() is not None:
+                    erro = proc.stderr.read().decode()[-2000:] if proc.stderr else ""
+                    pytest.fail(f"o exemplo antigo nao subiu: {erro}")
+                time.sleep(0.2)
+        yield f"http://127.0.0.1:{porta}/mcp"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)

@@ -12,9 +12,7 @@ pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
 
 async def test_extrato_aceita_insert_e_recusa_update_delete(conexao) -> None:  # type: ignore[no-untyped-def]
-    n = await registrar(
-        conexao, papel="entrada", tipo="partida", campos={"papel": "entrada", "versao": "0.1.0"}
-    )
+    n = await registrar(conexao, papel="entrada", tipo="partida", campos={"papel": "entrada", "versao": "0.1.0"})
     await conexao.commit()
     assert n > 0
     with pytest.raises(DBAPIError, match="so de acrescentar"):
@@ -44,9 +42,7 @@ async def test_fechamento_encadeia_e_confere(conexao) -> None:  # type: ignore[n
     assert f2.linhas == 1
     assert await conferir_fechamento(conexao, f2.numero)
     anterior = (
-        await conexao.execute(
-            text("SELECT hash_anterior FROM fechamentos WHERE numero = :n"), {"n": f2.numero}
-        )
+        await conexao.execute(text("SELECT hash_anterior FROM fechamentos WHERE numero = :n"), {"n": f2.numero})
     ).scalar_one()
     assert bytes(anterior) == f1.hash
 

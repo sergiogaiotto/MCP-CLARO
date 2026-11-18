@@ -60,7 +60,7 @@ packages = ["src/mcp_claro"]
 package = true
 
 [tool.ruff]
-line-length = 110
+line-length = 120
 target-version = "py314"
 src = ["src", "tests", "exemplos"]
 

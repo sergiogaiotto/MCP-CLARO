@@ -26,9 +26,7 @@ async def test_leitura_por_pessoa_cada_um_ve_o_seu() -> None:
 
 async def test_sem_chave_recebe_401() -> None:
     async with servidor(leitura_por_pessoa.criar()) as base, httpx2.AsyncClient() as http:
-        r = await http.post(
-            f"{base}/mcp", json=pedido_2026("tools/list"), headers=cabecalhos_2026("tools/list")
-        )
+        r = await http.post(f"{base}/mcp", json=pedido_2026("tools/list"), headers=cabecalhos_2026("tools/list"))
         assert r.status_code == 401
 
 

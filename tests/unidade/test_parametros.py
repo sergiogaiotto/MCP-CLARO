@@ -40,6 +40,10 @@ def test_producao_exige_verify_full(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("APP_ENV", "producao")
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://mcp.claro.exemplo")
     monkeypatch.setenv("INTERNAL_CA_FILE", "/run/secrets/ca.pem")
+    monkeypatch.setenv("INTERNAL_CLIENT_CA_FILE", "/run/secrets/ca_clientes.pem")
+    monkeypatch.setenv("INTERNAL_CERT_FILE", "/run/secrets/cert.pem")
+    monkeypatch.setenv("INTERNAL_KEY_FILE", "/run/secrets/key.pem")
+    monkeypatch.setenv("DISPATCHER_INTERNAL_URL", "https://despachante:9443")
     monkeypatch.setenv("DB_SSLMODE", "require")
     with pytest.raises(ConfiguracaoInvalida, match="verify-full"):
         carregar()
@@ -73,3 +77,19 @@ def test_url_do_banco_sem_senha(monkeypatch: pytest.MonkeyPatch, tmp_path: objec
     monkeypatch.setenv("DATABASE_URL", "postgresql://u:segredo@db:5432/x")
     with pytest.raises(ValueError, match="DATABASE_PASSWORD_FILE"):
         url_asyncpg(Parametros())
+
+
+def test_tls_interno_sem_autoridade_de_clientes_e_recusado(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INTERNAL_CERT_FILE", "/run/secrets/cert.pem")
+    monkeypatch.setenv("INTERNAL_KEY_FILE", "/run/secrets/key.pem")
+    with pytest.raises(ConfiguracaoInvalida, match="falharia aberto"):
+        carregar()
+
+
+def test_producao_sem_tls_interno_e_recusada(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "producao")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://mcp.claro.exemplo")
+    monkeypatch.setenv("INTERNAL_CA_FILE", "/run/secrets/ca.pem")
+    monkeypatch.setenv("INTERNAL_CLIENT_CA_FILE", "/run/secrets/ca_clientes.pem")
+    with pytest.raises(ConfiguracaoInvalida, match="INTERNAL_CERT_FILE"):
+        carregar()
