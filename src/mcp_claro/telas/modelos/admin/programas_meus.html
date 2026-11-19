@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block titulo %}Meus programas{% endblock %}
+{% block conteudo %}
+<h1>Programas sob a sua responsabilidade</h1>
+<p>Um programa roda sozinho, sem pessoa por trás. Você responde por ele. Nesta fase, ele só lê.</p>
+<p>A cada {{ recert_dias }} dias, o responsável confirma que o programa segue valendo. Sem a confirmação, ele pausa.</p>
+{% if not programas %}
+<p class="cartao">Você não é responsável nem substituto de nenhum programa.</p>
+{% else %}
+{% for pr, prazos in programas %}
+<section class="cartao">
+  <h2>{{ pr.nome }}</h2>
+  <p>{{ pr.finalidade }}</p>
+  <p>Situação: {{ pr.situacao | situacao }}. Vale até {{ pr.fim | data }}.</p>
+  <p>Você é {% if pr.responsavel_id == eu %}o responsável{% else %}o substituto{% endif %}. Responsável: {{ pr.responsavel }}. Substituto: {{ pr.substituto }}.</p>
+  <p>Revisão vence em {{ prazos.revisao_vence | data }}{% if prazos.revisao_vencida %} <span class="etiqueta ruim">venceu</span>{% endif %}. Chave vence em {{ prazos.chave_vence | data }}.</p>
+  <p>Último pedido: {% if prazos.ultimo_pedido %}{{ prazos.ultimo_pedido | data_hora }}{% else %}nenhum ainda{% endif %}.</p>
+  {% if pr.responsavel_id == eu and pr.situacao != "encerrado" %}
+  <form method="post" action="/telas/programas/{{ pr.aplicativo_id }}/recertificar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Confirmo que este programa segue valendo</button>
+  </form>
+  {% if pr.situacao == "pausado" %}<p class="dica">O programa está pausado. Depois de confirmar, peça ao ADMIN para retomar.</p>{% endif %}
+  {% endif %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}

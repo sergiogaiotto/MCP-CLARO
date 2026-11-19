@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block titulo %}Programas{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Programas que rodam sozinhos</h1>
+<p>Cada programa é um aplicativo próprio, cadastrado antes no provedor de login. Nesta fase, ele só lê.</p>
+<p>Todo programa tem um responsável e um substituto, com nome. Sem eles, o programa não é salvo.</p>
+<p>Ele só usa sistemas com chave própria do programa. Sistema com chave por pessoa ou compartilhada não entra.</p>
+{% if programas %}
+<table>
+  <thead><tr><th>Programa</th><th>Para quê</th><th>Responsável</th><th>Substituto</th><th>Até</th><th>Revisão vence</th><th>Chave vence</th><th>Último pedido</th><th>Situação</th></tr></thead>
+  <tbody>
+  {% for pr, prazos in programas %}
+    <tr>
+      <td><a href="/telas/admin/programas/{{ pr.aplicativo_id }}">{{ pr.nome }}</a> <code>{{ pr.client_id }}</code></td>
+      <td>{{ pr.finalidade }}</td>
+      <td>{{ pr.responsavel }}{% if not pr.responsavel_ativo %} <span class="etiqueta ruim">não está ativo</span>{% endif %}</td>
+      <td>{{ pr.substituto }}{% if not pr.substituto_ativo %} <span class="etiqueta ruim">não está ativo</span>{% endif %}</td>
+      <td>{{ pr.fim | data }}</td>
+      <td>{{ prazos.revisao_vence | data }}{% if prazos.revisao_vencida %} <span class="etiqueta ruim">venceu</span>{% endif %}</td>
+      <td>{{ prazos.chave_vence | data }}{% if prazos.chave_vencida %} <span class="etiqueta ruim">venceu</span>{% endif %}</td>
+      <td>{% if prazos.ultimo_pedido %}{{ prazos.ultimo_pedido | data_hora }}{% else %}Nenhum ainda{% endif %}</td>
+      <td>{{ pr.situacao | situacao }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="cartao">Nenhum programa cadastrado.</p>
+{% endif %}
+
+<h2>Cadastrar um programa</h2>
+<p class="dica">Antes, crie o cliente do programa no provedor de login, com conta de serviço e JWT assinado. O guia está em docs/programas.md.</p>
+{% if pessoas | length < 2 %}
+<p class="cartao">Para cadastrar um programa, é preciso ter ao menos duas pessoas ativas com nome. Elas aparecem aqui depois do primeiro login.</p>
+{% else %}
+<form method="post" action="/telas/admin/programas" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="client_id">client_id no provedor de login</label>
+  <input type="text" id="client_id" name="client_id" required maxlength="200" value="{{ valores.get('client_id', '') }}">
+  <label for="nome">Nome do programa</label>
+  <input type="text" id="nome" name="nome" required maxlength="120" value="{{ valores.get('nome', '') }}">
+  <label for="familia">Família</label>
+  <input type="text" id="familia" name="familia" maxlength="60" value="{{ valores.get('familia', 'programa') }}">
+  <label for="finalidade">Para que serve</label>
+  <textarea id="finalidade" name="finalidade" required maxlength="500">{{ valores.get('finalidade', '') }}</textarea>
+  <label for="responsavel">Responsável</label>
+  <select id="responsavel" name="responsavel" required>
+    <option value="">Escolha uma pessoa</option>
+    {% for pe in pessoas %}<option value="{{ pe.id }}" {% if valores.get('responsavel') == pe.id|string %}selected{% endif %}>{{ pe.nome }}</option>{% endfor %}
+  </select>
+  <label for="substituto">Substituto</label>
+  <select id="substituto" name="substituto" required>
+    <option value="">Escolha outra pessoa</option>
+    {% for pe in pessoas %}<option value="{{ pe.id }}" {% if valores.get('substituto') == pe.id|string %}selected{% endif %}>{{ pe.nome }}</option>{% endfor %}
+  </select>
+  <label for="fim">Data de fim</label>
+  <input type="date" id="fim" name="fim" required min="{{ hoje }}" value="{{ valores.get('fim', '') }}">
+  <button type="submit">Cadastrar o programa</button>
+</form>
+{% endif %}
+{% endblock %}
