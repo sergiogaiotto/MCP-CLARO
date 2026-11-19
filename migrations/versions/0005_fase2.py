@@ -149,6 +149,8 @@ BEGIN
 END $$;
 CREATE TRIGGER fila_saida_nasce BEFORE INSERT ON fila_saida FOR EACH ROW EXECUTE FUNCTION fila_saida_nasce();
 CREATE TRIGGER fila_saida_sem_delete BEFORE DELETE ON fila_saida FOR EACH ROW EXECUTE FUNCTION extrato_recusa_mudanca();
+CREATE TRIGGER fila_saida_sem_truncate BEFORE TRUNCATE ON fila_saida
+  FOR EACH STATEMENT EXECUTE FUNCTION extrato_recusa_mudanca();
 
 -- Acorda o despachante quando uma linha fica liberada (LISTEN/NOTIFY), alem da varredura de reserva.
 CREATE FUNCTION fila_saida_avisa() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -204,6 +206,8 @@ CREATE TABLE comprovantes (
 );
 CREATE TRIGGER comprovantes_sem_update_delete BEFORE UPDATE OR DELETE ON comprovantes
   FOR EACH ROW EXECUTE FUNCTION extrato_recusa_mudanca();
+CREATE TRIGGER comprovantes_sem_truncate BEFORE TRUNCATE ON comprovantes
+  FOR EACH STATEMENT EXECUTE FUNCTION extrato_recusa_mudanca();
 """
 
 # Medicoes da Fase 2 para o Grafana: so contagens, nunca protocolo, argumento nem pessoa.

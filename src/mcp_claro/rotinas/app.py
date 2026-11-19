@@ -33,6 +33,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
+from mcp_claro.rotinas.acoes import tarefas_de_acoes
 from mcp_claro.rotinas.agendador import Agendador, Tarefa
 from mcp_claro.rotinas.config import ConfigRotinas
 from mcp_claro.rotinas.despachante import ClienteDespachante
@@ -194,7 +195,13 @@ def criar_app_rotinas(
                 pilha.push_async_callback(cliente.fechar)
                 origem = cliente
             lista = (
-                tarefas if tarefas is not None else [*montar_tarefas(engine, cfg, origem), *([ronda] if ronda else [])]
+                tarefas
+                if tarefas is not None
+                else [
+                    *montar_tarefas(engine, cfg, origem),
+                    *tarefas_de_acoes(engine, p, cfg),
+                    *([ronda] if ronda else []),
+                ]
             )
             agendador = Agendador(
                 engine, lista, primeira_espera=cfg.primeira_espera, ao_mesmo_tempo=cfg.tarefas_ao_mesmo_tempo

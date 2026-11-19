@@ -660,17 +660,9 @@ async def test_dois_pedidos_pelo_ultimo_uso_de_um_limite_so_um_passa(amb: Ambien
     assert usados == 1
 
 
-# --- Defeitos achados (marcados xfail estrito ate a correcao) ---------------------------------
+# --- Defeitos achados pelas provas (corrigidos; os testes ficam) ---------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFEITO: o comprovante so olha acoes criadas nas ultimas 24 horas (operacoes.criada_em); uma acao "
-        "antiga (ficha de programa vence em ate PROGRAM_PENDING_TIMEOUT_HOURS=168 h) que esta saindo na hora "
-        "do bloqueio nao aparece nem em paradas nem em ja_saidas. Ver fila.parar_por_bloqueio."
-    ),
-)
 async def test_acao_antiga_saindo_na_hora_do_bloqueio_entra_no_comprovante(amb: Ambiente) -> None:
     op = await nova_acao(amb, "Pedida ha mais de um dia")
     async with amb.admin.begin() as c:  # como uma ficha de programa confirmada 30 horas depois do pedido
@@ -695,15 +687,6 @@ async def test_acao_antiga_saindo_na_hora_do_bloqueio_entra_no_comprovante(amb: 
         await desbloquear(amb, b)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFEITO: Pedidos.pedir toma as travas compartilhadas do alcance e, no teto de fichas, chama "
-        "bloqueios.bloquear na mesma transacao, que pede a trava exclusiva do aplicativo. Dois pedidos ao "
-        "mesmo tempo no teto se esperam: o PostgreSQL acusa impasse (40P01) e o pedido falha com erro de "
-        "banco em vez da recusa 'teto_confirmacoes'. Ver pedidos.Pedidos.pedir e _pausar_por_teto."
-    ),
-)
 async def test_pedidos_ao_mesmo_tempo_no_teto_de_fichas_recusam_sem_impasse(amb: Ambiente) -> None:
     async with amb.admin.connect() as c:
         ja = await fila.fichas_na_ultima_hora(c, amb.aplicativo_id)
@@ -731,14 +714,6 @@ async def test_pedidos_ao_mesmo_tempo_no_teto_de_fichas_recusam_sem_impasse(amb:
     assert pausas >= 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFEITO: o despachante escolhe a candidata sem SKIP LOCKED e, quando o FOR UPDATE SKIP LOCKED pula a "
-        "linha travada, devolve True e escolhe a mesma linha de novo: a fila inteira para atras dela, e a "
-        "porta gira sem esperar. Ver PortaDeSaida.enviar_uma."
-    ),
-)
 async def test_linha_travada_por_outra_transacao_nao_segura_a_fila(amb: Ambiente) -> None:
     travada = await nova_acao(amb, "Linha travada")
     livre = await nova_acao(amb, "Linha livre atras")

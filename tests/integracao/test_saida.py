@@ -106,9 +106,7 @@ def meta(resultado: Any) -> dict[str, Any]:
 
 async def operacao(amb: Ambiente, protocolo: str) -> fila.Operacao:
     async with amb.admin.connect() as c:
-        op = (
-            await c.execute(text("SELECT id FROM operacoes WHERE protocolo = :p"), {"p": protocolo})
-        ).scalar_one()
+        op = (await c.execute(text("SELECT id FROM operacoes WHERE protocolo = :p"), {"p": protocolo})).scalar_one()
         achada = await fila.por_id(c, op)
     assert achada is not None
     return achada
@@ -214,9 +212,7 @@ async def test_bloqueio_no_meio_da_fila_para_o_resto_e_guarda_comprovante(amb: A
     await politica(amb, OUTBOX_HOLD_SECONDS=30)
     protocolos = []
     for n in range(4):
-        protocolos.append(
-            meta(await chamar(amb, "criar_chamado", {"titulo": f"Fila {n}"}))[PREFIXO_META + "protocolo"]
-        )
+        protocolos.append(meta(await chamar(amb, "criar_chamado", {"titulo": f"Fila {n}"}))[PREFIXO_META + "protocolo"])
     ops = [await operacao(amb, p) for p in protocolos]
     # A primeira sai ja; as outras ficam na espera de 30 segundos.
     await confirmar(amb, ops[0], pessoa_id=amb.ana_id)

@@ -87,6 +87,10 @@ async def test_saude_e_tarefas_rodando(rotinas: tuple[str, Any]) -> None:
         "limpeza",
         "resumo_semanal",
         "mudou_parou",
+        # Fase 2: fichas e limites
+        "vencer_fichas",
+        "avisar_fichas_pendentes",
+        "vencer_limites",
     }
     fim = time.monotonic() + 15
     tarefas: dict[str, str] = {}

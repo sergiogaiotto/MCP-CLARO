@@ -80,6 +80,8 @@ class PortaDeSaida:
         self.chamar: Chamador = chamar or cliente.chamar_ferramenta
         self.assumiu = asyncio.Event()
         self._acordar = asyncio.Event()
+        # Linhas puladas nesta volta porque outra transacao as segura (cancelar, confirmar, bloquear).
+        self._puladas: set[int] = set()
 
     # Ciclo
 
@@ -164,11 +166,15 @@ class PortaDeSaida:
                     text(
                         "SELECT f.id, o.pessoa_id, o.aplicativo_id, o.sistema_id FROM fila_saida f"
                         " JOIN operacoes o ON o.id = f.operacao_id"
-                        " WHERE f.estado = 'liberada' AND f.hora_saida <= now() ORDER BY f.hora_saida, f.id LIMIT 1"
-                    )
+                        " WHERE f.estado = 'liberada' AND f.hora_saida <= now() AND NOT (f.id = ANY(:puladas))"
+                        " ORDER BY f.hora_saida, f.id LIMIT 1"
+                    ),
+                    {"puladas": sorted(self._puladas)},
                 )
             ).first()
         if candidata is None:
+            # Volta completa: as puladas entram de novo na proxima, depois da espera.
+            self._puladas.clear()
             return False
         async with self._transacao(dono) as c:
             await travas.compartilhar_envio(c, candidata.pessoa_id, candidata.aplicativo_id, candidata.sistema_id)
@@ -184,6 +190,7 @@ class PortaDeSaida:
                 )
             ).scalar_one_or_none()
             if travada is None:
+                self._puladas.add(candidata.id)
                 return True
             op = await fila.por_fila(c, candidata.id)
             if op is None:

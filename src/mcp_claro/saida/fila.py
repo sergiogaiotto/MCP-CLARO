@@ -833,7 +833,9 @@ async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, jan
                 "SELECT o.protocolo, f.estado, f.enviada_em, o.desfecho FROM fila_saida f"  # noqa: S608
                 f" JOIN operacoes o ON o.id = f.operacao_id WHERE {filtro}"
                 " AND f.estado IN ('enviando', 'enviada', 'nao_confirmada', 'sistema_pediu_dados')"
-                " AND o.criada_em > now() - make_interval(hours => :h) ORDER BY o.criada_em"
+                " AND (f.estado = 'enviando'"
+                " OR coalesce(f.enviada_em, f.mudou_em) > now() - make_interval(hours => :h))"
+                " ORDER BY o.criada_em"
             ),
             {"h": janela_horas, **valores},
         )

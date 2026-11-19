@@ -144,8 +144,6 @@ class Pedidos:
             rota = await self._rota(c, pedido, valores)
             teto = valores["CONFIRM_CAP_PER_HOUR"]
             if rota is None:
-                # A pausa e o comprovante ficam gravados (a transacao termina normal); so depois a recusa.
-                await self._pausar_por_teto(c, pedido, teto)
                 op = None
             else:
                 op = await fila.registrar_pedido(
@@ -162,6 +160,10 @@ class Pedidos:
                     trace_id=pedido.trace_id,
                 )
         if op is None or rota is None:
+            # A pausa vai numa transacao propria, depois de soltar a trava compartilhada deste pedido: dois
+            # pedidos no teto ao mesmo tempo nao esperam um pelo outro. A pausa fica gravada antes da recusa.
+            async with self.engine.begin() as c:
+                await self._pausar_por_teto(c, pedido, teto)
             raise AcaoRecusada(
                 "teto_confirmacoes",
                 f"Este aplicativo pediu mais de {teto} confirmacoes na ultima hora e foi pausado. "
@@ -200,6 +202,8 @@ class Pedidos:
         return rota
 
     async def _pausar_por_teto(self, c: Any, pedido: Pedido, teto: int) -> None:
+        # Trava exclusiva do aplicativo antes de olhar: dois pedidos no teto ligam uma pausa so.
+        await travas.exclusiva(c, travas.chaves_do_alcance("aplicativo", aplicativo_id=pedido.aplicativo.id))
         vigentes = await bloqueios.ativos(c, pessoa_id=None, aplicativo_id=pedido.aplicativo.id)
         if vigentes.geral is None:
             # Pausa como qualquer outra: para a fila do aplicativo e guarda o comprovante.
