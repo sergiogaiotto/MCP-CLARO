@@ -1,0 +1,9 @@
+{# A parte que o htmx troca sozinha enquanto a acao espera para sair ou esta saindo. Sem JavaScript, a hora fica escrita. #}
+<div id="relogio" aria-live="polite"{% if a.atualiza %} hx-get="/telas/acoes/{{ a.op.id }}/estado?visto={{ a.op.estado }}" hx-trigger="every {{ intervalo }}s" hx-swap="outerHTML"{% endif %}>
+  <h2>{{ a.rotulo }}</h2>
+  <p>{{ a.frase }}</p>
+  {% if a.op.estado == "liberada" %}
+  <p class="relogio">Sai às <strong>{{ a.hora_saida }}</strong> (horário de Brasília).</p>
+  <p>{% if a.falta > 0 %}Faltam <strong>{{ a.falta_texto }}</strong> para sair.{% else %}Está na hora: sai em instantes.{% endif %}</p>
+  {% endif %}
+</div>

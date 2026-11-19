@@ -280,7 +280,10 @@ class Ambiente:
 
 # Revisao de uma ferramenta no arranjo: (nome original, prefixo do nome na vitrine, classe, risco).
 Revisao = tuple[str, str, str, str]
-LEITURAS: tuple[Revisao, ...] = (("consultar_fatura", "fatura", "le", "medio"), ("ver_cadastro", "cadastro", "le", "medio"))
+LEITURAS: tuple[Revisao, ...] = (
+    ("consultar_fatura", "fatura", "le", "medio"),
+    ("ver_cadastro", "cadastro", "le", "medio"),
+)
 
 
 @contextlib.asynccontextmanager

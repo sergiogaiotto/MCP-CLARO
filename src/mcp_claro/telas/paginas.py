@@ -52,6 +52,17 @@ AVISOS: Final[dict[str, str]] = {
     "autorizacao_configurada": "Pronto. A autorização por pessoa deste sistema foi configurada.",
     "segredo_guardado": "Pronto. O segredo foi entregue ao cofre. Ele não aparece mais nas telas.",
     "chave_guardada": "Pronto. A chave foi entregue ao cofre. Ela não aparece mais nas telas.",
+    # Fase 2: fichas, acoes, passkeys e limites (pessoa).
+    "confirmada": "Pronto. A ficha foi confirmada. A ação espera a hora de sair; ainda dá para cancelar.",
+    "recusada": "Pronto. A ficha foi recusada. Nada foi para o sistema.",
+    "cancelada": "Pronto. A ação foi cancelada antes de sair. Nada chegou ao sistema.",
+    "seguir_agora": "Pronto. A ação sai agora, sem esperar o resto do tempo.",
+    "decisao_registrada": "Pronto. Sua decisão foi registrada. Nada será reenviado.",
+    "passkey_cadastrada": "Pronto. A passkey foi cadastrada. Use-a para confirmar ações de risco alto e limites.",
+    "passkey_desativada": "Pronto. A passkey foi desativada. Ela não serve mais para confirmar nada.",
+    "limite_criado": "Pronto. O limite foi criado e vale a partir de agora.",
+    "limite_ampliado": "Pronto. O limite foi ampliado.",
+    "limite_encerrado": "Pronto. O limite foi encerrado. A partir de agora, essa ação volta a pedir ficha.",
 }
 
 SITUACOES: Final[dict[str, str]] = {

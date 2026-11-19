@@ -1,0 +1,10 @@
+{# Os dados do pedido, em lista "chave: valor". O escape e automatico. #}
+{% if a.argumentos %}
+<dl class="comprovante">
+  {% for chave, valor in a.argumentos %}
+  <dt>{{ chave }}</dt><dd>{{ valor }}</dd>
+  {% endfor %}
+</dl>
+{% else %}
+<p>Nenhum dado.</p>
+{% endif %}

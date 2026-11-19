@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block titulo %}Ação {{ a.op.protocolo }}{% endblock %}
+{% block conteudo %}
+<h1>Ação {{ a.op.protocolo }}</h1>
+<section class="cartao comprovante">
+  <dl>
+    <dt>Número de protocolo</dt><dd><code>{{ a.op.protocolo }}</code></dd>
+    <dt>O quê</dt><dd>{{ a.op.nome_vitrine }}, no sistema {{ a.op.sistema_nome }}</dd>
+    <dt>Pedida em</dt><dd>{{ a.op.criada_em | data_hora }}</dd>
+    <dt>Código de conferência</dt><dd><strong>{{ a.op.codigo_conferencia }}</strong></dd>
+    <dt>Como passou</dt><dd>{{ a.como }}</dd>
+  </dl>
+  <p><strong>O que foi pedido:</strong></p>
+  {% include "acoes/_argumentos.html" %}
+</section>
+{% include "acoes/_estado.html" %}
+<p><a href="/telas/acoes">Minhas ações</a> · <a href="/telas/pendencias">Caixa de pendências</a> · <a href="/telas/extrato">Meu extrato</a></p>
+{% endblock %}

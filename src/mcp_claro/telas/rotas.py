@@ -1,7 +1,9 @@
 """Rotas das telas, montadas em ``/telas`` no app da entrada.
 
 Telas da pessoa: inicio, entrar e sair, "Minhas ordens de servico", "Meu extrato", "Bloquear agora"
-e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema" (``telas/autorizar.py``).
+e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema" (``telas/autorizar.py``). Fase 2: caixa de
+pendencias, ficha, "Minhas acoes" e "estamos confirmando" (``telas/acoes.py``), passkeys
+(``telas/passkeys.py``) e limites por aproximacao (``telas/limites.py``).
 Telas do ADMIN: em ``telas/admin.py`` (cadastro) e ``telas/admin_portas.py`` (bloqueios, portas,
 pessoas, autorizacao e chaves dos sistemas).
 """
@@ -22,12 +24,15 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada.cracha import ChavesPublicas
 from mcp_claro.logs import logger
 from mcp_claro.telas import admin, admin_portas, consultas
+from mcp_claro.telas.acoes import TelasDeAcoes
 from mcp_claro.telas.autorizar import TelasDeAutorizacao
 from mcp_claro.telas.bloqueio import TelasDeBloqueio
 from mcp_claro.telas.config import ConfigTelas
+from mcp_claro.telas.limites import TelasDeLimites
 from mcp_claro.telas.login import LoginRecusado, ProvedorLogin
 from mcp_claro.telas.nucleo import PortaInterna, Telas, numero_pagina, tela, uuid_ou_none, ver_depois
 from mcp_claro.telas.paginas import PASTA_ESTATICOS, criar_ambiente
+from mcp_claro.telas.passkeys import TelasDePasskeys
 from mcp_claro.telas.seguranca import (
     COOKIE_LOGIN,
     COOKIE_SESSAO,
@@ -296,6 +301,7 @@ def rotas_telas(
     chaves = ChavesPublicas(_url_jwks(p), cache_segundos=p.IDP_JWKS_CACHE_SECONDS, http=http)
     t = Telas(p, cfg, engine, despachante, ProvedorLogin(p, cfg, http, chaves), criar_ambiente(cfg.fuso))
     pessoa = TelasDaPessoa(t)
+    acoes = TelasDeAcoes(t)  # Fase 2; o inicio mostra a contagem da caixa de pendencias
     adm = admin.TelasDoAdmin(t)
 
     def g(caminho: str, funcao: object) -> Route:
@@ -305,7 +311,7 @@ def rotas_telas(
         return Route(caminho, funcao, methods=["POST"])  # type: ignore[arg-type]
 
     internas: list[BaseRoute] = [
-        g("/", pessoa.inicio),
+        g("/", acoes.inicio),
         g("/login", pessoa.entrar),
         g("/login/volta", pessoa.volta),
         post("/sair", pessoa.sair),
@@ -315,6 +321,9 @@ def rotas_telas(
         g("/extrato", pessoa.extrato),
         *TelasDeBloqueio(t).rotas(),
         *TelasDeAutorizacao(t).rotas(),
+        *acoes.rotas(),
+        *TelasDePasskeys(t).rotas(),
+        *TelasDeLimites(t).rotas(),
         *adm.rotas(),
         *admin_portas.TelasDoAdminPortas(t).rotas(),
         Mount("/estaticos", app=StaticFiles(directory=PASTA_ESTATICOS), name="estaticos"),
@@ -322,7 +331,7 @@ def rotas_telas(
     protecao = [Middleware(CabecalhosSeguranca, hsts=p.PUBLIC_BASE_URL.startswith("https://"))]
     roteador = Router(routes=internas, default=pessoa.nao_achada, redirect_slashes=False)
     return [
-        Route("/telas", pessoa.inicio, methods=["GET"], middleware=protecao),
+        Route("/telas", acoes.inicio, methods=["GET"], middleware=protecao),
         Mount("/telas", app=roteador, name="telas", middleware=protecao, max_body_size=MAXIMO_FORMULARIO),
     ]
 

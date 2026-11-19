@@ -5,6 +5,8 @@
 - A pessoa so liga no proprio alcance: um aplicativo so para ela (``pessoa_aplicativo``) ou todos os
   aplicativos dela (``pessoa``). A linha do extrato sai da propria regra (``bloquear`` e ``encerrar``).
 - Tocar de novo no mesmo botao nao abre outro igual: mostra o comprovante do que ja vale.
+- O comprovante mostra tambem as tres partes da porta de saida (Fase 2): o que parou antes de sair, o que
+  ja tinha saido e o que o sistema informou.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Row
 from starlette.requests import Request
@@ -22,6 +25,8 @@ from starlette.routing import BaseRoute, Route
 from mcp_claro.logs import logger
 from mcp_claro.regras import bloqueios
 from mcp_claro.regras.bloqueios import BloqueioInvalido, SemPermissao
+from mcp_claro.saida import fila
+from mcp_claro.saida.protocolo import FUSO
 from mcp_claro.telas import consultas
 from mcp_claro.telas.nucleo import Telas, tela, uuid_ou_none, ver_depois
 
@@ -103,6 +108,54 @@ def parada(linha: Row[Any], pessoa_id: uuid.UUID | None, *, da_pessoa: bool = Tr
         encerrado_em=linha.encerrado_em,
         encerrado_por=quem_legivel(linha.encerrado_por, pessoa_id) if linha.encerrado_por else None,
     )
+
+
+ESTAVA: Final[dict[str, str]] = {
+    "aguardando_ficha": "esperava a sua ficha",
+    "liberada": "estava na espera para sair",
+}
+SAIDA: Final[dict[str, str]] = {
+    "enviando": "estava saindo",
+    "enviada": "enviada",
+    "nao_confirmada": "resultado não confirmado",
+    "sistema_pediu_dados": "o sistema pediu mais dados",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TresPartes:
+    """Comprovante do bloqueio em tres partes (``fila.comprovante_do_bloqueio``), como a tela mostra."""
+
+    paradas: list[tuple[str, str]]
+    ja_saidas: list[tuple[str, str, str]]
+    informado: list[tuple[str, str]]
+
+
+def _momento(valor: Any) -> datetime | None:
+    if not isinstance(valor, str):
+        return None
+    try:
+        return datetime.fromisoformat(valor)
+    except ValueError:
+        return None
+
+
+def tres_partes(c: fila.Comprovante | None) -> TresPartes | None:
+    if c is None:
+        return None
+    paradas = [(str(p.get("protocolo", "")), ESTAVA.get(str(p.get("estava")), str(p.get("estava")))) for p in c.paradas]
+    ja_saidas = []
+    for s in c.ja_saidas:
+        quando = _momento(s.get("enviada_em"))
+        ja_saidas.append(
+            (
+                str(s.get("protocolo", "")),
+                SAIDA.get(str(s.get("estado")), str(s.get("estado"))),
+                quando.astimezone(ZoneInfo(FUSO)).strftime("%d/%m/%Y %H:%M") if quando else "",
+            )
+        )
+    informado = [(str(i.get("protocolo", "")), str(i.get("o_sistema_informou", ""))) for i in c.informado]
+    return TresPartes(paradas, ja_saidas, informado)
 
 
 class TelasDeBloqueio:
@@ -196,9 +249,12 @@ class TelasDeBloqueio:
         sessao = await self.t.exigir_sessao(pedido)
         async with self.t.engine.connect() as c:
             linha = await consultas.bloqueio_com_nomes(c, pedido.path_params["bloqueio_id"])
+            partes = await fila.comprovante_do_bloqueio(c, linha.id) if linha is not None else None
         if linha is None or linha.pessoa_id != sessao.pessoa.id or linha.alcance not in ("pessoa", "pessoa_aplicativo"):
             return self.t.erro(pedido, 404, "Comprovante não encontrado", "Este comprovante não é seu ou não existe.")
-        return self.t.pagina(pedido, "comprovante.html", {"p": parada(linha, sessao.pessoa.id)})
+        return self.t.pagina(
+            pedido, "comprovante.html", {"p": parada(linha, sessao.pessoa.id), "partes": tres_partes(partes)}
+        )
 
     @tela
     async def retomar(self, pedido: Request) -> Response:

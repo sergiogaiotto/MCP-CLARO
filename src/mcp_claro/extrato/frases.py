@@ -83,6 +83,87 @@ FRASES: Final[dict[str, Frase]] = {
         Frase("limite_encerrado", "O limite de {ferramenta} foi encerrado: {motivo}."),
         Frase("passkey_cadastrada", "A pessoa cadastrou uma passkey."),
         Frase("passkey_desativada", "Uma passkey da pessoa foi desativada."),
+        # Fase 2: programas que rodam sozinhos (decisao 9).
+        Frase(
+            "programa_leitura_feita",
+            "Leitura em {ferramenta} feita pelo programa {programa}, responsavel {responsavel}.",
+        ),
+        Frase(
+            "programa_leitura_recusada",
+            "Leitura em {ferramenta} pelo programa {programa}, responsavel {responsavel}, recusada: {motivo}.",
+        ),
+        Frase(
+            "programa_pedido_recusado",
+            "Pedido {metodo} do programa {programa}, responsavel {responsavel}, recusado: {motivo}.",
+        ),
+        Frase("programa_recusado", "Pedido do programa {programa}, responsavel {responsavel}, recusado: {motivo}."),
+        Frase(
+            "programa_sem_cadastro",
+            "Pedido do aplicativo {aplicativo}, do tipo programa, recusado: falta o cadastro de programa, com"
+            " responsavel.",
+        ),
+        Frase(
+            "admin_programa_pausado",
+            "Programa {programa}, responsavel {responsavel}, pausado por {quem}: {motivo}.",
+        ),
+        Frase("admin_programa_retomado", "Programa {programa}, responsavel {responsavel}, retomado por {quem}."),
+        Frase(
+            "admin_programa_encerrado",
+            "Programa {programa}, responsavel {responsavel}, encerrado por {quem}: {motivo}.",
+        ),
+        Frase(
+            "admin_programa_responsaveis",
+            "Programa {programa}: {quem} passou a responsabilidade a {responsavel}, com substituto {substituto}.",
+        ),
+        Frase(
+            "admin_programa_chave_trocada",
+            "Programa {programa}, responsavel {responsavel}: {quem} registrou a troca da chave do programa.",
+        ),
+        Frase(
+            "admin_programa_ordem",
+            "Programa {programa}, responsavel {responsavel}: {quem} deu a ordem de servico {modelo}, valida ate {fim}.",
+        ),
+        Frase(
+            "programa_recertificado",
+            "Programa {programa}, responsavel {responsavel}: {quem} confirmou que ele segue valendo.",
+        ),
+        Frase(
+            "programa_pausado_sem_uso",
+            "Programa {programa}, responsavel {responsavel}, pausado: {dias} dias sem pedido.",
+        ),
+        Frase(
+            "programa_pausado_revisao",
+            "Programa {programa}, responsavel {responsavel}, pausado: a revisao de cada {dias} dias venceu sem"
+            " confirmacao; o responsavel foi avisado.",
+        ),
+        Frase(
+            "programa_pausado_chave",
+            "Programa {programa}, responsavel {responsavel}, pausado: a chave passou de {dias} dias sem troca.",
+        ),
+        Frase(
+            "programa_pausado_responsavel",
+            "Programa {programa}, responsavel {responsavel}, pausado: o responsavel ou o substituto nao esta mais"
+            " ativo.",
+        ),
+        Frase(
+            "programa_chave_a_vencer",
+            "A chave do programa {programa}, responsavel {responsavel}, vence em {fim}; o responsavel foi avisado.",
+        ),
+        Frase(
+            "programa_encerrado_fim",
+            "Programa {programa}, responsavel {responsavel}, encerrado: o cadastro valia ate {fim}.",
+        ),
+        # Telas da Fase 2: limite criado ou ampliado com a passkey desligada nesta instalacao.
+        Frase(
+            "limite_criado_sem_passkey",
+            "A pessoa criou um limite de {por_dia} por dia para {ferramenta}, sem passkey (desligada nesta"
+            " instalacao).",
+        ),
+        Frase(
+            "limite_ampliado_sem_passkey",
+            "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, sem passkey (desligada nesta"
+            " instalacao).",
+        ),
         Frase("bloqueio", "Bloqueio ligado por {quem}: {alcance}."),
         Frase("fechamento", "Fechamento {numero} calculado com {linhas} linhas."),
         Frase(

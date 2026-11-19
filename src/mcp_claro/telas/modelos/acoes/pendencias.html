@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block titulo %}Caixa de pendências{% endblock %}
+{% block conteudo %}
+<h1>Caixa de pendências</h1>
+<p>Aqui fica o que espera por você: fichas para decidir, ações na espera para sair e resultados que ainda não foram confirmados.</p>
+{% if not caixa.total %}
+<p class="cartao">Nada espera por você agora.</p>
+{% endif %}
+
+{% if caixa.fichas %}
+<h2>Fichas para você decidir ({{ caixa.fichas | length }})</h2>
+<p>Nada sai sem a sua confirmação. Sem resposta no prazo, a ficha vence e nada segue.</p>
+{% for a in caixa.fichas %}
+<section class="cartao">
+  <h3>{{ a.op.nome_vitrine }} <span class="dica">no sistema {{ a.op.sistema_nome }}</span></h3>
+  <p>Protocolo <code>{{ a.op.protocolo }}</code>. Código de conferência <strong>{{ a.op.codigo_conferencia }}</strong>.</p>
+  <p>{% if a.prazo > 0 %}Faltam {{ a.prazo_texto }} para decidir.{% else %}O prazo para decidir acabou.{% endif %}
+    {% if a.op.ficha_exige_passkey %}<span class="etiqueta ruim">Risco alto: pede a passkey</span>{% endif %}</p>
+  <p><a class="botao" href="/telas/fichas/{{ a.op.ficha_id }}" hx-boost="false">Abrir a ficha</a></p>
+</section>
+{% endfor %}
+{% endif %}
+
+{% if caixa.espera %}
+<h2>Ações na espera para sair ({{ caixa.espera | length }})</h2>
+<p>Já confirmadas. Até a hora de sair, ainda dá para cancelar.</p>
+<ul>
+  {% for a in caixa.espera %}
+  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema {{ a.op.sistema_nome }}. Sai às {{ a.hora_saida }} (horário de Brasília).</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if caixa.confirmando %}
+<h2>Estamos confirmando ({{ caixa.confirmando | length }})</h2>
+<p>O pedido pode ter chegado ao sistema, mas a resposta não chegou inteira. Nada será reenviado. Conte para nós o que aconteceu.</p>
+<ul>
+  {% for a in caixa.confirmando %}
+  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema {{ a.op.sistema_nome }}. Falta a sua decisão.</li>
+  {% endfor %}
+</ul>
+{% endif %}
+<p><a href="/telas/acoes">Minhas ações</a> · <a href="/telas/limites">Meus limites</a> · <a href="/telas/passkeys" hx-boost="false">Minhas passkeys</a></p>
+{% endblock %}

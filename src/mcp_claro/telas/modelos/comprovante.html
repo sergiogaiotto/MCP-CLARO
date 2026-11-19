@@ -23,6 +23,35 @@
   {% endif %}
   {% endif %}
 </section>
+{% if partes is defined and partes %}
+<h2>O que aconteceu com as ações</h2>
+<section class="cartao">
+  <h3>1. O que parou antes de sair</h3>
+  {% if partes.paradas %}
+  <p>Estas ações não saíram e não vão sair. Nada delas chegou ao sistema.</p>
+  <ul>{% for protocolo, estava in partes.paradas %}<li><a href="/telas/acoes?protocolo={{ protocolo }}">{{ protocolo }}</a>: {{ estava }}.</li>{% endfor %}</ul>
+  {% else %}
+  <p>Nenhuma ação esperava para sair.</p>
+  {% endif %}
+</section>
+<section class="cartao">
+  <h3>2. O que já tinha saído</h3>
+  {% if partes.ja_saidas %}
+  <p>Estas ações já tinham saído antes do bloqueio. O bloqueio não as desfaz.</p>
+  <ul>{% for protocolo, estado, quando in partes.ja_saidas %}<li><a href="/telas/acoes?protocolo={{ protocolo }}">{{ protocolo }}</a>: {{ estado }}{% if quando %}, em {{ quando }}{% endif %}.</li>{% endfor %}</ul>
+  {% else %}
+  <p>Nenhuma ação tinha saído nas últimas 24 horas.</p>
+  {% endif %}
+</section>
+<section class="cartao">
+  <h3>3. O que o sistema informou</h3>
+  {% if partes.informado %}
+  <ul>{% for protocolo, informou in partes.informado %}<li>{{ protocolo }}: {{ informou }}.</li>{% endfor %}</ul>
+  {% else %}
+  <p>Não há resposta de sistema para mostrar.</p>
+  {% endif %}
+</section>
+{% endif %}
 <p>Este passo também está no <a href="/telas/extrato">Meu extrato</a>.</p>
 <p><a href="/telas/bloqueio">Bloquear agora</a> · <a href="/telas/pausa">Pausar</a></p>
 {% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block titulo %}Criar um limite{% endblock %}
+{% block conteudo %}
+<h1>Criar um limite</h1>
+<section class="cartao">
+  <h2>{{ e.nome_vitrine }}</h2>
+  <p>Pelo aplicativo <strong>{{ e.aplicativo }}</strong>, no sistema <strong>{{ e.sistema }}</strong>.</p>
+  <p>{{ e.descricao }}</p>
+  <p>Com o limite, o aplicativo faz esta ação sem ficha, dentro do que você escolher abaixo. Cada vez fica no seu extrato e ainda espera um pouco antes de sair: dá para cancelar.</p>
+</section>
+{% if ligada and not tem_passkey %}
+<p class="atencao">Criar um limite pede a sua passkey, e você ainda não tem uma. <a href="/telas/passkeys" hx-boost="false">Cadastre uma passkey</a> e volte aqui.</p>
+{% endif %}
+<form method="post" action="/telas/limites" class="cartao"{% if ligada %} data-passkey="entrar" data-desafio="/telas/limites/desafio" hx-boost="false"{% endif %}>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="escolha" value="{{ e.chave }}">
+  <input type="hidden" name="credencial" value="">
+  <fieldset>
+    <legend>1. Para quais destinatários?</legend>
+    {% if e.campos %}
+    <label class="opcao"><input type="radio" name="destinatarios" value="estes" {% if valores.get("destinatarios", "estes") == "estes" %}checked{% endif %}> <span><strong>Só estes destinatários.</strong></span></label>
+    <label for="campo">Campo do pedido que diz o destinatário</label>
+    <select id="campo" name="campo">
+      {% for c in e.campos %}<option value="{{ c }}" {% if valores.get("campo") == c %}selected{% endif %}>{{ c }}</option>{% endfor %}
+    </select>
+    <label for="valores">Destinatários aceitos, um por linha</label>
+    <textarea id="valores" name="valores">{{ valores.get("valores", "") }}</textarea>
+    <p class="dica">Pedido para qualquer outro destinatário passa pela ficha.</p>
+    {% endif %}
+    <label class="opcao"><input type="radio" name="destinatarios" value="qualquer" {% if valores.get("destinatarios") == "qualquer" or not e.campos %}checked{% endif %}> <span><strong>Qualquer destinatário.</strong> <span class="dica">Atenção: o aplicativo pode fazer esta ação para qualquer pessoa ou endereço, sem ficha, até o número de vezes por dia.</span></span></label>
+  </fieldset>
+  <label for="por_dia">2. Quantas vezes por dia, no máximo? (de 1 a {{ maximo_dia }})</label>
+  <input type="number" id="por_dia" name="por_dia" min="1" max="{{ maximo_dia }}" value="{{ valores.get('por_dia', '1') }}" required>
+  <label for="dias">3. Por quantos dias? (de 1 a {{ maximo_dias }})</label>
+  <input type="number" id="dias" name="dias" min="1" max="{{ maximo_dias }}" value="{{ valores.get('dias', '7') }}" required>
+  <p class="dica">Depois do prazo, o limite termina sozinho. Você pode encerrar antes, quando quiser.</p>
+  <p class="erros" data-passkey-aviso role="alert" hidden></p>
+  <button type="submit">{% if ligada %}Criar limite com a passkey{% else %}Criar limite{% endif %}</button>
+  {% if ligada %}<noscript><p class="atencao">A passkey precisa do JavaScript ligado neste navegador.</p></noscript>{% endif %}
+</form>
+{% if ligada %}<script src="/telas/estaticos/passkey.js" defer></script>{% endif %}
+<p><a href="/telas/limites">Voltar para Meus limites</a></p>
+{% endblock %}

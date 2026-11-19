@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block titulo %}Minhas ações{% endblock %}
+{% block conteudo %}
+<h1>Minhas ações</h1>
+<p>Cada ação pedida em seu nome tem um número de protocolo. As mais novas vêm primeiro.</p>
+<form method="get" action="/telas/acoes" class="cartao">
+  <label for="protocolo">Buscar pelo número de protocolo</label>
+  <input type="text" id="protocolo" name="protocolo" value="{{ busca }}" placeholder="CLR-2026-00000012" maxlength="40">
+  <button type="submit">Buscar</button>
+  {% if busca %}<a href="/telas/acoes">Ver todas</a>{% endif %}
+</form>
+{% if not acoes %}
+<p class="cartao">{% if busca %}Nenhuma ação sua com este número de protocolo.{% else %}Você ainda não tem ações.{% endif %}</p>
+{% else %}
+<table>
+  <thead><tr><th>Protocolo</th><th>Quando</th><th>O quê</th><th>Situação</th></tr></thead>
+  <tbody>
+  {% for a in acoes %}
+    <tr>
+      <td><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a></td>
+      <td>{{ a.op.criada_em | data_hora }}</td>
+      <td>{{ a.op.nome_vitrine }} <span class="dica">no sistema {{ a.op.sistema_nome }}</span></td>
+      <td>{{ a.rotulo }}{% if a.op.estado == "nao_confirmada" and not a.op.decisao_pessoa %} <span class="etiqueta ruim">Falta a sua decisão</span>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<p><a href="/telas/pendencias">Caixa de pendências</a></p>
+{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block titulo %}Ficha {{ a.op.protocolo }}{% endblock %}
+{% block conteudo %}
+<h1>Ficha para você decidir</h1>
+
+<section class="cartao">
+  <h2>O que vai acontecer</h2>
+  <p>O aplicativo <strong>{{ d.aplicativo }}</strong> pede para usar a ferramenta <strong>{{ a.op.nome_vitrine }}</strong> no sistema <strong>{{ a.op.sistema_nome }}</strong>, em seu nome.</p>
+  {% if d.descricao %}<p>O que essa ferramenta faz, segundo a revisão do ADMIN: {{ d.descricao }}</p>{% endif %}
+  <p>{{ d.classe | classe }}. {{ risco }}.</p>
+  <p><strong>Com estes dados:</strong></p>
+  {% include "acoes/_argumentos.html" %}
+  <p>É isto, e só isto, que vai para o sistema se você confirmar.</p>
+</section>
+
+<p class="atencao" id="codigo-de-conferencia">Código de conferência: <strong>{{ a.op.codigo_conferencia }}</strong><br>
+  Confira: tem de ser igual ao que o aplicativo mostrou. Se for diferente, recuse.</p>
+<section class="cartao comprovante">
+  <dl>
+    <dt>Número de protocolo</dt><dd><code>{{ a.op.protocolo }}</code></dd>
+    <dt>Código de conferência</dt><dd><strong>{{ a.op.codigo_conferencia }}</strong></dd>
+    <dt>Prazo para decidir</dt><dd>{% if a.pode_decidir_ficha %}Faltam {{ a.prazo_texto }} (até {{ a.expira_em }}, horário de Brasília).{% elif a.op.ficha_decisao %}Ficha {{ a.op.ficha_decisao }}.{% else %}O prazo acabou.{% endif %}</dd>
+  </dl>
+</section>
+
+<section class="cartao estranho" aria-labelledby="aplicativo-diz">
+  <h2 id="aplicativo-diz">O aplicativo diz</h2>
+  <p><strong>Texto escrito pelo aplicativo, não conferido pelo MCP-CLARO.</strong> Para decidir, confira o que está acima.</p>
+  {% if a.op.aplicativo_diz %}
+  <blockquote>{% for linha in a.op.aplicativo_diz.splitlines() %}{{ linha }}{% if not loop.last %}<br>{% endif %}{% endfor %}</blockquote>
+  {% else %}
+  <p>O aplicativo não disse nada.</p>
+  {% endif %}
+</section>
+
+{% if a.pode_decidir_ficha %}
+<section class="cartao">
+  <h2>Sua decisão</h2>
+  {% if a.op.ficha_exige_passkey %}
+  <p>Esta ação é de risco alto. Para confirmar, use a sua passkey.</p>
+  {% if not tem_passkey %}
+  <p class="atencao">Você ainda não tem passkey. <a href="/telas/passkeys" hx-boost="false">Cadastre uma passkey</a> e volte a esta ficha.</p>
+  {% endif %}
+  <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar" data-passkey="entrar" data-desafio="/telas/fichas/{{ a.op.ficha_id }}/desafio" hx-boost="false">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="credencial" value="">
+    <p class="erros" data-passkey-aviso role="alert" hidden></p>
+    <button type="submit" class="grande">Confirmar com a passkey</button>
+  </form>
+  <noscript><p class="atencao">A passkey precisa do JavaScript ligado neste navegador.</p></noscript>
+  {% else %}
+  {% if d.risco == "alto" and not passkey_ligada %}
+  <p class="atencao">A passkey está desligada nesta instalação. Esta ação de risco alto confirma sem ela, só pela ficha.</p>
+  {% endif %}
+  <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="grande">Confirmar</button>
+  </form>
+  {% endif %}
+  <p class="dica">Depois de confirmar, a ação espera um pouco antes de sair. Nesse tempo, ainda dá para cancelar.</p>
+  <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/recusar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secundario">Recusar</button>
+  </form>
+  <p class="dica">Recusar: nada vai para o sistema.</p>
+</section>
+{% if a.op.ficha_exige_passkey %}<script src="/telas/estaticos/passkey.js" defer></script>{% endif %}
+{% else %}
+<p class="cartao">{{ a.frase }} <a href="/telas/acoes/{{ a.op.id }}">Veja o andamento desta ação</a>.</p>
+{% endif %}
+<p><a href="/telas/pendencias">Caixa de pendências</a> · <a href="/telas/acoes">Minhas ações</a></p>
+{% endblock %}
