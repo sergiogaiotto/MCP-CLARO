@@ -56,7 +56,7 @@ no CI, no job "suite oficial atraves do gateway".
 | Identidades da ronda e do vigia, login de programas só para elas | Feito no realm (JWT assinado ES256); a chave pública vai ao provedor na instalação (`docs/vigia.md`) |
 | Ronda das portas e vigia de fora com alarme de silêncio | Feito: sete casos, entrada fechando por etapas, vigia com banco próprio só de acrescentar |
 | Medições no PostgreSQL e painéis no Grafana, com as recusas por versão | Feito: visões só para o `grafana_leitor`, painel e alertas provisionados |
-| Backup, roteiro de restauração e conferência de continuidade na partida | Feito: pgBackRest 2.60.1 e cópia lógica cifrada; fechamentos por época do servidor |
+| Backup, roteiro de restauração e conferência de continuidade na partida | Feito: pgBackRest 2.60.1 e cópia lógica cifrada; fechamentos por época do servidor. O serviço `restaurar-logico`, que o roteiro usa no Caminho B e no ensaio da cópia lógica, voltou ao Compose único, no perfil `restauracao`. Prova: `tests/integracao/test_compose_restauracao.py` |
 
 Provas que dependem de pessoas e do ambiente real, ainda a fazer: dois aplicativos-piloto conectando de verdade;
 um sistema do dono com chave por pessoa (decisão 5); telas entendidas por pessoas sem formação técnica; ensaio de
@@ -81,6 +81,8 @@ Os arquivos de teste citados ficam em `tests/integracao/`, salvo onde se diz `te
 | Fechamento várias vezes ao dia, guardado no vigia | Feito desde a Fase 1 (`CLOSING_INTERVAL_HOURS`, 6 horas). Prova: `test_rotinas_tarefas.py::test_fechamento_encadeado_com_frase` e `test_vigia.py::test_vigia_guarda_os_fechamentos_e_percebe_adulteracao` |
 | Programas que rodam sozinhos, só lendo (decisão 9) | Feito (`regras/programas.py`, `rotinas/programas.py`, `telas/admin_programas.py`). `PROGRAM_ACTIONS_ENABLED` ligado é recusado na partida. Prova: `test_programas.py`, `test_programas_rodada2.py` e `tests/unidade/test_settings_fase2.py` |
 | Restauração com ações na fila: a porta de saída volta fechada | Feito: "enviando" vira não confirmada, o que esperava fica parado por restauração e o número de protocolo salta para frente. Só com o vigia sem resposta, a saída fecha e a fila não para. Prova: `test_saida.py::test_restauracao_para_a_fila_e_nada_sai_sem_nova_confirmacao`, `test_saida_disputas.py::test_restauracao_pela_conferencia_fecha_a_saida_e_nada_sai`, `test_continuidade.py::test_marca_restaurado_adianta_o_protocolo_antes_de_a_entrada_subir`, `test_continuidade_restauracao.py` e `test_saida_rodada2.py::test_vigia_sem_resposta_fecha_a_saida_e_pausa_sem_parar_a_fila` |
+| Reativar um assistente pausado pela conferência do banco | Feito (`telas/admin.py`): botão **Reativar** no cartão "Aplicativos pausados" da tela Aplicativos do ADMIN, com o passo no extrato e o nome de quem fez. Vale só para assistente ainda pausado; o programa volta pela tela do programa. A tela Portas avisa quando há aplicativo pausado. Prova: `test_telas_rodada3.py::test_admin_reativa_o_assistente_pausado_e_so_ele` |
+| Porta de saída fechada enquanto o cofre estiver trancado | Feito (`saida/cofre.py`): o despachante confere o cofre a cada `VAULT_CHECK_SECONDS` e logo antes de cada ação sair. Trancado, a saída fecha na primeira conferência; sem resposta, na segunda conferência seguida sem resposta. A ação liberada espera, sem virar "não saiu" (salvo no caso descrito em "O que se sabe e ficou como está", abaixo). A saída que o cofre fechou reabre sozinha quando ele volta; fechada pelo ADMIN ou pela conferência do banco, continua fechada. O ADMIN recebe aviso nos dois casos. Prova: `test_saida_cofre_rodada3.py`, `test_despachante_cofre_rodada3.py` (com o OpenBao de verdade) e `tests/unidade/test_saida_cofre_rodada3.py` |
 | Medições da Fase 2 no Grafana | Feito: fila agora, fim dos envios, caminhos e paradas. Prova: `test_grafana.py::test_consultas_do_painel_rodam_como_grafana_leitor` |
 
 Provas de saída automatizadas:
@@ -118,11 +120,16 @@ Ainda falta no código:
 
 - as pendências do responsável e a reconferência completa do cadastro do programa na porta de saída. Sem elas,
   `PROGRAM_ACTIONS_ENABLED` não liga, e a prova "com ações ligadas, um programa não age fora do limite" fica
-  para depois ([programas](programas.md));
-- uma tela para reativar um assistente pausado pela conferência do banco. Hoje, só os programas têm essa tela;
-  o roteiro de [restauração](restauracao.md) diz como fazer enquanto isso;
-- fechar a porta de saída e avisar enquanto o cofre estiver trancado, como diz o [plano](plano.md#cofre-e-chaves).
-  Hoje, com o cofre trancado, a entrada ainda dá número à ação, e o despachante a dá como "não saiu", porque a
-  chave do sistema não abre.
+  para depois ([programas](programas.md)).
+
+O que se sabe e ficou como está:
+
+- entre a última pergunta ao cofre e a abertura da chave há um intervalo curto: em geral, menos de um segundo;
+  mais, quando a chave da pessoa precisa ser renovada. Se o cofre trancar ou parar de responder bem aí, a ação
+  daquele instante vira "não saiu". Depois, a saída fecha pelas regras da conferência do cofre
+  ([porta de saída](saida.md));
+- a espera de 30 minutos fica na memória do despachante. Ela vale quando a saída fecha de novo porque o cofre
+  não responde, menos de uma hora depois de a conferência do cofre a ter reaberto. Se o despachante reiniciar
+  ou outra cópia assumir a porta, volta a regra das duas conferências seguidas.
 
 Roteiro para quem cuida do dia a dia: [Porta de saída](saida.md).

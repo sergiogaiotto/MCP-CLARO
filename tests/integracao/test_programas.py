@@ -619,11 +619,13 @@ class Telinhas:
             )
 
 
-@pytest.fixture
-async def telas(banco_migrado: Parametros) -> AsyncIterator[Telinhas]:
+@contextlib.asynccontextmanager
+async def subir_telas(banco: Parametros, **parametros: Any) -> AsyncIterator[Telinhas]:
+    """As telas dos programas num servidor de teste. ``parametros`` muda valores de ``Parametros`` (por exemplo,
+    ``PATROL_CLIENT_ID``), para provar o que as telas leem deles."""
     p = Parametros(
         **(
-            banco_migrado.model_dump()
+            banco.model_dump()
             | {
                 "APP_ENV": "teste",
                 "PUBLIC_BASE_URL": PUBLICO,
@@ -633,6 +635,7 @@ async def telas(banco_migrado: Parametros) -> AsyncIterator[Telinhas]:
                 "IDP_ISSUER_URL": "http://127.0.0.1:9/realms/mcp-claro",
                 "IDP_JWKS_URL": "http://127.0.0.1:9/jwks",
             }
+            | parametros
         )
     )
     dono = criar_engine(p, pool_size=2, max_overflow=2)
@@ -655,6 +658,12 @@ async def telas(banco_migrado: Parametros) -> AsyncIterator[Telinhas]:
         await http.aclose()
         await dono.dispose()
         await entrada.dispose()
+
+
+@pytest.fixture
+async def telas(banco_migrado: Parametros) -> AsyncIterator[Telinhas]:
+    async with subir_telas(banco_migrado) as t:
+        yield t
 
 
 def _cadastro(t: Telinhas, **extra: str) -> dict[str, str]:

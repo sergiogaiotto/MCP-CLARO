@@ -235,6 +235,29 @@ async def aplicativo_existe(c: AsyncConnection, client_id: str) -> bool:
     return linha is not None
 
 
+async def aplicativos_pausados(c: AsyncConnection) -> Sequence[Row[Any]]:
+    """Aplicativos pausados (``aplicativos.situacao``; hoje so a conferencia do banco na partida pausa assim)."""
+    return (
+        await c.execute(
+            text("SELECT id, nome, client_id, tipo FROM aplicativos WHERE situacao = 'pausado' ORDER BY tipo, nome")
+        )
+    ).all()
+
+
+async def reativar_assistente(c: AsyncConnection, aplicativo_id: uuid.UUID) -> Row[Any] | None:
+    """Volta a 'ativo' um aplicativo assistente pausado. So vale se ele ainda estiver pausado e for assistente:
+    dois cliques ao mesmo tempo mudam uma vez so, e um programa volta pela tela do programa."""
+    return (
+        await c.execute(
+            text(
+                "UPDATE aplicativos SET situacao = 'ativo', atualizado_em = now()"
+                " WHERE id = :a AND tipo = 'assistente' AND situacao = 'pausado' RETURNING id, nome, client_id"
+            ),
+            {"a": aplicativo_id},
+        )
+    ).first()
+
+
 async def todos_sistemas(c: AsyncConnection) -> Sequence[Row[Any]]:
     return (
         await c.execute(
@@ -678,6 +701,16 @@ async def travar_revisao(c: AsyncConnection, ferramenta_id: uuid.UUID) -> None:
     cruzam: ou o limite e gravado antes (e a revisao do ADMIN o ve e o encerra, se for o caso), ou a revisao
     termina antes (e a pessoa le os campos novos, ou a acao ja nao esta na lista)."""
     await c.execute(text("SELECT 1 FROM ferramentas_revisadas WHERE id = :f FOR SHARE"), {"f": ferramenta_id})
+
+
+async def revisao_por_id(c: AsyncConnection, ferramenta_id: uuid.UUID) -> Row[Any] | None:
+    """Sistema e nome original de uma versao revisada, em qualquer situacao (ativa, suspensa ou substituida)."""
+    return (
+        await c.execute(
+            text("SELECT id, sistema_id, nome_original, situacao FROM ferramentas_revisadas WHERE id = :f"),
+            {"f": ferramenta_id},
+        )
+    ).first()
 
 
 async def criar_limite(

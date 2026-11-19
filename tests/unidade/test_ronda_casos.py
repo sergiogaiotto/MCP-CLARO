@@ -248,6 +248,8 @@ async def test_gateway_certo_recusa_tudo(idp: IdpFalso) -> None:
     assert set(casos) == {str(c) for c in Caso}
     assert {c: t.situacao for c, t in casos.items()} == dict.fromkeys(casos, Situacao.CONFORME)
     assert casos[Caso.CONTROLE].detalhes["vitrine"] == 1
+    # O rotulo vai a coluna esperado das tabelas ronda e rondas_vigia: o controle espera a vitrine, um resultado.
+    assert casos[Caso.CONTROLE].esperado == "vitrine da ronda (resultado do tools/list)"
     assert casos[Caso.OUTRA_PESSOA].detalhes["ferramenta"] == "fatura_da_ana"
     resumo = Resumo(list(casos.values()))
     assert resumo.controle_ok
@@ -326,6 +328,7 @@ async def test_sem_cracha_da_ronda_o_controle_e_inconclusivo(idp: IdpFalso) -> N
     fonte.falhar = True
     casos = await rodada(GatewayFalso(idp), fonte)
     assert casos[Caso.CONTROLE].situacao is Situacao.INCONCLUSIVO
+    assert casos[Caso.CONTROLE].esperado == "vitrine da ronda (resultado do tools/list)"
     assert casos[Caso.CRACHA_FALSO].situacao is Situacao.CONFORME  # cracha falso montado sem modelo
     for caso in (Caso.OUTRA_PESSOA, Caso.VERSAO_ANTIGA_INITIALIZE, Caso.VERSAO_ANTIGA_CABECALHO):
         assert casos[caso].situacao is Situacao.PULADO

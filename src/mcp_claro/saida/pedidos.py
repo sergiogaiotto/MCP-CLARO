@@ -143,8 +143,9 @@ class Pedidos:
             bloqueio = vigentes.para(f.sistema.id)
             if bloqueio is not None:
                 raise AcaoRecusada(bloqueio.motivo_recusa(), bloqueio.mensagem())
-            # Saida fechada (ADMIN, cofre trancado, banco restaurado): nada vira protocolo. A trava compartilhada
-            # de "tudo", tomada acima, e a mesma que fechar a saida toma exclusiva: a leitura aqui vale.
+            # Saida fechada (pelo ADMIN, pela conferencia do cofre trancado ou fora do ar, ou pela do banco na
+            # partida): nada vira protocolo. A trava compartilhada de "tudo", tomada acima, e a mesma que fechar a
+            # saida toma exclusiva: a leitura aqui vale.
             if not (await estado.ler_saida(c)).aberta:
                 raise AcaoRecusada("saida_fechada", estado.MENSAGEM_SAIDA_FECHADA)
             valores = await politica.varios(

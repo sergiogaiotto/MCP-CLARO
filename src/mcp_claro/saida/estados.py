@@ -70,7 +70,7 @@ FRASE: Final[dict[Estado, str]] = {
     "a pessoa decide na tela do gateway.",
     Estado.VENCIDA: "A ficha venceu sem resposta. Nada seguiu.",
     Estado.CANCELADA: "Cancelada antes de sair. Nada seguiu.",
-    Estado.PARADA_POR_BLOQUEIO: "Parada por um bloqueio. Nada seguiu.",
+    Estado.PARADA_POR_BLOQUEIO: "Parada por um bloqueio ou uma pausa. Nada seguiu.",
     Estado.PARADA_POR_RESTAURACAO: "Parada porque o banco foi restaurado. Nada seguiu sem nova confirmacao.",
 }
 

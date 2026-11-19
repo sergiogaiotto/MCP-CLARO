@@ -17,8 +17,8 @@ programa. Leia inteiro antes de começar.
 - Tudo o que vai para o backup sai **cifrado**. Sem a senha da cifra, o backup não abre.
 - Depois de qualquer restauração, o gateway volta **com a porta de saída fechada** e **com os aplicativos
   pausados**. Nada vai para sistema nenhum até uma pessoa ADMIN decidir reabrir, e cada aplicativo volta
-  por decisão própria. Isso é de propósito: o banco voltou no tempo, e o que estava em andamento pode já ter
-  acontecido ou não.
+  por decisão dela, um de cada vez. Isso é de propósito: o banco voltou no tempo, e o que estava em andamento
+  pode já ter acontecido ou não.
 - Os **números de protocolo** dados depois da cópia se perderam com ela, mas as pessoas e os aplicativos podem
   tê-los guardado. Por isso o número salta para frente na restauração (1.000.000 na marca "restaurado" e mais
   1.000.000 na conferência do despachante), para que nenhum deles seja dado de novo a outra ação. O protocolo
@@ -117,6 +117,10 @@ Confira a cada ensaio que as duas pessoas que abrem o cofre de senhas ainda cons
    $MC up -d cofre
    ```
 
+   Depois do passo 8, o despachante confere o cofre a cada `VAULT_CHECK_SECONDS` (15 segundos no início). Se
+   ele encontrar o cofre trancado, o ADMIN recebe um aviso. Quando o encontra destravado de novo, recebe outro.
+   A saída continua fechada mesmo assim: quem a fechou foi a conferência do banco, e só o ADMIN a reabre.
+
 8. **Suba primeiro o despachante** e espere ele ficar pronto. Ele só fica pronto depois de conferir a
    continuidade do banco. Confira que a porta de saída ficou fechada (`saida_aberta: False`):
 
@@ -163,7 +167,9 @@ se perde.
 
 3. **Restaure**. O comando confere cada arquivo (`SHA256SUMS`) antes de abrir, restaura papéis e
    permissões, recria cada banco como estava e **grava a marca "restaurado" sozinho**. Num banco novo, os
-   avisos de papel que já existe são esperados.
+   avisos de papel que já existe são esperados. O serviço `restaurar-logico` fica no perfil `restauracao` do
+   Compose: ele não sobe com o resto (`$MC up -d`) e só roda quando chamado com `--profile restauracao`, como
+   abaixo.
 
    ```sh
    $MC --profile restauracao run --rm -e RESTAURAR_QUEM="Nome da pessoa" restaurar-logico \
@@ -211,29 +217,44 @@ $MC run --rm --no-deps --entrypoint python despachante -m mcp_claro.continuidade
 O identificador da pessoa ADMIN aparece nas telas do ADMIN, ou em
 `SELECT id, nome FROM pessoas WHERE papel = 'admin'`.
 
+Se a saída for reaberta com o cofre ainda trancado, a conferência do cofre a fecha de novo. Ela reabre sozinha
+quando o cofre volta destravado (veja [porta de saída](saida.md), "O cofre está trancado").
+
 ### Os aplicativos voltam um por um
 
 Reabrir a saída **não reativa** os aplicativos. Enquanto um aplicativo estiver pausado, a entrada recusa os
-pedidos dele. Se uma ação dele ainda estiver na fila, o despachante a para na hora de sair, sem enviar
-("parada por bloqueio", com o detalhe "o aplicativo está pausado"). Cada aplicativo volta por decisão de quem
-responde por ele, depois de conferir no extrato o que pode ter se perdido, como um bloqueio feito depois da
-cópia:
+pedidos dele. Se uma ação dele ainda estiver na fila, o despachante a para na hora de sair, sem enviar. A tela
+da ação diz "Parada por um bloqueio ou uma pausa. Nada seguiu.", com o detalhe "o aplicativo está pausado".
 
-- **programa que roda sozinho**: o ADMIN usa **Reativar o aplicativo**, na tela do programa (área do ADMIN,
-  Programas). O passo vai ao extrato com o nome de quem fez;
-- **outros aplicativos (assistentes)**: ainda não há tela para isso. Até ela existir, a equipe que opera faz a
-  volta no banco, a pedido do ADMIN, um aplicativo de cada vez. Este passo **não vai ao extrato**: registre no
-  relatório da restauração quem pediu, quando e por quê.
+Cada aplicativo volta por decisão da pessoa ADMIN, um de cada vez. Antes, ela confere no extrato o que pode ter
+se perdido, como um bloqueio feito depois da cópia. Quando há aplicativo pausado, a tela **Portas** avisa e
+leva à lista deles.
 
-  ```sh
-  $MC exec banco sh -c 'PGPASSWORD=$(cat /run/secrets/db_migracao) psql -U mcp_claro_migracao -d mcp_claro'
-  ```
+- **assistente** (aplicativo usado por pessoas): na área do ADMIN, abra **Aplicativos**. O cartão
+  **Aplicativos pausados** mostra o que a conferência do banco pausou. Cada assistente tem o botão
+  **Reativar**. Só a pessoa ADMIN chega a essa tela. O passo vai ao extrato com o nome de quem fez
+  (`admin_aplicativo_reativado`);
+- **programa que roda sozinho**: o mesmo cartão leva à tela do programa (área do ADMIN, **Programas**). Lá, o
+  ADMIN usa **Reativar o aplicativo**. O passo também vai ao extrato com o nome de quem fez.
 
-  ```sql
-  SELECT id, nome FROM aplicativos WHERE situacao = 'pausado' AND tipo = 'assistente';
-  UPDATE aplicativos SET situacao = 'ativo', atualizado_em = now()
-   WHERE id = '<id do aplicativo>' AND situacao = 'pausado' AND tipo = 'assistente';
-  ```
+Depois de reativado, os pedidos novos do aplicativo voltam a passar, se nenhum bloqueio ou pausa os segurar (no
+programa, também é preciso que o cadastro dele valha). As ações dele que já pararam não voltam: quem precisar
+pede de novo. O botão **Reativar** só vale para um assistente que ainda está pausado. Se nada mudar (por
+exemplo, num segundo clique), a tela diz "Nada mudou".
+
+Se as telas estiverem fora do ar, a equipe que opera pode fazer a volta de um assistente no banco, a pedido do
+ADMIN. Nesse caso, o passo **não vai ao extrato**: registre no relatório da restauração quem pediu, quando e
+por quê.
+
+```sh
+$MC exec banco sh -c 'PGPASSWORD=$(cat /run/secrets/db_migracao) psql -U mcp_claro_migracao -d mcp_claro'
+```
+
+```sql
+SELECT id, nome FROM aplicativos WHERE situacao = 'pausado' AND tipo = 'assistente';
+UPDATE aplicativos SET situacao = 'ativo', atualizado_em = now()
+ WHERE id = '<id do aplicativo>' AND situacao = 'pausado' AND tipo = 'assistente';
+```
 
 ### Quando só o vigia não respondeu
 
@@ -245,12 +266,13 @@ conferência faz menos:
   como numa restauração;
 - a fila **não para**: a conferência não muda o estado de nenhuma ação, e a saída fechada segura tudo;
 - o extrato registra o motivo ("o vigia não respondeu") e o intervalo que pode faltar. Ele não diz que o banco
-  foi restaurado: diz que não houve sinal disso e que a fila não parou. Sem o vigia, não dá para saber se o
-  banco voltou de uma cópia lógica posta sem a marca.
+  foi restaurado. Diz que não houve sinal disso, que a fila não parou e que, quando a saída reabrir, o que
+  espera é conferido de novo antes de sair. O motivo da saída fechada, na tela **Portas**, diz o mesmo. Sem o
+  vigia, não dá para saber se o banco voltou de uma cópia lógica posta sem a marca.
 
-Com a saída reaberta, o despachante confere cada ação na hora dela. A de um aplicativo que já voltou sai,
-depois dessa conferência. A de um aplicativo ainda pausado fica parada, sem sair. Por isso, para o que espera
-seguir, a ordem é esta:
+Com a saída reaberta, o despachante confere de novo cada ação antes de ela sair. A de um aplicativo que já
+voltou só sai depois dessa conferência. A de um aplicativo ainda pausado fica parada, sem sair. Por isso, para o
+que espera seguir, a ordem é esta:
 
 1. confira o vigia: por que não respondeu, e se o último fechamento dele bate com o do banco;
 2. reative os aplicativos, um por um (veja acima);

@@ -187,6 +187,9 @@ class Parametros(BaseSettings):
     VAULT_KV_MOUNT: str = "kv"
     VAULT_STATE_KEY_PATH: str = "mcp-claro/estado-confirmacoes"
     VAULT_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=60)
+    # O despachante que segura a porta de saida confere a saude do cofre a cada tantos segundos: trancado,
+    # a saida fecha na hora; sem resposta, fecha na segunda conferencia seguida (``saida.cofre``).
+    VAULT_CHECK_SECONDS: int = Field(default=15, ge=5, le=300)
     REQUEST_STATE_KEY_ROTATION_DAYS: int = Field(default=30, ge=1, le=365)
 
     # Chaves de liga e desliga

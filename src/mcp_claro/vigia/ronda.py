@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.ronda.casos import Caso, Resumo, Situacao, Tentativa, fazer_tentativas
+from mcp_claro.ronda.casos import ESPERADO, Caso, Resumo, Situacao, Tentativa, fazer_tentativas
 from mcp_claro.ronda.cracha import ChavesProprias, FonteCrachas
 from mcp_claro.ronda.rodada import SQL_RODADAS_VIGIA, rodadas_seguidas
 from mcp_claro.vigia.alarmes import alarmar
@@ -62,7 +62,7 @@ class RondaDeFora:
             tentativas = [
                 Tentativa(
                     Caso.CONTROLE,
-                    "cracha aceito (resposta JSON-RPC)",
+                    ESPERADO[Caso.CONTROLE],
                     "sem identidade do vigia (WATCH_KEY_FILE)",
                     Situacao.INCONCLUSIVO,
                     {"por_que": "sem identidade do vigia"},

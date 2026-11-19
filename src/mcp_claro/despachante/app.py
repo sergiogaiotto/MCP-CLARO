@@ -8,7 +8,9 @@ Rotas internas (nunca expostas ao portao):
 - ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN).
 
 Na partida, depois da conferencia de continuidade, sobe a porta unica de saida (``saida.despachante``):
-a fila de acoes e enviada por um despachante so, mesmo com varias copias do papel no ar.
+a fila de acoes e enviada por um despachante so, mesmo com varias copias do papel no ar. Quando o papel entra
+no cofre de verdade, a porta tambem confere a saude dele a cada ``VAULT_CHECK_SECONDS`` e fecha a saida
+enquanto ele estiver trancado (``saida.cofre``).
 """
 
 from __future__ import annotations
@@ -112,6 +114,8 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         varredura=float(p.OUTBOX_SWEEP_SECONDS),
         acoes_de_programas=p.PROGRAM_ACTIONS_ENABLED,
         limite_exige_passkey=p.FEATURE_PASSKEY,
+        conferir_cofre=float(p.VAULT_CHECK_SECONDS),
+        emails_admin=p.NOTIFY_ADMIN_EMAILS,
     )
 
     async def ler(pedido: Request) -> JSONResponse:
@@ -191,6 +195,8 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
 
                 cofre = await pilha.enter_async_context(Cofre(p))
                 do_cofre.alvo = cofre.cifra()
+                # So com o cofre de verdade: a porta confere a saude dele e fecha a saida enquanto estiver trancado.
+                porta.cofre = cofre
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
             await _conferir_continuidade_na_partida(p, engine)
             # Porta unica de saida (Fase 2): so depois da conferencia de continuidade, que para a fila se o

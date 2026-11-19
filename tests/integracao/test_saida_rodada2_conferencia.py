@@ -34,9 +34,11 @@ __all__ = ["amb"]
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
 MOTIVO_VIGIA_MUDO = (
-    "o vigia nao respondeu; sem sinal de banco restaurado, a fila de saida nao parou: com a saida reaberta, a acao"
-    " de aplicativo reativado sai na hora dela, e a de aplicativo ainda pausado para sem sair"
+    "o vigia nao respondeu e nao houve sinal de banco restaurado. A fila de saida nao parou. Quando a saida"
+    " reabrir, o que espera volta a ser conferido antes de sair. A acao de um aplicativo que continua pausado fica"
+    " parada e nao sai"
 )
+"""Motivo da saida fechada com o vigia mudo: frases curtas, sem promessa (N3 da terceira rodada)."""
 
 
 def numero(protocolo: str) -> int:

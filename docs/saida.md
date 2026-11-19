@@ -10,9 +10,9 @@ aplicativo, o que cada estado quer dizer e o que fazer em cada caso. O desenho c
 2. A entrada confere a vitrine, os argumentos e os bloqueios. Ela recusa o pedido **antes de dar número**
    quando:
    - um bloqueio ou uma pausa vale para aquela pessoa, aquele aplicativo ou aquele sistema;
-   - a **porta de saída está fechada** (pelo ADMIN, na tela **Portas**, ou pela conferência do banco na
-     partida). O aplicativo recebe: "A porta de saída do MCP-CLARO está fechada agora. Nada foi enviado ao
-     sistema. Tente mais tarde.";
+   - a **porta de saída está fechada** (pelo ADMIN, na tela **Portas**, pela conferência do banco na
+     partida ou pela conferência do cofre, quando ele está trancado ou não responde). O aplicativo recebe:
+     "A porta de saída do MCP-CLARO está fechada agora. Nada foi enviado ao sistema. Tente mais tarde.";
    - um argumento traz o caractere nulo (U+0000), que o MCP-CLARO não guarda. O aplicativo recebe a recusa e
      pode pedir de novo sem esse caractere.
 
@@ -30,8 +30,10 @@ aplicativo, o que cada estado quer dizer e o que fazer em cada caso. O desenho c
      passa por limite.
 4. Liberada, a ação espera a **hora de sair** (`OUTBOX_HOLD_SECONDS`, com relógio na tela). Até lá, a pessoa pode
    cancelar ou mandar seguir agora.
-5. Um **despachante só** envia, e só com a porta de saída aberta. Ele confere tudo de novo (pessoa, aplicativo,
-   bloqueios, ficha ou limite, código de conferência), marca "enviando" e chama o sistema **uma vez**.
+5. Um **despachante só** envia, e só com a porta de saída aberta. Antes, ele pergunta ao cofre se está
+   destravado. Se não estiver, a ação continua liberada e espera (veja "O cofre está trancado"). Depois, ele
+   confere tudo de novo (pessoa, aplicativo, bloqueios, ficha ou limite, código de conferência), marca
+   "enviando" e chama o sistema **uma vez**.
 6. O resultado fica guardado. O aplicativo acompanha pela ferramenta `mcp_claro_consultar_protocolo`, que só
    mostra a mesma pessoa pelo mesmo aplicativo.
 
@@ -61,15 +63,21 @@ outra ação: devolve a original, e nada novo sai.
 | Não confirmada | O pedido pode ter chegado ao sistema, mas a resposta não chegou inteira | A pessoa confere no sistema e registra: aconteceu, não aconteceu ou não sei. Nada é reenviado |
 | Vencida | A ficha venceu sem resposta | Nada seguiu |
 | Cancelada | A pessoa cancelou antes de sair, ou algo mudou antes do envio (cadastro, ordem de serviço, limite encerrado) | Nada seguiu; o detalhe da ação diz o motivo |
-| Parada por bloqueio | Um bloqueio ou uma pausa valeu antes de sair, ou a pessoa ou o aplicativo não estava ativo na hora de sair | Nada seguiu; o detalhe diz o motivo (por exemplo, "o aplicativo está pausado"). Veja o comprovante do bloqueio |
+| Parada por bloqueio | Um bloqueio ou uma pausa valeu antes de sair, ou a pessoa ou o aplicativo não estava ativo na hora de sair | Nada seguiu. A tela diz: "Parada por um bloqueio ou uma pausa. Nada seguiu." O detalhe diz o motivo (por exemplo, "o aplicativo está pausado"). Veja o comprovante do bloqueio |
 | Parada por restauração | O banco voltou de um backup | Nada seguiu; a pessoa pede de novo, se ainda quiser |
 
 "Não saiu" vale para a falha comprovada antes de executar: conexão recusada, recusa na porta (401, 403,
 redirecionamento), erro do protocolo que o sistema devolve antes de executar (método ou argumentos
 inválidos) ou chave que não ficou pronta antes do envio (a pessoa ainda não autorizou o sistema, a autorização
-venceu, a renovação falhou ou o cofre não respondeu). Num 401, a chave da pessoa naquele sistema fica dada como
-vencida: o próximo pedido a renova antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada.
-Qualquer outra falha, ou a dúvida, vira "não confirmada".
+venceu ou a renovação falhou). Num 401, a chave da pessoa naquele sistema fica dada como vencida: o próximo
+pedido a renova antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada. Qualquer outra
+falha, ou a dúvida, vira "não confirmada".
+
+Com o cofre trancado ou sem resposta, a ação em geral não vira "não saiu": o despachante pergunta ao cofre antes
+de marcar "enviando", e a ação espera. Ela só vira "não saiu" se o cofre trancar ou parar de responder no curto
+intervalo entre essa pergunta e a abertura da chave (em geral, menos de um segundo; mais, quando a chave da
+pessoa precisa ser renovada). O detalhe diz "o cofre de chaves está trancado" ou "o cofre de chaves não
+respondeu".
 
 ## Limites por aproximação
 
@@ -127,28 +135,64 @@ O comprovante não diz o que o sistema fez com o pedido. Isso fica para os siste
 
 **"Um aplicativo pediu confirmações demais."** Acima de `CONFIRM_CAP_PER_HOUR` fichas por hora, o aplicativo é
 pausado sozinho (rotina `teto_confirmacoes`), e o que esperava na fila dele para. Quem reativa é o ADMIN,
-depois de conferir.
+depois de conferir: na tela **Bloqueios e pausas**, ele encerra essa pausa. O botão **Reativar** da tela
+**Aplicativos** é outra coisa: vale só para a pausa da conferência do banco.
 
 **"O despachante caiu."** Outra cópia assume a trava. Antes de enviar qualquer coisa, ela muda tudo o que estava
 "enviando" para "não confirmada". Nada é reenviado sozinho.
 
 **"A porta de saída está fechada."** Nenhuma ação nova ganha número: a entrada recusa antes. O que já estava na
 fila espera, e o despachante não envia nada enquanto a saída estiver fechada. Quem reabre é o ADMIN, na tela
-**Portas** da área do ADMIN, com motivo registrado.
+**Portas** da área do ADMIN, com motivo registrado. A exceção é a saída que a conferência do cofre fechou: ela
+reabre sozinha quando o cofre volta (veja o caso abaixo).
+
+**"O cofre está trancado."** Sem o cofre destravado, nenhuma chave de sistema abre. O despachante confere o
+cofre a cada `VAULT_CHECK_SECONDS` (15 segundos no início) e logo antes de cada ação sair. Com a porta de saída
+aberta:
+
+- cofre trancado: a porta fecha na primeira conferência que o encontra assim;
+- cofre sem resposta: a porta fecha na segunda conferência seguida sem resposta. Assim, uma falha de rede que
+  passa antes da conferência seguinte não fecha a porta.
+
+Com a porta fechada, nenhuma ação nova ganha número. O que já estava na fila espera, sem virar "não saiu".
+Quando a porta reabre, cada ação é conferida de novo antes de sair. O extrato registra o fechamento. O ADMIN
+recebe um aviso por e-mail (`NOTIFY_ADMIN_EMAILS`) e pelos webhooks que assinam o evento `cofre_trancado` ou
+todos os eventos.
+
+Quando o cofre volta destravado, depende de quem fechou a porta:
+
+- **a conferência do cofre**: a porta reabre sozinha, se ninguém a mudou antes, e o ADMIN recebe o aviso
+  `cofre_destravado`. Se ela fechou porque o cofre estava trancado, reabre na primeira conferência com ele
+  destravado. Se fechou porque o cofre não respondia, reabre depois de duas conferências seguidas com ele
+  destravado. Mas, se ela já tinha reaberto assim menos de uma hora antes de fechar de novo pela falta de
+  resposta, espera o cofre ficar 30 minutos seguidos destravado. Assim, uma rede que vai e volta não abre e
+  fecha a porta a cada pouco. Se, com a porta fechada porque o cofre não respondia, ele passa a responder
+  trancado, o motivo muda para "trancado", com um novo aviso, e vale a regra do cofre trancado. O ADMIN pode
+  reabrir antes, na tela **Portas**;
+- **o ADMIN ou a conferência do banco**: a porta continua fechada. Se a conferência encontra o cofre trancado,
+  o ADMIN recebe um aviso. Quando depois o encontra destravado, recebe outro. Os avisos não se repetem a cada
+  conferência, nem quando alguém fecha de novo a porta que já estava fechada: se o ADMIN fecha de novo a porta
+  que o cofre fechou, ele não recebe outro aviso de cofre trancado, e recebe o de cofre de volta quando o cofre
+  voltar. Os eventos são os mesmos (`cofre_trancado` e `cofre_destravado`), e o texto do aviso diz se a porta
+  fechou ou se já estava fechada. Reabrir é decisão do ADMIN.
 
 **"Restauramos o banco."** Na partida, a conferência de continuidade percebe a volta. A porta de saída fica
 fechada e os aplicativos voltam pausados. O que estava "enviando" fica "não confirmada", e o que esperava na
 fila fica "parada por restauração". O número de protocolo salta 1.000.000 para frente (e mais 1.000.000 quando
 o roteiro grava a marca "restaurado"), para que um número dado depois da cópia não seja dado de novo a outra
-ação. Reabrir a saída é decisão do ADMIN, registrada ([restauração](restauracao.md)).
+ação. Reabrir a saída é decisão do ADMIN, registrada. Reativar cada aplicativo também: um assistente volta na
+tela **Aplicativos** da área do ADMIN, botão **Reativar**, e um programa, na tela do programa
+([restauração](restauracao.md)).
 
 **"O vigia não respondeu na partida."** Em piloto e produção, a conferência exige o vigia
 (`CONTINUITY_REQUIRE_WATCH`). Sem resposta dele, falta a testemunha de fora. A porta de saída fecha, os
 aplicativos voltam pausados e o número de protocolo também salta. Mas a fila **não para**: a conferência não muda
 o estado de nenhuma ação, e a saída fechada segura tudo. Reabrir a saída não reativa os aplicativos. Com a saída
-reaberta, a ação de um aplicativo que já voltou sai na hora dela, depois de conferida de novo. A de um aplicativo
-ainda pausado fica parada, sem sair ("parada por bloqueio", com o detalhe "o aplicativo está pausado"). Para o que
-espera seguir, confira o vigia, reative os aplicativos e só depois reabra a saída ([restauração](restauracao.md)).
+reaberta, a ação de um aplicativo que já voltou só sai depois de conferida de novo. A de um aplicativo ainda pausado
+fica parada, sem sair: a tela diz "Parada por um bloqueio ou uma pausa", com o detalhe "o aplicativo está
+pausado". Para o que espera seguir, confira o vigia, reative os aplicativos e só depois reabra a saída. Um
+assistente volta na área do ADMIN, tela **Aplicativos**, botão **Reativar**; um programa, na tela do programa
+([restauração](restauracao.md)).
 
 ## O que nunca acontece
 

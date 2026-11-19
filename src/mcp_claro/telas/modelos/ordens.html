@@ -16,7 +16,7 @@
   <p><strong>O que ele pode ler:</strong></p>
   <ul class="ferramentas">
     {% for f in o.ferramentas %}
-    <li>{% if f.descricao %}{{ f.descricao }}{% else %}{{ f.nome_original }} (ainda sem revisão){% endif %} <span class="dica">(sistema {{ f.sistema }})</span></li>
+    <li>{% if f.descricao %}{{ f.descricao }}{% else %}{{ f.nome_original | escondidos }} (ainda sem revisão){% endif %} <span class="dica">(sistema {{ f.sistema }})</span></li>
     {% endfor %}
   </ul>
   <p><strong>Até quando:</strong> {{ o.fim | data_hora }}.
@@ -45,7 +45,7 @@
     {% for m in modelos %}
     <label class="opcao"><input type="radio" name="modelo" value="{{ m.id }}" required {% if valores.get("modelo") == m.id|string %}checked{% endif %}>
       <span><strong>{{ m.nome }}</strong>: {{ m.descricao }}
-        <span class="dica">Pode ler: {% for f in m.ferramentas %}{{ f.descricao or f.nome_original }}{% if not loop.last %}; {% endif %}{% endfor %}. Prazo de até {{ m.validade_dias }} dias.</span>
+        <span class="dica">Pode ler: {% for f in m.ferramentas %}{{ f.descricao or (f.nome_original | escondidos) }}{% if not loop.last %}; {% endif %}{% endfor %}. Prazo de até {{ m.validade_dias }} dias.</span>
       </span>
     </label>
     {% endfor %}

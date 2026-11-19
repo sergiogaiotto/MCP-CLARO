@@ -117,6 +117,16 @@ conferir. O texto do plano foi ajustado onde ele descrevia o comportamento antig
   liberada ou enviando) conta sempre, e a janela vale para a que já saiu ou ficou não confirmada, contada desde
   a última mudança dela. Por quê: uma ficha pode esperar mais que a janela (a de um programa, por exemplo), e o
   pedido repetido viraria uma segunda ação. Prova: `tests/integracao/test_saida_correcoes.py`.
+- **Quem reativa os aplicativos depois de uma restauração é o ADMIN.** A proposta e o plano dizem que, depois
+  de restaurar o banco, cada pessoa reativa os seus aplicativos. Agora a pausa é do aplicativo inteiro
+  (`aplicativos.situacao`), não de cada pessoa, e quem a tira é a pessoa ADMIN: um assistente na tela
+  **Aplicativos** da área do ADMIN, botão **Reativar**, e um programa na tela do programa. O passo vai ao
+  extrato com o nome de quem fez. Por quê: um aplicativo serve a várias pessoas, e a restauração atinge todas
+  ao mesmo tempo; quem decide quando ele volta é quem cuida da instalação e reabre a porta de saída. O motivo
+  da proposta continua valendo: um bloqueio feito depois da cópia pode ter se perdido. Por isso o extrato
+  registra o intervalo que pode faltar, e quem tinha bloqueado algo nesse intervalo precisa conferir e
+  bloquear de novo. Prova: `tests/integracao/test_telas_rodada3.py` e
+  `tests/integracao/test_programas_rodada3.py`. Roteiro em [restauracao.md](restauracao.md).
 
 ## Ainda em aberto
 

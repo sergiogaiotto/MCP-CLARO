@@ -197,12 +197,14 @@ class TelasDoAdminPortas:
         await self.t.exigir_admin(pedido)
         async with self.t.engine.connect() as c:
             entrada, saida = await consultas.estado_das_portas(c)
+            pausados = await consultas.aplicativos_pausados(c)
         return self.t.pagina(
             pedido,
             "admin/portas.html",
             {
                 "entrada": entrada,
                 "saida": saida,
+                "pausados": pausados,
                 "entrada_por": quem_legivel(entrada.mudou_por) if entrada else "",
                 "saida_por": quem_legivel(saida.mudou_por) if saida else "",
                 "erros": erros or [],

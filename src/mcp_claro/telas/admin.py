@@ -1,6 +1,9 @@
 """Telas do ADMIN: aplicativos, sistemas e sondagem, revisao de ferramentas, modelos de ordem, destinos de
 webhook e abertura do extrato de outra pessoa. Os programas que rodam sozinhos estao em ``telas/admin_programas.py``.
 
+Um aplicativo assistente que a conferencia do banco na partida pausou volta a ativo aqui, por decisao do ADMIN
+(``reativar_aplicativo``); o de um programa volta pela tela do programa.
+
 Na revisao da ferramenta, o ADMIN marca os campos do pedido que dizem para quem a acao vai (so campos do esquema
 de entrada). O limite "so estes destinatarios" da pessoa confere estes campos; o resto do pedido fica livre.
 
@@ -76,6 +79,7 @@ class TelasDoAdmin:
             r("/admin", self.inicio),
             r("/admin/aplicativos", self.aplicativos),
             r("/admin/aplicativos", self.habilitar_aplicativo, "POST"),
+            r("/admin/aplicativos/{aplicativo_id:uuid}/reativar", self.reativar_aplicativo, "POST"),
             r("/admin/sistemas", self.sistemas),
             r("/admin/sistemas", self.cadastrar_sistema, "POST"),
             r("/admin/sistemas/{sistema_id:uuid}", self.sistema),
@@ -154,6 +158,34 @@ class TelasDoAdmin:
                     )
                     return ver_depois("/telas/admin/aplicativos", "aplicativo_habilitado")
         return await self._pagina_aplicativos(pedido, erros, dict(f.como_dict()))
+
+    @tela
+    async def reativar_aplicativo(self, pedido: Request) -> Response:
+        """Reativa um aplicativo assistente que a conferencia do banco na partida pausou. So o ADMIN, aqui.
+
+        A pausa do aplicativo (``aplicativos.situacao``) nao sai sozinha, nem quando o ADMIN reabre a porta de
+        saida. O UPDATE so vale se o aplicativo ainda estiver pausado e for assistente: dois cliques ao mesmo tempo
+        registram uma vez so, e um programa volta pela tela do programa (``telas/admin_programas.py``). As acoes
+        que ja pararam continuam paradas: so os pedidos novos voltam a passar.
+        """
+        sessao = await self.t.exigir_admin(pedido)
+        await self.t.formulario(pedido, sessao)
+        aplicativo_id: uuid.UUID = pedido.path_params["aplicativo_id"]
+        async with self.t.engine.begin() as c:
+            voltou = await consultas.reativar_assistente(c, aplicativo_id)
+            if voltou is not None:
+                await self.t.extrato(
+                    c,
+                    "admin_aplicativo_reativado",
+                    {"aplicativo": voltou.nome, "quem": sessao.quem},
+                    pessoa_id=sessao.pessoa.id,
+                    aplicativo_id=aplicativo_id,
+                    dados={"client_id": voltou.client_id},
+                )
+        if voltou is None:
+            return ver_depois("/telas/admin/aplicativos", "aplicativo_nada_mudou")
+        log.info("telas_admin_aplicativo_reativado")
+        return ver_depois("/telas/admin/aplicativos", "aplicativo_reativado")
 
     # --- Sistemas e sondagem ---
 

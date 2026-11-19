@@ -10,7 +10,7 @@
   <p>{{ m.descricao }}</p>
   <p class="dica">Prazo de até {{ m.validade_dias }} dias.</p>
   <ul class="ferramentas">
-    {% for f in m.ferramentas %}<li><code>{{ f.nome_vitrine or f.nome_original }}</code> (sistema {{ f.sistema }}){% if f.classe %}: {{ f.classe | classe }}{% endif %}</li>{% endfor %}
+    {% for f in m.ferramentas %}<li><code>{{ (f.nome_vitrine or f.nome_original) | escondidos }}</code> (sistema {{ f.sistema }}){% if f.classe %}: {{ f.classe | classe }}{% endif %}</li>{% endfor %}
   </ul>
 </section>
 {% else %}

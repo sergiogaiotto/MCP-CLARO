@@ -108,6 +108,7 @@ async def test_ronda_toda_tentativa_recusada(entrada: Entrada) -> None:
     assert set(guardadas) == set(por_caso)
     assert all(linha.defendeu for linha in guardadas.values())
     assert guardadas["controle"].detalhes["situacao"] == "conforme"
+    assert guardadas["controle"].esperado == "vitrine da ronda (resultado do tools/list)"
     assert guardadas["cracha_falso"].esperado == "401"
     assert await extrato(entrada, "ronda_falha", r.id) == []
     # Nada de cracha na tabela.
@@ -219,7 +220,11 @@ async def test_ronda_sem_identidade_grava_controle_inconclusivo(entrada: Entrada
     (t,) = r.tentativas
     assert t.caso == Caso.CONTROLE
     assert t.situacao is Situacao.INCONCLUSIVO
-    assert set(await linhas(entrada, r.id)) == {"controle"}
+    guardadas = await linhas(entrada, r.id)
+    assert set(guardadas) == {"controle"}
+    # O que o controle espera e a vitrine (um resultado), nao so o cracha aceito.
+    assert guardadas["controle"].esperado == "vitrine da ronda (resultado do tools/list)"
+    assert guardadas["controle"].obtido == "sem identidade da ronda (PATROL_KEY_FILE)"
 
 
 async def test_tabela_ronda_so_de_acrescentar(entrada: Entrada) -> None:

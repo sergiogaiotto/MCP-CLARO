@@ -15,6 +15,10 @@ para os destinatarios escolhidos (ou para qualquer destinatario, dito com clarez
   copia para outra pessoa, por exemplo, passa pela ficha. O resto do pedido (o texto da mensagem) fica livre.
   Sem campo marcado, o limite so pode valer para qualquer destinatario. Criar trava a versao revisada lida
   (``consultas.travar_revisao``): a revisao do ADMIN que marca um campo novo nao cruza com um limite sendo criado.
+  Se a revisao termina antes, a escolha do formulario (a versao revisada antiga) sai da lista: a tela diz que o
+  ADMIN acabou de revisar a acao e leva a "Criar limite" de novo, com a versao nova. Nada e gravado. O desafio
+  da passkey (o primeiro passo do botao, com a passkey ligada) diz o mesmo e manda o caminho da versao nova; o
+  passkey.js mostra o botao junto da frase.
 - Ampliar so aumenta: mais vezes por dia ou mais prazo. Para mudar os destinatarios, encerre e crie outro.
   Ampliar segue o teto vigente: um limite acima do teto de agora so renova ate o teto, e o prazo nunca passa
   de ``ALLOWANCE_MAX_DAYS`` a contar de hoje.
@@ -29,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -67,6 +72,11 @@ LOGIN_REFEITO_LIMITE: Final = (
 NAO_VALE_COM_PASSKEY: Final = (
     "Este limite foi criado ou ampliado sem a passkey e não vale com a passkey ligada: as ações dele passam pela"
     " ficha. Ele não pode ser ampliado. Encerre este limite e crie outro, com a passkey. Nada mudou."
+)
+REVISADA_AGORA: Final = "O ADMIN acabou de revisar esta ação. Abra Criar limite de novo."
+REVISADA_RISCO_ALTO: Final = (
+    "O ADMIN acabou de revisar esta ação e a marcou como de risco alto. Ações de risco alto nunca entram em limite:"
+    " sempre passam pela ficha."
 )
 SEM_CAMPO_MARCADO: Final = (
     "O ADMIN ainda não marcou qual campo desta ação diz o destinatário. Por enquanto, o limite só pode valer para"
@@ -180,6 +190,34 @@ def ferramenta_da_escolha(chave: str) -> uuid.UUID | None:
         return uuid.UUID(ferramenta)
     except ValueError:
         return None
+
+
+def aplicativo_da_escolha(chave: str) -> uuid.UUID | None:
+    """O aplicativo da escolha "aplicativo:ferramenta" do formulario."""
+    aplicativo, _, _ = chave.partition(":")
+    try:
+        return uuid.UUID(aplicativo)
+    except ValueError:
+        return None
+
+
+def mesma_acao(
+    escolhas: Iterable[Escolha], aplicativo_id: uuid.UUID, sistema_id: uuid.UUID, nome_original: str
+) -> Escolha | None:
+    """A escolha de agora para a mesma acao (mesmo aplicativo, mesmo sistema, mesmo nome no sistema)."""
+    return next(
+        (
+            e
+            for e in escolhas
+            if e.aplicativo_id == aplicativo_id and e.sistema_id == sistema_id and e.nome_original == nome_original
+        ),
+        None,
+    )
+
+
+def link_revisada(revisada: Escolha) -> tuple[str, str]:
+    """O passo seguinte quando o ADMIN acabou de revisar a acao: "Criar limite" com a versao revisada de agora."""
+    return "/telas/limites/novo?" + urlencode({"escolha": revisada.chave}), "Criar limite para esta ação"
 
 
 def alvo_ampliar(limite_id: uuid.UUID, por_dia: int, dias: int) -> str:
@@ -349,6 +387,19 @@ class TelasDeLimites:
         linhas = await consultas.ferramentas_de_acao(c, pessoa_id, VERSAO_MCP)
         return sorted((Escolha.da_linha(linha) for linha in linhas), key=lambda e: (e.aplicativo, e.nome_vitrine))
 
+    async def _revisada(self, c: AsyncConnection, chave: str, escolhas: dict[str, Escolha]) -> Escolha | None:
+        """A escolha que veio no formulario saiu da lista porque o ADMIN revisou a acao (a versao revisada mudou)?
+        Devolve a escolha de agora para a mesma acao. ``None``: a escolha vale, ou a acao saiu mesmo das ordens."""
+        if chave in escolhas:
+            return None
+        aplicativo_id, ferramenta_id = aplicativo_da_escolha(chave), ferramenta_da_escolha(chave)
+        if aplicativo_id is None or ferramenta_id is None:
+            return None
+        antiga = await consultas.revisao_por_id(c, ferramenta_id)
+        if antiga is None:
+            return None
+        return mesma_acao(escolhas.values(), aplicativo_id, antiga.sistema_id, antiga.nome_original)
+
     async def _maximos(self, c: AsyncConnection) -> tuple[int, int]:
         valores = await politica.varios(c, "ALLOWANCE_MAX_PER_DAY", "ALLOWANCE_MAX_DAYS")
         return valores["ALLOWANCE_MAX_PER_DAY"], valores["ALLOWANCE_MAX_DAYS"]
@@ -394,7 +445,16 @@ class TelasDeLimites:
             escolhas = {e.chave: e for e in await self._escolhas(c, sessao.pessoa.id)}
             maximo_dia, maximo_dias = await self._maximos(c)
             tem_passkey = await passkeys.tem_ativa(c, sessao.pessoa.id)
+            revisada = await self._revisada(c, chave, escolhas)
         escolha = escolhas.get(chave)
+        if revisada is not None and revisada.risco == "alto":
+            # Revisada para risco alto: criar de novo so levaria a outra recusa. A frase certa vem ja.
+            return self.t.erro(pedido, 400, "Não dá para criar este limite", REVISADA_RISCO_ALTO)
+        if revisada is not None:
+            # A acao continua nas ordens; so a versao revisada mudou (o formulario era de antes da revisao).
+            return self.t.erro(
+                pedido, 409, "Não dá para criar este limite", REVISADA_AGORA, link=link_revisada(revisada)
+            )
         if escolha is None or escolha.risco == "alto":
             mensagem = (
                 "Ações de risco alto nunca entram em limite: sempre passam pela ficha."
@@ -435,6 +495,13 @@ class TelasDeLimites:
             maximo_dia, maximo_dias = await self._maximos(c)
             lido, erros = ler_pedido(f, escolhas, maximo_dia=maximo_dia, maximo_dias=maximo_dias)
             if lido is None:
+                revisada = await self._revisada(c, f.texto("escolha"), escolhas)
+                if revisada is not None and revisada.risco == "alto":
+                    return passkeys.resposta_desafio(None, REVISADA_RISCO_ALTO, status=400)
+                if revisada is not None:
+                    # O caso comum: o formulario foi aberto antes da revisao e o toque vem depois. O passkey.js
+                    # mostra a frase com o botao para a versao nova.
+                    return passkeys.resposta_desafio(None, REVISADA_AGORA, status=409, link=link_revisada(revisada))
                 return passkeys.resposta_desafio(None, " ".join(erros), status=400)
             try:
                 opcoes = await passkeys.opcoes_autenticacao(c, self.cer, sessao.pessoa.id, "limite", lido.alvo())

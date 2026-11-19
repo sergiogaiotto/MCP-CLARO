@@ -18,6 +18,13 @@ AVISOS: Final[dict[str, str]] = {
     "ordem_dada": "Pronto. A ordem de serviço foi dada ao aplicativo.",
     "ordem_revogada": "Pronto. A ordem foi revogada. O aplicativo não pode mais usá-la.",
     "aplicativo_habilitado": "Pronto. O aplicativo foi habilitado.",
+    "aplicativo_reativado": (
+        "Pronto. O aplicativo foi reativado. Os pedidos dele voltam a passar, se nenhum bloqueio ou pausa os"
+        " segurar. As ações dele que já tinham parado não voltam."
+    ),
+    "aplicativo_nada_mudou": (
+        "Nada mudou: este aplicativo não é um assistente pausado. Um programa pausado volta pela tela do programa."
+    ),
     "declaracoes_lidas": "Pronto. Lemos as ferramentas que o sistema declara hoje.",
     "ferramenta_revisada": "Pronto. A revisão foi gravada. A ferramenta já pode entrar em modelos de ordem.",
     "modelo_criado": "Pronto. O modelo de ordem de serviço foi criado.",
@@ -127,4 +134,10 @@ def criar_ambiente(fuso: str) -> Environment:
     ambiente.filters["situacao"] = lambda v: SITUACOES.get(str(v), str(v))
     ambiente.filters["classe"] = lambda v: CLASSES.get(str(v), str(v))
     ambiente.filters["tipo_chave"] = lambda v: TIPOS_CHAVE.get(str(v), str(v))
+    # Nome de campo e texto vindo do sistema (ou do aplicativo), no texto visivel: os caracteres escondidos viram
+    # uma marca como [U+200B], como na ficha. O ``value=`` dos formularios fica cru. Importado aqui, e nao no topo:
+    # telas/acoes.py importa este modulo.
+    from mcp_claro.telas import acoes
+
+    ambiente.filters["escondidos"] = lambda v: acoes.marcar_escondidos(str(v))
     return ambiente

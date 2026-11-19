@@ -1,16 +1,17 @@
 {% extends "base.html" %}
-{% block titulo %}Limite de {{ l.linha.ferramenta }}{% endblock %}
+{% block titulo %}Limite de {{ l.linha.ferramenta | escondidos }}{% endblock %}
 {% block conteudo %}
-<h1>Limite de {{ l.linha.ferramenta }}</h1>
+<h1>Limite de {{ l.linha.ferramenta | escondidos }}</h1>
 <section class="cartao comprovante">
   <dl>
-    <dt>Ação</dt><dd>{{ l.linha.ferramenta }}, no sistema {{ l.linha.sistema }}</dd>
+    <dt>Ação</dt><dd>{{ l.linha.ferramenta | escondidos }}, no sistema {{ l.linha.sistema }}</dd>
     <dt>Aplicativo</dt><dd>{{ l.linha.aplicativo }}</dd>
     <dt>Destinatários</dt><dd>{{ l.destinatarios }}</dd>
     <dt>Por dia</dt><dd>até {{ l.linha.por_dia }} vezes; hoje, {{ l.linha.usados_hoje }}</dd>
     <dt>Até</dt><dd>{{ l.linha.valido_ate | data_hora }}</dd>
     <dt>Situação</dt><dd>{{ l.situacao }}{% if l.linha.motivo %} ({{ l.linha.motivo }}){% endif %}</dd>
-    <dt>Criado em</dt><dd>{{ l.linha.criado_em | data_hora }}{% if l.linha.com_passkey %}, com passkey{% endif %}</dd>
+    <dt>Criado em</dt><dd>{{ l.linha.criado_em | data_hora }}</dd>
+    <dt>Passkey</dt><dd id="passkey-do-limite">{% if l.linha.com_passkey %}Pedida ao criar e a cada ampliação{% else %}Criado ou ampliado sem a passkey{% endif %}</dd>
   </dl>
 </section>
 {% if l.nao_vale_com_passkey %}

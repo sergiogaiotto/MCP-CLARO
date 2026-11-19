@@ -509,6 +509,7 @@ Nos parâmetros usados pela Fase 2, o valor inicial vem com a faixa aceita entre
 | `VAULT_ADDR` | Endereço interno do cofre | Onde está o OpenBao | Na instalação |
 | `VAULT_SEAL_MODE` | `static` em teste; produção a decidir (`shamir`, `static`, `transit` ou `kms`) | Como o cofre é destravado depois de um reinício. `transit` pede outro OpenBao. `kms` usa plugin e, em geral, um serviço comercial de chaves, fora da regra do código aberto | Decisão 6 |
 | `VAULT_AUTH_METHOD` | `approle` | Login de máquina do despachante e da entrada | Raramente |
+| `VAULT_CHECK_SECONDS` | 15 (de 5 a 300) | A cada quantos segundos o despachante que segura a porta de saída confere a saúde do cofre | Pelo piloto |
 | `REQUEST_STATE_KEY_ROTATION_DAYS` | 30 | Rodízio da chave comum do estado das confirmações | Pela revisão de segurança |
 | `SCREENS_RECENT_LOGIN_SECONDS` | 300 (de 60 a 900) | Idade máxima do login, pela hora que o provedor assina (`auth_time`), para contar como login refeito na hora | Pela revisão de segurança |
 
@@ -710,7 +711,7 @@ Prova de saída, para ligar no piloto:
 - Crachá de outro condomínio recusado; crachá do aplicativo não repassado ao sistema.
 - Uma pessoa não alcança o que é de outra.
 - Ferramenta alterada de propósito para pedir mais perde a autorização até nova revisão.
-- Backup restaurado e lido. O gateway percebe sozinho a restauração, e os aplicativos voltam pausados até cada pessoa reativar.
+- Backup restaurado e lido. O gateway percebe sozinho a restauração, e os aplicativos voltam pausados até cada pessoa reativar. (Mudou na Fase 2: quem reativa é o ADMIN; veja [decisoes.md](decisoes.md), "Mudanças deliberadas da Fase 2".)
 - Ronda das portas no ar, e o vigia avisa quando o gateway fica mudo.
 - Recusas por versão antiga aparecem nas contagens, dos dois lados.
 - Ensaio do dublê mal-intencionado sem nenhuma passagem indevida.
@@ -879,7 +880,8 @@ Regras dos testes:
 - Só o despachante tem permissão de decifrar. A entrada lê apenas a chave comum do estado das confirmações, num caminho separado.
 - A chave comum do estado das confirmações tem pelo menos 32 bytes e troca em rodízio. Todas as réplicas da entrada usam a mesma.
 - Os certificados internos vêm do motor PKI do OpenBao ou do `tls internal` do Caddy. A escolha fica para "Provar a base".
-- Enquanto o cofre estiver trancado, a porta de saída fica fechada, e sai um aviso "cofre trancado".
+- Enquanto o cofre estiver trancado, a porta de saída fica fechada, e sai um aviso "cofre trancado". O despachante confere a saúde do cofre a cada `VAULT_CHECK_SECONDS` e logo antes de cada ação sair. Trancado, a saída fecha na primeira conferência que o encontra assim. Sem resposta, fecha na segunda conferência seguida sem resposta. A ação que espera continua liberada; quando a saída reabrir, ela é conferida de novo antes de sair.
+- A saída que o cofre fechou reabre sozinha quando ele volta destravado, se ninguém a mudou antes. Se fechou porque o cofre estava trancado, reabre na primeira conferência com ele destravado. Se fechou porque o cofre não respondia, reabre depois de duas conferências seguidas com ele destravado. Mas, se ela já tinha reaberto assim menos de uma hora antes de fechar de novo pela falta de resposta, espera o cofre ficar 30 minutos seguidos destravado. Fechada pelo ADMIN ou pela conferência do banco, continua fechada: o ADMIN recebe um aviso quando a conferência encontra o cofre trancado e, depois dele, outro quando o encontra de volta, e decide.
 - `VAULT_SEAL_MODE`: em teste, `static`, com a chave num segredo do Docker, fora do backup. No piloto, sugerimos `shamir` 2 de 3, com pessoas nomeadas. Shamir é dividir a chave em partes guardadas por pessoas diferentes.
 - Com `static` na mesma máquina, quem tem acesso total à máquina tem a chave. Essa forma protege contra roubo de disco e de backup, não contra quem opera.
 

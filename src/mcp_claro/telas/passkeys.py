@@ -329,10 +329,21 @@ async def conferir(
     return None
 
 
-def resposta_desafio(opcoes: dict[str, Any] | None, erro: str | None = None, *, status: int = 400) -> JSONResponse:
-    """O que o navegador recebe ao pedir um desafio: as opcoes, ou a frase da recusa."""
+def resposta_desafio(
+    opcoes: dict[str, Any] | None,
+    erro: str | None = None,
+    *,
+    status: int = 400,
+    link: tuple[str, str] | None = None,
+) -> JSONResponse:
+    """O que o navegador recebe ao pedir um desafio: as opcoes, ou a frase da recusa.
+
+    ``link``: (caminho local, texto) de um passo seguinte; o passkey.js o mostra como botao junto da frase."""
     if opcoes is None:
-        return JSONResponse({"erro": erro or "Não deu para pedir a passkey agora. Tente de novo."}, status_code=status)
+        corpo: dict[str, Any] = {"erro": erro or "Não deu para pedir a passkey agora. Tente de novo."}
+        if link is not None:
+            corpo["link"] = {"caminho": link[0], "texto": link[1]}
+        return JSONResponse(corpo, status_code=status)
     return JSONResponse({"publicKey": opcoes})
 
 

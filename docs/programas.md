@@ -100,7 +100,8 @@ O cadastro de novo não mexe na situação do **aplicativo** do programa. Se o a
 pela conferência do banco depois de uma restauração), ele segue pausado, e a entrada continua recusando os
 pedidos dele (`app_pausado`). A tela diz isso logo depois do cadastro. A pausa do aplicativo é decisão do ADMIN e
 não sai sozinha: na tela do programa, depois de conferir no extrato o que pode ter se perdido, o ADMIN usa
-**Reativar o aplicativo**. O passo vai ao extrato com o nome de quem fez.
+**Reativar o aplicativo**. O passo vai ao extrato com o nome de quem fez. Depois disso, os pedidos do programa
+voltam a passar quando o cadastro do programa valer e nenhum bloqueio ou pausa os segurar.
 
 ## Prazos e rotinas
 

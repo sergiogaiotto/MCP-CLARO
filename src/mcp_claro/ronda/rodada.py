@@ -38,7 +38,7 @@ from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import estado
 from mcp_claro.regras.bloqueios import quem_rotina
-from mcp_claro.ronda.casos import Caso, Resumo, Situacao, Tentativa, fazer_tentativas
+from mcp_claro.ronda.casos import ESPERADO, Caso, Resumo, Situacao, Tentativa, fazer_tentativas
 from mcp_claro.ronda.config import CLIENTE_RONDA, ConfigRonda, IdentidadePrograma, identidade_da_ronda, ler
 from mcp_claro.ronda.cracha import ChavesProprias, FonteCrachas, fonte_do_programa
 from mcp_claro.rotinas.agendador import Tarefa
@@ -248,7 +248,7 @@ async def rodar_ronda(
         tentativas = [
             Tentativa(
                 Caso.CONTROLE,
-                "cracha aceito (resposta JSON-RPC)",
+                ESPERADO[Caso.CONTROLE],
                 "sem identidade da ronda (PATROL_KEY_FILE)",
                 Situacao.INCONCLUSIVO,
                 {"por_que": "sem identidade da ronda"},

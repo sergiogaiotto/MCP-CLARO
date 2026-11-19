@@ -28,9 +28,9 @@ isso o extrato ainda registra o intervalo que pode faltar, e a sequencia do prot
 (``fila.saltar_protocolo``). A fila nao para, nada muda de estado e o extrato nao fala em restauracao: a
 saida fechada segura tudo (o despachante nao envia com ela fechada). Reabrir a saida nao reativa os
 aplicativos. Com a saida reaberta, o despachante confere cada acao na hora dela: a de aplicativo ja
-reativado sai; a de aplicativo ainda pausado para, sem sair, com o desfecho "o aplicativo esta pausado".
-Para o que espera seguir, o aplicativo volta antes de reabrir (``SEM_SINAL_DE_RESTAURACAO`` diz isso no
-extrato e no motivo da saida fechada).
+reativado sai; a de aplicativo ainda pausado fica parada, sem sair, com o desfecho "o aplicativo esta
+pausado". Para o que espera seguir, o aplicativo volta antes de reabrir. O extrato e o motivo da saida
+fechada dizem isso em frases curtas (``SEM_SINAL_DE_RESTAURACAO``).
 
 ``ultimo_fechamento_no_vigia``: ``None`` quando o vigia nao respondeu; ``0`` quando respondeu e ainda
 nao guarda fechamento nenhum.
@@ -81,10 +81,11 @@ _SINAIS_DE_RESTAURACAO: Final = frozenset(
     {"marca_restaurado", "identificador_mudou", "linha_do_tempo_mudou", "vigia_mais_novo"}
 )
 SEM_SINAL_DE_RESTAURACAO: Final = (
-    "sem sinal de banco restaurado, a fila de saida nao parou: com a saida reaberta, a acao de aplicativo"
-    " reativado sai na hora dela, e a de aplicativo ainda pausado para sem sair"
+    "nao houve sinal de banco restaurado. A fila de saida nao parou. Quando a saida reabrir, o que espera volta"
+    " a ser conferido antes de sair. A acao de um aplicativo que continua pausado fica parada e nao sai"
 )
-"""Acrescentado ao motivo quando so o vigia nao respondeu (a fila nao para, so a saida fecha)."""
+"""Acrescentado ao motivo quando so o vigia nao respondeu (a fila nao para, so a saida fecha): "o vigia nao
+respondeu e nao houve sinal...". Sem ponto final: a frase do extrato (``continuidade_nao_confere``) poe o dela."""
 QUEM: Final = quem_rotina("continuidade")
 POUPADOS: Final[tuple[str, ...]] = (CLIENTE_RONDA, CLIENTE_VIGIA)
 """Aplicativos que nao pausam: a ronda e o vigia precisam continuar conferindo o gateway."""
@@ -278,7 +279,7 @@ async def conferir_continuidade(
             )
         ).scalar_one_or_none() or ultima.visto_em
         restauracao = bool(_SINAIS_DE_RESTAURACAO.intersection(motivos))
-        motivo = _legivel(motivos) if restauracao else f"{_legivel(motivos)}; {SEM_SINAL_DE_RESTAURACAO}"
+        motivo = _legivel(motivos) if restauracao else f"{_legivel(motivos)} e {SEM_SINAL_DE_RESTAURACAO}"
         dados: dict[str, Any] = {
             "motivos": list(motivos),
             "fila_parada": restauracao,

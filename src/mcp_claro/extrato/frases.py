@@ -142,6 +142,11 @@ FRASES: Final[dict[str, Frase]] = {
             "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, com o login refeito na hora (passkey"
             " desligada nesta instalacao).",
         ),
+        # Fase 2: terceira rodada (telas).
+        Frase(
+            "admin_aplicativo_reativado",
+            "Aplicativo {aplicativo} reativado por {quem}; estava pausado pela conferencia do banco na partida.",
+        ),
         # Fase 2: programas que rodam sozinhos (decisao 9).
         Frase(
             "programa_leitura_feita",
@@ -211,17 +216,6 @@ FRASES: Final[dict[str, Frase]] = {
         Frase(
             "programa_encerrado_fim",
             "Programa {programa}, responsavel {responsavel}, encerrado: o cadastro valia ate {fim}.",
-        ),
-        # Telas da Fase 2: limite criado ou ampliado com a passkey desligada nesta instalacao.
-        Frase(
-            "limite_criado_sem_passkey",
-            "A pessoa criou um limite de {por_dia} por dia para {ferramenta}, sem passkey (desligada nesta"
-            " instalacao).",
-        ),
-        Frase(
-            "limite_ampliado_sem_passkey",
-            "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, sem passkey (desligada nesta"
-            " instalacao).",
         ),
         Frase("bloqueio", "Bloqueio ligado por {quem}: {alcance}."),
         Frase("fechamento", "Fechamento {numero} calculado com {linhas} linhas."),
@@ -329,6 +323,24 @@ FRASES: Final[dict[str, Frase]] = {
         Frase(
             "restauracao_marcada",
             "O roteiro de restauracao marcou o banco como restaurado; a porta de saida fecha na proxima partida.",
+        ),
+        # Fase 2: terceira rodada (nucleo).
+        Frase(
+            "cofre_fechou_saida",
+            "A porta de saida fechou porque {motivo}. Nenhuma acao sai para os sistemas; as ja liberadas esperam.",
+        ),
+        Frase(
+            "cofre_reabriu_saida",
+            "O cofre voltou destravado. A porta de saida, que a conferencia do cofre tinha fechado, reabriu sozinha.",
+        ),
+        Frase(
+            "cofre_trancado_saida_fechada",
+            "O cofre esta trancado. A porta de saida ja estava fechada por outro motivo e continua fechada. Quando"
+            " o cofre voltar, ela nao reabre sozinha.",
+        ),
+        Frase(
+            "cofre_destravado_saida_fechada",
+            "O cofre voltou destravado. A porta de saida continua fechada, porque foi fechada por outro motivo.",
         ),
     )
 }

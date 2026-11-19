@@ -80,8 +80,8 @@ FEITOS: Final[dict[str, str]] = {
         " recusando os pedidos dele. Veja abaixo a situação do aplicativo."
     ),
     "programa_aplicativo_reativado": (
-        "Pronto. O aplicativo do programa foi reativado. Os pedidos dele voltam a passar enquanto o cadastro do"
-        " programa valer."
+        "Pronto. O aplicativo do programa foi reativado. Os pedidos dele voltam a passar quando o cadastro do"
+        " programa valer e nenhum bloqueio ou pausa os segurar."
     ),
     "programa_fim_estendido": "Pronto. A data de fim do programa foi estendida.",
     "programa_nada_mudou": "Nada mudou: o programa não estava na situação certa para isto.",

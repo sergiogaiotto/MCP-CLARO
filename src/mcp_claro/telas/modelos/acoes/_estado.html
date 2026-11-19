@@ -46,7 +46,7 @@
   {% if a.textos %}
   <h3>O que o sistema respondeu</h3>
   <div class="estranho">
-    {% for t in a.textos %}<p>{% for linha in t.splitlines() %}{{ linha }}{% if not loop.last %}<br>{% endif %}{% endfor %}</p>{% endfor %}
+    {% for t in a.textos %}<p>{% for linha in t.splitlines() %}{{ linha | escondidos }}{% if not loop.last %}<br>{% endif %}{% endfor %}</p>{% endfor %}
   </div>
   <p class="dica">Texto escrito pelo sistema.</p>
   {% elif a.op.desfecho and a.op.estado not in ("aguardando_ficha", "liberada", "enviando") %}

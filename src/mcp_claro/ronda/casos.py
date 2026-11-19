@@ -138,7 +138,7 @@ NOMES_LEGIVEIS: Final[dict[str, str]] = {
 }
 
 ESPERADO: Final[dict[str, str]] = {
-    Caso.CONTROLE: "cracha aceito (resposta JSON-RPC)",
+    Caso.CONTROLE: "vitrine da ronda (resultado do tools/list)",
     Caso.CRACHA_FALSO: "401",
     Caso.CRACHA_VENCIDO: "401",
     Caso.OUTRO_CONDOMINIO: "401",

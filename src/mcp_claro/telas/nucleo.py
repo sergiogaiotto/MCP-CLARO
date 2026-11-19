@@ -143,8 +143,14 @@ class Telas:
         """Data no fuso das telas, como aparece nas paginas (dd/mm/aaaa)."""
         return str(self.ambiente.filters["data"](valor))
 
-    def erro(self, pedido: Request, status: int, titulo: str, mensagem: str) -> HTMLResponse:
-        return self.pagina(pedido, "erro.html", {"titulo": titulo, "mensagem": mensagem}, status=status)
+    def erro(
+        self, pedido: Request, status: int, titulo: str, mensagem: str, *, link: tuple[str, str] | None = None
+    ) -> HTMLResponse:
+        """Pagina de recusa. ``link``: (caminho local, texto) de um passo seguinte, mostrado como botao."""
+        contexto: dict[str, Any] = {"titulo": titulo, "mensagem": mensagem}
+        if link is not None:
+            contexto["link"], contexto["link_texto"] = link
+        return self.pagina(pedido, "erro.html", contexto, status=status)
 
     # --- Porta interna do despachante ---
 

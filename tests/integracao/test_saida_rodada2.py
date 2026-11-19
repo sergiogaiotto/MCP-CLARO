@@ -23,10 +23,8 @@ from sqlalchemy.exc import OperationalError
 
 from mcp_claro import continuidade
 from mcp_claro.cadastro import repositorio
-from mcp_claro.extrato import frases
-from mcp_claro.extrato.frases import Frase, frase
+from mcp_claro.extrato.frases import frase
 from mcp_claro.ligacao import cliente
-from mcp_claro.regras import programas
 from mcp_claro.saida import despachante as despachante_mod
 from mcp_claro.saida import fila
 from mcp_claro.saida.despachante import TROCA_DO_NULO, PortaDeSaida
@@ -259,7 +257,7 @@ async def test_vigia_sem_resposta_fecha_a_saida_e_pausa_sem_parar_a_fila(amb: Am
         assert "restauracao_detectada" not in tipos
         assert "acao_nao_confirmada" not in tipos
         assert {"estado_saida_mudou", "continuidade_nao_confere", "aplicativo_pausado_continuidade"} <= set(tipos)
-        motivo = f"o vigia nao respondeu; {continuidade.SEM_SINAL_DE_RESTAURACAO}"
+        motivo = f"o vigia nao respondeu e {continuidade.SEM_SINAL_DE_RESTAURACAO}"
         async with amb.admin.connect() as c:
             linha = (
                 await c.execute(
@@ -386,28 +384,8 @@ async def test_limite_so_estes_com_argumento_fora_do_esquema_vai_para_a_ficha(am
 # --- N9: acao de programa no extrato passa por programas.linha ---------------------------------------
 
 
-async def test_acao_pedida_e_repetida_de_programa_passam_por_programas_linha(
-    amb: Ambiente, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Frases de teste no lugar das que o grupo dos programas acrescenta: o teste so depende de linha().
-    monkeypatch.setitem(programas.PARA_PROGRAMA, "acao_pedida", "teste_programa_acao_pedida")
-    monkeypatch.setitem(programas.PARA_PROGRAMA, "acao_repetida", "teste_programa_acao_repetida")
-    monkeypatch.setitem(
-        frases.FRASES,
-        "teste_programa_acao_pedida",
-        Frase(
-            "teste_programa_acao_pedida",
-            "Acao {ferramenta} pedida pelo programa {programa}, responsavel {responsavel}; protocolo {protocolo}.",
-        ),
-    )
-    monkeypatch.setitem(
-        frases.FRASES,
-        "teste_programa_acao_repetida",
-        Frase(
-            "teste_programa_acao_repetida",
-            "Pedido igual do programa {programa}, responsavel {responsavel}, ao protocolo {protocolo}.",
-        ),
-    )
+async def test_acao_pedida_e_repetida_de_programa_passam_por_programas_linha(amb: Ambiente) -> None:
+    # Com as frases de verdade (programa_acao_pedida e programa_acao_repetida), sem troca por monkeypatch.
     sufixo = uuid.uuid4().hex[:8]
     async with amb.admin.begin() as c:
         robo_id = await repositorio.habilitar_aplicativo(
@@ -453,12 +431,32 @@ async def test_acao_pedida_e_repetida_de_programa_passam_por_programas_linha(
                 )
             ).all()
         assert [linha.tipo for linha in linhas] == [
-            "teste_programa_acao_pedida",
-            "teste_programa_acao_repetida",
-            "teste_programa_acao_pedida",
+            "programa_acao_pedida",
+            "programa_acao_repetida",
+            "programa_acao_pedida",
         ]
-        for linha in linhas:
-            assert f"programa Robo linha {sufixo}, responsavel " in linha.frase
+        async with amb.admin.connect() as c:
+            responsavel = (
+                await c.execute(text("SELECT coalesce(nome, sujeito) FROM pessoas WHERE id = :p"), {"p": amb.ana_id})
+            ).scalar_one()
+        programa = f"Robo linha {sufixo}"
+        assert [linha.frase for linha in linhas] == [
+            frase(
+                "programa_acao_pedida",
+                ferramenta=f.nome_vitrine,
+                programa=programa,
+                responsavel=responsavel,
+                protocolo=op.protocolo,
+            ),
+            frase("programa_acao_repetida", programa=programa, responsavel=responsavel, protocolo=op.protocolo),
+            frase(
+                "programa_acao_pedida",
+                ferramenta=f.nome_vitrine,
+                programa=programa,
+                responsavel=responsavel,
+                protocolo=outro.protocolo,
+            ),
+        ]
         # O assistente continua com a frase de sempre (linha() so muda a de um programa).
         do_assistente = await nova_acao(amb, f"Assistente no extrato {sufixo}", confirmada=False)
         assert len(await extrato(amb, "acao_pedida", protocolo=do_assistente.protocolo)) == 1

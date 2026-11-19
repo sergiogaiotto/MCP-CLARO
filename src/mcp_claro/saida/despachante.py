@@ -11,15 +11,26 @@ Para cada acao liberada e na hora:
    (quando o aplicativo e um programa), ordem e ferramenta vigentes, ficha confirmada para esta operacao
    (a de risco alto, com passkey ou login refeito) ou limite gasto e nao encerrado, e codigo de conferencia
    igual ao que vai seguir;
-3. marca "enviando" e grava, antes de qualquer byte sair (o que o envio le do banco e lido antes);
-4. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema;
-5. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. O caractere nulo
+3. com o cliente do cofre, pergunta a saude dele: trancado ou sem resposta, a acao nao segue agora e continua
+   liberada (nenhuma chave abriria);
+4. marca "enviando" e grava, antes de qualquer byte sair (o que o envio le do banco e lido antes);
+5. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema;
+6. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. O caractere nulo
    (U+0000), que o banco nao guarda, vira U+FFFD no resultado. Se o banco falhar ao gravar o fim, tenta de
    novo algumas vezes; se nao der, encerra o turno: a conexao da trava cai, quem assumir a porta (esta mesma,
    na volta seguinte, ou outra copia) da a linha "enviando" como nao confirmada, e nada e reenviado.
 
 O despachante acorda pelo ``LISTEN mcp_claro_saida`` e, de reserva, por varredura. Com a porta de saida
 fechada, so olha de novo a cada varredura.
+
+Com o cliente do cofre (``cofre``, que tem ``saude()``), o despachante que segura a trava confere tambem a
+saude do cofre a cada ``conferir_cofre`` segundos (``VAULT_CHECK_SECONDS``), e de novo assim que a pergunta do
+passo 3 ou uma chamada ao cofre responde que ele esta trancado: trancado, a saida fecha; destravado de novo,
+reabre se foi o cofre que a fechou (``saida.cofre``, que tambem diz quando, e os avisos ao ADMIN). A acao
+liberada espera a saida reabrir, sem mudar de estado. So o cofre que tranca ou para de responder entre a
+pergunta do passo 3 e a chave do passo 5 (uma fracao de segundo) faz a acao daquele instante virar "nao saiu"
+("o cofre de chaves esta trancado" ou "o cofre de chaves nao respondeu"). Sem esse cliente (testes, cifra
+local), nada disso roda.
 """
 
 from __future__ import annotations
@@ -27,7 +38,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from datetime import datetime
 from typing import Any, Final
 
 import mcp_types as types
@@ -37,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import FerramentaVitrine
+from mcp_claro.cofre import CofreTrancado
 from mcp_claro.despachante import chaves, medida, renovacao
 from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.extrato import registrar
@@ -44,6 +58,7 @@ from mcp_claro.ligacao import cliente
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios, estado
+from mcp_claro.saida import cofre as saida_cofre
 from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.fila import Operacao
@@ -116,6 +131,10 @@ class PortaDeSaida:
         acoes_de_programas: bool = False,
         limite_exige_passkey: bool = True,
         chamar: Chamador | None = None,
+        cofre: saida_cofre.SaudeDoCofre | None = None,
+        conferir_cofre: float = 15.0,
+        emails_admin: Sequence[str] = (),
+        relogio: Callable[[], float] = time.monotonic,
     ) -> None:
         self.engine = engine
         self.cifra = cifra
@@ -124,12 +143,34 @@ class PortaDeSaida:
         self.acoes_de_programas = acoes_de_programas
         self.limite_exige_passkey = limite_exige_passkey
         self.chamar: Chamador = chamar or cliente.chamar_ferramenta
+        # Cliente do cofre com saude(): o app do despachante o liga na partida, depois de entrar no cofre.
+        self.cofre = cofre
+        self.conferir_cofre = conferir_cofre
+        self.emails_admin = tuple(emails_admin)
+        self._relogio = relogio
         self.assumiu = asyncio.Event()
         self._acordar = asyncio.Event()
         # A porta de saida estava fechada na ultima volta: a espera e a varredura inteira.
         self._saida_fechada = False
         # Linhas puladas nesta volta porque outra transacao as segura (cancelar, confirmar, bloquear).
         self._puladas: set[int] = set()
+        # Conferencia do cofre: quando foi a ultima e as leituras seguidas (sem resposta; destravado, desde quando).
+        self._cofre_conferido_em: float | None = None
+        self._cofre_sem_resposta = 0
+        self._cofre_destravado = 0
+        self._cofre_destravado_desde: float | None = None
+        # Quando esta porta reabriu a saida fechada por "sem resposta", e se a saida fechada agora por "sem
+        # resposta" ja tinha fechado e reaberto assim na ultima hora (reabre so depois de
+        # ``saida_cofre.ESPERA_SE_INSTAVEL``).
+        self._cofre_reabriu_em: float | None = None
+        self._cofre_instavel = False
+        # Com a saida fechada por outro motivo: (hora do fechamento, o ultimo aviso foi o de cofre trancado). Evita
+        # ler o extrato a cada conferencia.
+        self._cofre_avisado: tuple[datetime | None, bool] | None = None
+        # Uma chamada ao cofre (a pergunta antes de "enviando" ou a chave) acabou de responder "trancado": a
+        # proxima volta fecha a saida sem esperar o intervalo. Sem resposta antes de "enviando": a porta espera.
+        self._cofre_trancado_na_chamada = False
+        self._cofre_mudo_no_envio = False
 
     # Ciclo
 
@@ -156,6 +197,8 @@ class PortaDeSaida:
                 await self.assumir(dono)
                 while True:
                     await pg.fetchval("SELECT 1")  # a trava segue nossa enquanto a conexao vive
+                    if self._hora_de_conferir_o_cofre():
+                        await self.conferir_o_cofre(dono)
                     if not await self.enviar_uma(dono):
                         await self._esperar()
             finally:
@@ -166,10 +209,11 @@ class PortaDeSaida:
         self._acordar.set()
 
     async def _esperar(self) -> None:
-        if self._saida_fechada:
-            # Nada sai com a porta fechada: as liberadas na hora esperam a reabertura, sem consultar o banco
-            # a cada instante.
+        if self._saida_fechada or self._cofre_mudo_no_envio:
+            # Nada sai com a porta fechada (ou com o cofre sem responder): as liberadas na hora esperam, sem
+            # consultar o banco nem o cofre a cada instante.
             espera = self.varredura
+            self._cofre_mudo_no_envio = False
         else:
             async with self.engine.connect() as c:
                 falta = (
@@ -183,6 +227,10 @@ class PortaDeSaida:
             espera = self.varredura if falta is None else max(0.0, min(self.varredura, float(falta)))
             if espera <= 0:
                 espera = 0.05
+        if self.cofre is not None and self._cofre_conferido_em is not None:
+            # Acorda a tempo da proxima conferencia do cofre, mesmo com a saida fechada.
+            falta_cofre = self._cofre_conferido_em + self.conferir_cofre - self._relogio()
+            espera = max(0.05, min(espera, falta_cofre))
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._acordar.wait(), timeout=espera)
         self._acordar.clear()
@@ -197,7 +245,100 @@ class PortaDeSaida:
             async with dono.begin():
                 yield dono
 
+    # Cofre
+
+    def _hora_de_conferir_o_cofre(self) -> bool:
+        if self.cofre is None:
+            return False
+        if self._cofre_trancado_na_chamada or self._cofre_conferido_em is None:
+            return True
+        return self._relogio() - self._cofre_conferido_em >= self.conferir_cofre
+
+    def _contar(self, leitura: saida_cofre.Leitura, agora: float) -> None:
+        self._cofre_sem_resposta = self._cofre_sem_resposta + 1 if leitura is saida_cofre.Leitura.FORA_DO_AR else 0
+        if leitura is saida_cofre.Leitura.DESTRAVADO:
+            if self._cofre_destravado == 0:
+                self._cofre_destravado_desde = agora
+            self._cofre_destravado += 1
+        else:
+            self._cofre_destravado = 0
+            self._cofre_destravado_desde = None
+
+    async def conferir_o_cofre(self, dono: AsyncConnection | None = None) -> saida_cofre.Decisao:
+        """Confere a saude do cofre e fecha ou reabre a saida, ou avisa o ADMIN (``saida.cofre``). Sem cliente do
+        cofre, nada faz.
+
+        Depois de uma chamada ao cofre responder "trancado", vale essa resposta, sem perguntar de novo. A mudanca
+        e gravada na conexao da trava (``dono``): se ela cair, nada muda."""
+        if self.cofre is None:
+            return saida_cofre.NADA
+        if self._cofre_trancado_na_chamada:
+            leitura = saida_cofre.Leitura.TRANCADO
+        else:
+            leitura = await saida_cofre.ler(self.cofre)
+        agora = self._relogio()
+        self._cofre_trancado_na_chamada = False
+        self._cofre_conferido_em = agora
+        self._contar(leitura, agora)
+        pronta = saida_cofre.pronta_para_reabrir(
+            self._cofre_destravado,
+            agora - (self._cofre_destravado_desde if self._cofre_destravado_desde is not None else agora),
+            saida_instavel=self._cofre_instavel,
+        )
+        async with self.engine.connect() as c:
+            saida = await estado.ler_saida(c)
+        avisado = self._cofre_avisado[1] if self._cofre_avisado and self._cofre_avisado[0] == saida.mudou_em else None
+        # Sem mudanca nem aviso a fazer (o caso de quase todas as voltas), nada de trava exclusiva.
+        previa = saida_cofre.decidir(leitura, self._cofre_sem_resposta, saida, pronta=pronta, avisado_trancado=avisado)
+        if previa.passo is saida_cofre.Passo.NADA:
+            return saida_cofre.NADA
+        instavel = saida_cofre.instavel(None if self._cofre_reabriu_em is None else agora - self._cofre_reabriu_em)
+        async with self._transacao(dono) as c:
+            decisao, vista = await saida_cofre.aplicar(
+                c,
+                leitura,
+                self._cofre_sem_resposta,
+                emails_admin=self.emails_admin,
+                papel="despachante",
+                pronta=pronta,
+                instavel_ao_fechar=instavel,
+            )
+        if saida_cofre.fechada_por_outro(vista) and leitura is not saida_cofre.Leitura.FORA_DO_AR:
+            # O que o ADMIN ja sabe deste fechamento: as proximas conferencias nao leem o extrato de novo.
+            self._cofre_avisado = (vista.mudou_em, leitura is saida_cofre.Leitura.TRANCADO)
+        if decisao.passo is saida_cofre.Passo.FECHAR:
+            self._saida_fechada = True
+            if decisao.motivo == saida_cofre.MOTIVO_FORA_DO_AR:
+                self._cofre_instavel = instavel
+        elif decisao.passo is saida_cofre.Passo.REABRIR:
+            self._saida_fechada = False
+            if vista.motivo == saida_cofre.MOTIVO_FORA_DO_AR:
+                # So conta a reabertura depois de "sem resposta": e ela que diz se a rede vai e volta.
+                self._cofre_reabriu_em = agora
+            self._cofre_instavel = False
+        if decisao.passo is not saida_cofre.Passo.NADA:
+            CONTADORES.somar("saida_pelo_cofre", passo=str(decisao.passo))
+        return decisao
+
+    async def _cofre_deixa_seguir(self) -> bool | None:
+        """Pergunta ao cofre logo antes de "enviando". ``None``: pode seguir. ``True``: trancado (a proxima volta
+        fecha a saida). ``False``: sem resposta (a porta espera; a conferencia conta as falhas e fecha na segunda
+        seguida). Nos dois casos a acao continua liberada."""
+        if self.cofre is None:
+            return None
+        leitura = await saida_cofre.ler(self.cofre)
+        if leitura is saida_cofre.Leitura.TRANCADO:
+            self._cofre_trancado_na_chamada = True
+            return True
+        if leitura is saida_cofre.Leitura.FORA_DO_AR:
+            self._cofre_mudo_no_envio = True
+            return False
+        return None
+
     async def assumir(self, dono: AsyncConnection | None = None) -> list[str]:
+        # Outra copia pode ter segurado a porta e avisado o ADMIN do cofre nesse meio tempo: o que esta porta
+        # lembrava dos avisos nao vale mais, e a proxima conferencia rele o extrato.
+        self._cofre_avisado = None
         async with self._transacao(dono) as c:
             retomadas = await fila.retomar_enviando(c, quem=fila.QUEM_RETOMA)
             await registrar(c, papel="despachante", tipo="despachante_assumiu", campos={"retomadas": len(retomadas)})
@@ -233,6 +374,10 @@ class PortaDeSaida:
             # Volta completa: as puladas entram de novo na proxima, depois da espera.
             self._puladas.clear()
             return False
+        # Com o cofre trancado ou sem resposta, nenhuma chave abriria: a acao nao vira "enviando" e espera.
+        espera_o_cofre = await self._cofre_deixa_seguir()
+        if espera_o_cofre is not None:
+            return espera_o_cofre
         async with self._transacao(dono) as c:
             await travas.compartilhar_envio(c, candidata.pessoa_id, candidata.aplicativo_id, candidata.sistema_id)
             if not (await estado.ler_saida(c)).aberta:
@@ -423,6 +568,14 @@ class PortaDeSaida:
             return None, None, "a autorizacao no sistema venceu"
         except renovacao.RenovacaoIndisponivel:
             return None, None, "nao deu para renovar a chave"
+        except CofreTrancado:
+            # O cofre trancou depois da pergunta de antes de "enviando" (uma fracao de segundo). A conferencia do
+            # cofre fecha a saida na proxima volta, sem esperar o intervalo. Esta acao ja estava "enviando" e nao
+            # sai: nenhuma chave abre com o cofre trancado.
+            if self.cofre is not None:
+                self._cofre_trancado_na_chamada = True
+            log.warning("chave_com_cofre_trancado")
+            return None, None, "o cofre de chaves esta trancado"
         except Exception:
             log.exception("chave_indisponivel")
             return None, None, "o cofre de chaves nao respondeu"

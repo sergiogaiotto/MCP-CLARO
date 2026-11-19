@@ -314,8 +314,14 @@ async def test_vigia_sem_resposta_fecha_a_saida(banco: Banco) -> None:
     r = await conferir_continuidade(banco.despachante, None)
     assert r.motivos == ("vigia_sem_resposta",)
     assert await banco.valor("SELECT aberta FROM estado_saida") is False
-    # Sem sinal de restauracao: o motivo diz que a fila nao parou, e nada fala em restauracao.
-    motivo = f"o vigia nao respondeu; {SEM_SINAL_DE_RESTAURACAO}"
+    # Sem sinal de restauracao: o motivo diz que a fila nao parou, e nada fala em restauracao. Frases curtas,
+    # sem dois-pontos encadeados e sem promessa de saida.
+    motivo = (
+        "o vigia nao respondeu e nao houve sinal de banco restaurado. A fila de saida nao parou. Quando a saida"
+        " reabrir, o que espera volta a ser conferido antes de sair. A acao de um aplicativo que continua pausado"
+        " fica parada e nao sai"
+    )
+    assert motivo == f"o vigia nao respondeu e {SEM_SINAL_DE_RESTAURACAO}"
     texto = await banco.valor("SELECT frase FROM extrato WHERE tipo = 'continuidade_nao_confere'")
     assert texto == frase("continuidade_nao_confere", motivo=motivo)
     assert await banco.valor("SELECT motivo FROM estado_saida") == motivo

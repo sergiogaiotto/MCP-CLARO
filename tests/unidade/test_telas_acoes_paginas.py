@@ -277,8 +277,6 @@ def test_destinatarios_legiveis_e_alvo_da_ampliacao() -> None:
 
 
 def test_frases_novas_do_extrato() -> None:
-    assert frase("limite_criado_sem_passkey", por_dia=2, ferramenta="m").endswith("instalacao).")
-    assert frase("limite_ampliado_sem_passkey", por_dia=2, ferramenta="m").startswith("A pessoa ampliou")
     assert frase("limite_criado_login_refeito", por_dia=2, ferramenta="m") == (
         "A pessoa criou um limite de 2 por dia para m, com o login refeito na hora (passkey desligada nesta"
         " instalacao)."

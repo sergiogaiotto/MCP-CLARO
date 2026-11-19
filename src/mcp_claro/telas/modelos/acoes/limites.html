@@ -20,7 +20,7 @@
   <tbody>
   {% for x in ativos %}
     <tr>
-      <td>{{ x.linha.ferramenta }} <span class="dica">pelo aplicativo {{ x.linha.aplicativo }}, no sistema {{ x.linha.sistema }}</span>{% if x.nao_vale_com_passkey %}<br><strong>Não vale com a passkey ligada.</strong> <span class="dica">Foi criado sem a passkey: as ações dele passam pela ficha. Encerre e crie outro, com a passkey.</span>{% endif %}</td>
+      <td>{{ x.linha.ferramenta | escondidos }} <span class="dica">pelo aplicativo {{ x.linha.aplicativo }}, no sistema {{ x.linha.sistema }}</span>{% if x.nao_vale_com_passkey %}<br><strong>Não vale com a passkey ligada.</strong> <span class="dica">Foi criado ou ampliado sem a passkey: as ações dele passam pela ficha. Encerre e crie outro, com a passkey.</span>{% endif %}</td>
       <td>{{ x.destinatarios }}</td>
       <td>{{ x.linha.usados_hoje }} de {{ x.linha.por_dia }}</td>
       <td>{{ x.linha.valido_ate | data_hora }}</td>
@@ -57,7 +57,7 @@
 <h2>Terminados</h2>
 <ul>
   {% for x in terminados %}
-  <li>{{ x.linha.ferramenta }} pelo aplicativo {{ x.linha.aplicativo }}: {{ x.situacao }}{% if x.linha.motivo %} ({{ x.linha.motivo }}){% endif %}.</li>
+  <li>{{ x.linha.ferramenta | escondidos }} pelo aplicativo {{ x.linha.aplicativo }}: {{ x.situacao }}{% if x.linha.motivo %} ({{ x.linha.motivo }}){% endif %}.</li>
   {% endfor %}
 </ul>
 {% endif %}

@@ -4,6 +4,8 @@
  * no envio, pede um desafio novo ao servidor (POST em data-desafio, com o token CSRF do formulario),
  * chama o navegador e manda a resposta no campo escondido "credencial". Quem confere e o servidor,
  * no mesmo envio que confirma. Nada de segredo fica aqui.
+ * Se o servidor recusa o desafio com um passo seguinte ({"erro", "link": {"caminho", "texto"}}), o aviso
+ * mostra a frase e um botao para esse caminho (so caminho local, comecando com uma barra).
  */
 (function () {
   "use strict";
@@ -74,9 +76,30 @@
     };
   }
 
-  function avisar(form, texto) {
+  function linkLocal(link) {
+    if (!link || typeof link.caminho !== "string" || typeof link.texto !== "string") { return null; }
+    var c = link.caminho;
+    // So caminho deste site: comeca com uma barra so e nao tem barra invertida nem caractere de controle em
+    // lugar nenhum (o navegador apaga TAB e quebra de linha antes de ler o endereco: "/<TAB>/outro.site" viraria
+    // "//outro.site").
+    if (!/^\/(?![\/\\])[^\u0000-\u001f\u007f\\]*$/.test(c)) { return null; }
+    return { caminho: c, texto: link.texto };
+  }
+
+  function avisar(form, texto, link) {
     var caixa = form.querySelector("[data-passkey-aviso]");
-    if (caixa) { caixa.textContent = texto; caixa.hidden = false; } else { window.alert(texto); }
+    if (!caixa) { window.alert(texto); return; }
+    caixa.textContent = texto;
+    if (link) {
+      var a = document.createElement("a");
+      a.className = "botao";
+      a.setAttribute("href", link.caminho);
+      a.setAttribute("hx-boost", "false");
+      a.textContent = link.texto;
+      caixa.appendChild(document.createTextNode(" "));
+      caixa.appendChild(a);
+    }
+    caixa.hidden = false;
   }
 
   function frase(erro) {
@@ -114,6 +137,7 @@
         if (!resposta.ok || !dados.publicKey) {
           var erro = new Error(dados.erro || "Não deu para pedir a passkey agora.");
           erro.passkey = true;
+          erro.link = linkLocal(dados.link);
           throw erro;
         }
         return dados.publicKey;
@@ -128,7 +152,7 @@
       form.submit();
     }).catch(function (erro) {
       botoes.forEach(function (b) { b.disabled = false; });
-      avisar(form, frase(erro));
+      avisar(form, frase(erro), erro && erro.passkey ? erro.link : null);
     });
   }, true);
 })();

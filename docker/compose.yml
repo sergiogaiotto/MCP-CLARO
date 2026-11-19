@@ -382,9 +382,25 @@ services:
 
   # So no roteiro de restauracao (docs/restauracao.md), nunca sobe sozinho:
   #   docker compose ... --profile restauracao run --rm restaurar-logico /var/lib/mcp-claro-backup/logico/<carimbo>
-
-  # So no roteiro de restauracao (docs/restauracao.md), nunca sobe sozinho:
-  #   docker compose ... --profile restauracao run --rm restaurar-logico /var/lib/mcp-claro-backup/logico/<carimbo>
+  # Usa o dono do servidor (db_migracao) e a senha da cifra (backup_cifra), que voltam do lugar seguro.
+  restaurar-logico:
+    image: mcp-claro-backup:dev
+    profiles: ["restauracao"]
+    restart: "no"
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    entrypoint: ["/usr/local/bin/restaurar-logico.sh"]
+    secrets:
+      - backup_cifra
+      - db_migracao
+      - ca_interna.pem
+    volumes:
+      - backup_local:/var/lib/mcp-claro-backup:ro
+    logging:
+      driver: local
+    networks: [interna]
 
   portao:
     build: ./caddy
