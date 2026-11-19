@@ -347,6 +347,97 @@ FRASES: Final[dict[str, Frase]] = {
             "A porta de saida continua fechada: o cofre voltou a responder, mas esta trancado. Ela reabre quando ele"
             " for destravado, se ninguem a mudar antes.",
         ),
+        # Fase 3: servidores de terceiros. Nenhuma frase leva texto, link, esquema ou versao crua do servidor: so
+        # nomes do cadastro, categorias do nosso vocabulario e numeros.
+        Frase(
+            "admin_terceiro_cadastrado",
+            "Servidor de terceiros {sistema} cadastrado por {quem}; sera atendido na sala de visitas; falta a"
+            " sondagem de versao.",
+        ),
+        Frase(
+            "admin_servidor_revisado",
+            "Servidor de terceiros {sistema} revisado por {quem}: {publicadas} ferramentas na vitrine, {fora} de fora.",
+        ),
+        Frase("admin_servidor_revisao_recusada", "Revisao do servidor {sistema} nao concluida: {motivo}."),
+        Frase(
+            "sistema_em_quarentena",
+            "Servidor {sistema} em quarentena: mudou, parou. Ele mudou depois da revisao; nada dele segue ate nova"
+            " revisao do ADMIN.",
+        ),
+        Frase(
+            "sistema_em_quarentena_sem_resposta",
+            "Servidor {sistema} em quarentena: nao respondeu a conferencia em {rodadas} rodadas seguidas; nada dele"
+            " segue ate nova revisao do ADMIN.",
+        ),
+        Frase(
+            "sistema_saiu_da_quarentena",
+            "Servidor {sistema} saiu da quarentena pela revisao de {quem}; o que ele declara bate com o que foi"
+            " revisado.",
+        ),
+        Frase(
+            "leitura_sistema_pediu_dados",
+            "O sistema {sistema} pediu {pedidos} no meio da leitura em {ferramenta}; o MCP-CLARO recusou e nao"
+            " repassou o pedido.",
+        ),
+        Frase(
+            "programa_leitura_sistema_pediu_dados",
+            "O sistema {sistema} pediu {pedidos} no meio da leitura em {ferramenta}, pelo programa {programa},"
+            " responsavel {responsavel}; o MCP-CLARO recusou e nao repassou o pedido.",
+        ),
+        Frase(
+            "tres_sinais",
+            "Alerta dos tres sinais no protocolo {protocolo}: o aplicativo leu texto de fora em {de_fora} e viu dados"
+            " pessoais em {privado}; nenhum limite valeu, e a acao foi para a ficha.",
+        ),
+        Frase("limite_suspenso", "O limite de {ferramenta} foi suspenso: {motivo}."),
+        Frase(
+            "sala_desvio_recusado",
+            "O servidor de terceiros {sistema} pediu para mandar o pedido a outro endereco; o MCP-CLARO nao seguiu.",
+        ),
+        Frase(
+            "sala_endereco_recusado",
+            "O endereco do servidor de terceiros {sistema} nao e publico ou nao usa https; nada foi enviado.",
+        ),
+        Frase(
+            "sala_fora",
+            "A sala de visitas nao esta disponivel; nada foi enviado ao servidor de terceiros {sistema}.",
+        ),
+    )
+}
+
+
+@dataclass(frozen=True, slots=True)
+class AvisoAdmin:
+    """Aviso ao ADMIN por e-mail e webhook: assunto fixo e texto com campos, sem acento, como as frases."""
+
+    evento: str
+    assunto: str
+    texto: str
+
+    def campos(self) -> set[str]:
+        return {nome for _, nome, _, _ in Formatter().parse(self.texto) if nome}
+
+
+# Fase 3: avisos novos ao ADMIN (nenhum aviso novo as pessoas, D16: so o extrato).
+AVISOS_ADMIN: Final[dict[str, AvisoAdmin]] = {
+    a.evento: a
+    for a in (
+        AvisoAdmin(
+            "sistema_em_quarentena",
+            "MCP-CLARO: servidor de terceiros em quarentena (mudou, parou)",
+            "O servidor de terceiros {sistema} mudou {quantas} ferramentas (mudadas, novas ou sumidas) depois da"
+            " revisao do servidor. Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi"
+            " cancelado e os limites das pessoas com ele foram suspensos. Para voltar, leia as ferramentas, revise as"
+            " que mudaram e conclua a revisao do servidor nas telas do ADMIN.",
+        ),
+        AvisoAdmin(
+            "sistema_em_quarentena_sem_resposta",
+            "MCP-CLARO: servidor de terceiros em quarentena (nao respondeu a conferencia)",
+            "O servidor de terceiros {sistema} nao respondeu a conferencia do mudou-parou em {rodadas} rodadas"
+            " seguidas. Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi cancelado e"
+            " os limites das pessoas com ele foram suspensos. Confira o servidor com o fornecedor; depois, leia as"
+            " ferramentas e conclua a revisao do servidor nas telas do ADMIN.",
+        ),
     )
 }
 
@@ -366,3 +457,16 @@ def frase(tipo: str, **campos: object) -> str:
     if faltam or sobram:
         raise ValueError(f"Frase {tipo}: faltam {sorted(faltam)}, sobram {sorted(sobram)}")
     return f.modelo.format(**campos)
+
+
+def aviso_admin(evento: str, **campos: object) -> tuple[str, str]:
+    """Assunto e texto de um aviso ao ADMIN, exigindo exatamente os campos do texto."""
+    try:
+        a = AVISOS_ADMIN[evento]
+    except KeyError as erro:
+        raise FraseDesconhecida(evento) from erro
+    faltam = a.campos() - campos.keys()
+    sobram = campos.keys() - a.campos()
+    if faltam or sobram:
+        raise ValueError(f"Aviso {evento}: faltam {sorted(faltam)}, sobram {sorted(sobram)}")
+    return a.assunto, a.texto.format(**campos)
