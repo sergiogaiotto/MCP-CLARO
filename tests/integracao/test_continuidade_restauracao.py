@@ -74,6 +74,16 @@ def rodar_script(script: str, ambiente: dict[str, str], volumes: dict[Path, tupl
     return saida
 
 
+def versao_mais_nova() -> str:
+    """A ultima migracao do repositorio: a copia restaurada volta na versao em que foi feita."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cabeca = ScriptDirectory.from_config(Config(str(RAIZ / "alembic.ini"))).get_current_head()
+    assert cabeca is not None
+    return cabeca
+
+
 def liberar_para_o_teste(pasta: Path) -> None:
     """A copia sai com pastas 700 e arquivos 600, do usuario postgres do conteiner (como deve ser). O teste
     roda com outro usuario na maquina (no CI, o do executor): abre a leitura so desta pasta temporaria,
@@ -296,7 +306,7 @@ async def test_restauracao_num_servidor_novo_e_lida_e_percebida(copia: Copia, no
         # fechamento guardado confere com a conta refeita sobre as linhas da copia.
         assert linhas == copia.linhas_extrato + 1
         assert confere is True
-        assert versao == "0004"
+        assert versao == versao_mais_nova()
         assert ajustes is not None
         assert "default_transaction_read_only=on" in ajustes
         assert pode is True
@@ -311,11 +321,13 @@ async def test_restauracao_num_servidor_novo_e_lida_e_percebida(copia: Copia, no
             aberta = (await c.execute(text("SELECT aberta FROM estado_saida"))).scalar_one()
             tipos = [t for (t,) in (await c.execute(text("SELECT tipo FROM extrato ORDER BY id"))).all()]
         assert aberta is False
-        assert tipos[-4:] == [
+        assert tipos[-5:] == [
             "estado_saida_mudou",
             "restauracao_detectada",
             "intervalo_perdido",
             "aplicativo_pausado_continuidade",
+            # Fase 2: a fila de saida para na mesma transacao.
+            "fila_parada_restauracao",
         ]
     finally:
         await dono.dispose()
