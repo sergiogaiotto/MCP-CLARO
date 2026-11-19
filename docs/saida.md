@@ -78,9 +78,9 @@ Com o cofre trancado ou sem resposta, a ação em geral não vira "não saiu": o
 de marcar "enviando", e a ação espera. Ela só vira "não saiu" se o cofre trancar ou parar de responder no curto
 intervalo entre essa pergunta e a abertura da chave (em geral, menos de um segundo; mais, quando a chave da
 pessoa precisa ser renovada). O detalhe diz "o cofre de chaves está trancado" ou "o cofre de chaves não
-respondeu". O cofre que responde mas recusa (por exemplo, um acesso do despachante vencido) não fecha a porta:
-cada ação daquele sistema vira "não saiu", com o detalhe "não deu para abrir a chave no cofre", até alguém
-corrigir o acesso.
+respondeu". O cofre que responde mas recusa não fecha a porta: cada ação cuja chave ele recusa vira "não saiu",
+com o detalhe "não deu para abrir a chave no cofre". Com o acesso do próprio despachante ao cofre vencido, isso
+vale para a ação de qualquer sistema, até alguém corrigir o acesso.
 
 ## Limites por aproximação
 
@@ -158,7 +158,8 @@ aberta:
   passa antes da conferência seguinte não fecha a porta.
 
 Com a porta fechada, nenhuma ação nova ganha número. O que já estava na fila espera, sem virar "não saiu".
-Na tela da ação, a pessoa lê que a porta de saída está fechada e que a ação sai quando ela reabrir.
+Na tela da ação liberada, a pessoa lê que a porta de saída está fechada e que a ação sai quando ela reabrir (e
+não antes da hora marcada).
 Quando a porta reabre, cada ação é conferida de novo antes de sair. O extrato registra o fechamento. O ADMIN
 recebe um aviso por e-mail (`NOTIFY_ADMIN_EMAILS`) e pelos webhooks que assinam o evento `cofre_trancado` ou
 todos os eventos.

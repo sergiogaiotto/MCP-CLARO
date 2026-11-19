@@ -336,9 +336,9 @@ class PortaDeSaida:
         return None
 
     async def assumir(self, dono: AsyncConnection | None = None) -> list[str]:
-        # Outra copia pode ter segurado a porta nesse meio tempo, conferido o cofre e avisado o ADMIN: o que esta
-        # porta lembrava (avisos, conferencias seguidas, chamada que respondeu trancado) nao vale mais. Ela confere
-        # o cofre na hora, como uma porta nova, e rele o extrato. Fica so a memoria da espera de 30 minutos.
+        # Outra copia pode ter segurado a porta nesse meio tempo, conferido o cofre, fechado ou reaberto a saida e
+        # avisado o ADMIN: o que esta porta lembrava (avisos, conferencias seguidas, chamada que respondeu trancado,
+        # espera de 30 minutos) nao vale mais. Ela confere o cofre na hora, como uma porta nova, e rele o extrato.
         self._cofre_avisado = None
         self._cofre_conferido_em = None
         self._cofre_sem_resposta = 0
@@ -346,6 +346,8 @@ class PortaDeSaida:
         self._cofre_destravado_desde = None
         self._cofre_trancado_na_chamada = False
         self._cofre_mudo_no_envio = False
+        self._cofre_reabriu_em = None
+        self._cofre_instavel = False
         async with self._transacao(dono) as c:
             retomadas = await fila.retomar_enviando(c, quem=fila.QUEM_RETOMA)
             await registrar(c, papel="despachante", tipo="despachante_assumiu", campos={"retomadas": len(retomadas)})

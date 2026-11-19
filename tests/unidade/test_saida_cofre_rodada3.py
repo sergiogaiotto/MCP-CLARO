@@ -315,7 +315,7 @@ async def test_detalhe_da_chave_diz_se_o_cofre_nao_respondeu_ou_recusou(erro: Ex
 
 async def test_assumir_de_novo_esquece_o_que_a_porta_lembrava_do_cofre(monkeypatch: pytest.MonkeyPatch) -> None:
     """Outra copia pode ter segurado a porta: as contagens seguidas, a chamada que respondeu trancado e os avisos
-    lembrados recomecam, e a porta confere o cofre na hora. So a memoria da espera de 30 minutos fica."""
+    lembrados e a espera de 30 minutos recomecam, e a porta confere o cofre na hora."""
     from mcp_claro.saida import despachante as modulo
 
     saude = Saude(EstadoCofre(inicializado=True, trancado=False, versao="2.7.0"))
@@ -351,7 +351,7 @@ async def test_assumir_de_novo_esquece_o_que_a_porta_lembrava_do_cofre(monkeypat
     assert porta._hora_de_conferir_o_cofre() is True
     assert (porta._cofre_sem_resposta, porta._cofre_destravado, porta._cofre_destravado_desde) == (0, 0, None)
     assert (porta._cofre_trancado_na_chamada, porta._cofre_mudo_no_envio, porta._cofre_avisado) == (False, False, None)
-    assert (porta._cofre_reabriu_em, porta._cofre_instavel) == (7.0, True)
+    assert (porta._cofre_reabriu_em, porta._cofre_instavel) == (None, False)
 
 
 def test_aviso_de_fechar_de_novo_diz_quando_conta_a_espera() -> None:
@@ -364,3 +364,12 @@ def test_aviso_de_fechar_de_novo_diz_quando_conta_a_espera() -> None:
 
 def test_frase_do_cofre_que_passa_a_trancado() -> None:
     assert frase("cofre_passou_a_trancado").startswith("A porta de saida continua fechada: o cofre voltou a responder")
+
+
+def test_tipos_escritos_na_consulta_dos_avisos_sao_os_das_constantes() -> None:
+    """A consulta de ``avisado_trancado`` escreve os tipos no texto (para o indice parcial valer no plano generico)."""
+    import inspect
+
+    fonte = inspect.getsource(cofre.avisado_trancado)
+    assert f"'{cofre.TIPO_TRANCADO_COM_SAIDA_FECHADA}'" in fonte
+    assert f"'{cofre.TIPO_DESTRAVADO_COM_SAIDA_FECHADA}'" in fonte

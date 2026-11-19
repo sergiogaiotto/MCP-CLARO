@@ -251,19 +251,33 @@ async def aplicativos_pausados(c: AsyncConnection) -> Sequence[Row[Any]]:
 
 
 async def intervalo_que_pode_faltar(c: AsyncConnection) -> Row[Any] | None:
-    """Da conferencia do banco que pausou os aplicativos ainda pausados: entre quando e quando pode faltar algo no
-    extrato (a linha ``intervalo_perdido``, gravada na mesma transacao que pausou). ``None``: sem aplicativo
-    pausado, ou sem a linha."""
-    return (
+    """Entre quando e quando pode faltar algo no extrato, para os aplicativos ainda pausados (menos o de programa
+    encerrado): junta as linhas ``intervalo_perdido`` da conferencia do banco desde a pausa mais antiga que ainda
+    vale (a linha ``aplicativo_pausado_continuidade`` mais nova de cada um; a do intervalo e da mesma transacao) e
+    as das partidas seguintes que tambem nao conferiram. ``None``: sem a linha.
+
+    As duas buscas passam pelo indice parcial ``extrato_saida_cofre_idx`` (migracao 0005), que cobre esses tipos:
+    sao linhas raras, e a tela nao percorre o resto do extrato."""
+    linha = (
         await c.execute(
             text(
-                "SELECT (dados->>'desde')::timestamptz AS desde, (dados->>'ate')::timestamptz AS ate FROM extrato"
-                " WHERE tipo = 'intervalo_perdido' AND pessoa_id IS NULL"
-                " AND criado_em >= (SELECT min(atualizado_em) FROM aplicativos WHERE situacao = 'pausado')"
-                " ORDER BY criado_em DESC, id DESC LIMIT 1"
+                "WITH pausa AS ("
+                " SELECT e.criado_em, e.xid FROM aplicativos a"
+                " CROSS JOIN LATERAL (SELECT criado_em, xid FROM extrato"
+                "   WHERE tipo = 'aplicativo_pausado_continuidade' AND aplicativo_id = a.id"
+                "   ORDER BY criado_em DESC, id DESC LIMIT 1) e"
+                " WHERE a.situacao = 'pausado' AND NOT EXISTS (SELECT 1 FROM programas pr"
+                "   WHERE pr.aplicativo_id = a.id AND pr.situacao = 'encerrado')"
+                " ORDER BY e.criado_em LIMIT 1)"
+                " SELECT min((x.dados->>'desde')::timestamptz) AS desde, max((x.dados->>'ate')::timestamptz) AS ate"
+                " FROM extrato x, pausa"
+                " WHERE x.tipo = 'intervalo_perdido' AND x.pessoa_id IS NULL"
+                " AND (x.criado_em >= pausa.criado_em OR x.xid = pausa.xid)"
+                " AND x.criado_em >= pausa.criado_em - interval '1 hour'"
             )
         )
     ).first()
+    return linha if linha is not None and linha.desde is not None else None
 
 
 async def reativar_assistente(c: AsyncConnection, aplicativo_id: uuid.UUID) -> Row[Any] | None:

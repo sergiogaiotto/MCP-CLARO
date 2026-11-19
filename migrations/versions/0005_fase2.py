@@ -392,10 +392,12 @@ GRANT EXECUTE ON FUNCTION continuidade_marcar_restaurado(text, text) TO mcp_clar
 COFRE_RODADA3 = r"""
 -- Terceira rodada: cofre e porta de saida. Com a saida fechada, a conferencia do cofre (e quem fecha de novo a
 -- saida ja fechada) procura no extrato, desde o fechamento, os avisos do cofre e a linha do proprio fechamento,
--- com a trava exclusiva de "tudo". Este indice parcial deixa a busca passar so por essas linhas, e nao pelo
--- extrato inteiro do periodo. O indice do pai vale para as particoes de agora e para as criadas depois.
+-- com a trava exclusiva de "tudo". A tela Aplicativos procura a pausa da conferencia do banco e o intervalo que
+-- pode faltar. Este indice parcial deixa as buscas passarem so por essas linhas, e nao pelo extrato inteiro do
+-- periodo. O indice do pai vale para as particoes de agora e para as criadas depois.
 CREATE INDEX extrato_saida_cofre_idx ON extrato (criado_em, id)
-  WHERE tipo IN ('cofre_trancado_saida_fechada', 'cofre_destravado_saida_fechada', 'estado_saida_mudou');
+  WHERE tipo IN ('cofre_trancado_saida_fechada', 'cofre_destravado_saida_fechada', 'estado_saida_mudou',
+                 'intervalo_perdido', 'aplicativo_pausado_continuidade');
 -- Fim da terceira rodada: cofre e porta de saida.
 """
 

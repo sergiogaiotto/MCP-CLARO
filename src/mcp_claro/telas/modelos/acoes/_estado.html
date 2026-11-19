@@ -13,7 +13,7 @@
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit" class="secundario">Seguir agora</button>
   </form>
-  <p class="dica">Cancelar: nada chega ao sistema. Seguir agora: sai sem esperar o resto do tempo.</p>
+  <p class="dica">Cancelar: nada chega ao sistema. Seguir agora: {% if saida_aberta is defined and not saida_aberta %}deixa de esperar o resto do tempo, mas só sai quando a porta de saída reabrir.{% else %}sai sem esperar o resto do tempo.{% endif %}</p>
   <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>
   {% elif a.op.estado == "enviando" %}
   <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>

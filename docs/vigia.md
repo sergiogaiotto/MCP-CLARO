@@ -184,14 +184,14 @@ com o valor inicial enquanto não entram em `config/settings.py`.
 
 | Parâmetro | Tipo | Valor inicial | Quem lê | Regra de recusa |
 | --- | --- | --- | --- | --- |
-| `PATROL_CLIENT_ID` | texto | `mcp-claro-ronda` | rotinas | Vazio |
+| `PATROL_CLIENT_ID` | texto | `mcp-claro-ronda` | rotinas e despachante (a conferência do banco na partida não pausa a ronda) | Vazio |
 | `PATROL_KEY_FILE` | caminho | nenhum | rotinas | Obrigatório em piloto e produção |
 | `PATROL_KEY_ID` | texto | nenhum | rotinas | |
 | `PATROL_TOKEN_URL` | URL | derivado do emissor (Keycloak) ou descoberta OIDC | rotinas | Fora de `https://` em piloto e produção |
 | `PATROL_TOKEN_SCOPE` | texto | `mcp-claro` | rotinas | |
 | `PATROL_OTHER_AUDIENCE_SCOPE` | texto | `outro-servico` | rotinas | Vazio desliga o caso |
 | `PATROL_CA_FILE` | caminho | nenhum | rotinas | Só em desenvolvimento |
-| `WATCH_CLIENT_ID` | texto | `mcp-claro-vigia` | vigia, entrada e rotinas (a rotina dos programas não pausa o vigia) | Vazio |
+| `WATCH_CLIENT_ID` | texto | `mcp-claro-vigia` | vigia, entrada, rotinas e despachante (a rotina dos programas e a conferência do banco não pausam o vigia) | Vazio |
 | `WATCH_KEY_FILE` | caminho | nenhum | vigia | Obrigatório em piloto e produção |
 | `WATCH_KEY_ID` | texto | nenhum | vigia | |
 | `WATCH_TOKEN_URL` | URL | como `PATROL_TOKEN_URL` | vigia | Fora de `https://` em piloto e produção |

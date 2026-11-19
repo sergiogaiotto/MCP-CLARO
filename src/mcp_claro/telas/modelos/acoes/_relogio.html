@@ -4,6 +4,10 @@
   <p>{{ a.frase }}</p>
   {% if a.op.estado == "liberada" %}
   <p class="relogio">Sai às <strong>{{ a.hora_saida }}</strong> (horário de Brasília).</p>
-  <p>{% if a.falta > 0 %}Faltam <strong>{{ a.falta_texto }}</strong> para sair.{% elif saida_aberta is defined and not saida_aberta %}A porta de saída está fechada agora. A ação espera e sai quando ela reabrir, depois de conferida de novo. Ainda dá para cancelar.{% else %}Está na hora: sai em instantes.{% endif %}</p>
+  {% if saida_aberta is defined and not saida_aberta %}
+  <p id="saida-fechada">A porta de saída está fechada agora. A ação espera e sai quando ela reabrir, depois de conferida de novo{% if a.falta > 0 %}, e não antes da hora marcada{% endif %}. Ainda dá para cancelar.</p>
+  {% else %}
+  <p>{% if a.falta > 0 %}Faltam <strong>{{ a.falta_texto }}</strong> para sair.{% else %}Está na hora: sai em instantes.{% endif %}</p>
+  {% endif %}
   {% endif %}
 </div>

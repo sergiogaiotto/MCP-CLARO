@@ -454,3 +454,27 @@ async def test_partida_poupa_a_ronda_e_o_vigia_pelos_client_id_desta_instalacao(
 
     situacoes = dict(await banco.linhas("SELECT id, situacao FROM aplicativos"))
     assert situacoes == {comum: "pausado", ronda: "ativo", vigia: "ativo", padrao: "pausado"}
+
+
+async def test_linha_de_comando_conferir_poupa_a_ronda_e_o_vigia_desta_instalacao(
+    banco: Banco, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O subcomando "conferir" do roteiro faz a mesma conferencia da partida, com os client_id da ronda e do vigia
+    desta instalacao."""
+    import argparse
+
+    from mcp_claro import continuidade
+    from mcp_claro.config import settings
+
+    comum = await banco.aplicativo("app-comum-cli")
+    ronda = await banco.aplicativo("ronda-cli", tipo="programa")
+    vigia = await banco.aplicativo("vigia-cli", tipo="programa")
+    await conferir_continuidade(banco.despachante, 0)
+    await marcar_restaurado(banco.despachante, "Pessoa da operacao", "Ensaio da linha de comando")
+    p = Parametros(**(banco.p.model_dump() | {"PATROL_CLIENT_ID": "ronda-cli", "WATCH_CLIENT_ID": "vigia-cli"}))
+    monkeypatch.setattr(settings, "Parametros", lambda: p)
+
+    assert await continuidade._rodar(argparse.Namespace(comando="conferir", vigia=0, sem_exigir_vigia=True)) == 0
+
+    situacoes = dict(await banco.linhas("SELECT id, situacao FROM aplicativos"))
+    assert situacoes == {comum: "pausado", ronda: "ativo", vigia: "ativo"}

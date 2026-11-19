@@ -230,9 +230,11 @@ async def test_criar_depois_da_revisao_do_admin_leva_a_criar_de_novo(amb: Ambien
 
 
 async def test_cartao_de_pausados_mostra_o_intervalo_e_a_saida_fechada(telas: test_telas.Ambiente) -> None:
-    """A conferencia do banco pausa e grava "intervalo_perdido" (sem pessoa). O cartao mostra entre quando e quando
-    pode faltar algo no extrato e leva a Bloqueios e pausas; com a saida fechada, a pagina diz isso e leva a Portas,
-    tambem depois de reativar."""
+    """A conferencia do banco pausa e grava "intervalo_perdido" (sem pessoa) na mesma transacao; uma partida
+    seguinte que tambem nao confere grava outro intervalo, sem pausar ninguem. O cartao junta os dois, desde a pausa
+    (um intervalo de antes da pausa fica de fora), e leva a Bloqueios e pausas. O aplicativo de um programa
+    encerrado nao entra no cartao. Com a saida fechada, a pagina diz isso e leva a Portas, tambem depois de
+    reativar."""
     from datetime import UTC, datetime, timedelta
     from zoneinfo import ZoneInfo
 
@@ -241,16 +243,7 @@ async def test_cartao_de_pausados_mostra_o_intervalo_e_a_saida_fechada(telas: te
     from mcp_claro.regras import estado
     from mcp_claro.regras.bloqueios import quem_admin
 
-    s = test_telas.sufixo()
-    ate = datetime.now(UTC).replace(microsecond=0)
-    desde = ate - timedelta(hours=5)
-    async with telas.engine.begin() as c:
-        pausado = await repositorio.habilitar_aplicativo(
-            c, client_id=f"pausado-int-{s}", nome=f"Pausado intervalo {s}", familia="x"
-        )
-        await c.execute(
-            text("UPDATE aplicativos SET situacao = 'pausado', atualizado_em = now() WHERE id = :i"), {"i": pausado}
-        )
+    async def intervalo(c: Any, desde: datetime, ate: datetime) -> None:
         await registrar(
             c,
             papel="despachante",
@@ -258,7 +251,63 @@ async def test_cartao_de_pausados_mostra_o_intervalo_e_a_saida_fechada(telas: te
             campos={"desde": desde.isoformat(), "ate": ate.isoformat()},
             dados={"desde": desde.isoformat(), "ate": ate.isoformat(), "fechamentos_perdidos": 1},
         )
+
+    async def pausar(c: Any, aplicativo_id: uuid.UUID, nome: str) -> None:
+        await c.execute(
+            text("UPDATE aplicativos SET situacao = 'pausado', atualizado_em = now() WHERE id = :i"),
+            {"i": aplicativo_id},
+        )
+        await registrar(
+            c,
+            papel="despachante",
+            tipo="aplicativo_pausado_continuidade",
+            campos={"aplicativo": nome},
+            aplicativo_id=aplicativo_id,
+        )
+
+    s = test_telas.sufixo()
+    agora = datetime.now(UTC).replace(microsecond=0)
+    antigo, desde, ate_1, ate_2 = (
+        agora - timedelta(days=800),
+        agora - timedelta(days=400),
+        agora - timedelta(hours=2),
+        agora,
+    )
+    async with telas.engine.begin() as c:
+        await intervalo(c, antigo, agora - timedelta(days=799))  # de outra vez, antes desta pausa
+    async with telas.engine.begin() as c:
+        pausado = await repositorio.habilitar_aplicativo(
+            c, client_id=f"pausado-int-{s}", nome=f"Pausado intervalo {s}", familia="x"
+        )
+        robo = await repositorio.habilitar_aplicativo(
+            c, client_id=f"robo-enc-{s}", nome=f"Robo encerrado {s}", familia="programa", tipo="programa"
+        )
+        pessoas = [
+            (
+                await c.execute(
+                    text(
+                        "INSERT INTO pessoas (emissor, sujeito, papel, situacao)"
+                        " VALUES ('https://login.teste', :s, 'pessoa', 'ativa') RETURNING id"
+                    ),
+                    {"s": f"resp-{n}-{s}"},
+                )
+            ).scalar_one()
+            for n in (1, 2)
+        ]
+        await c.execute(
+            text(
+                "INSERT INTO programas (aplicativo_id, responsavel_id, substituto_id, finalidade, fim, situacao)"
+                " VALUES (:a, :r, :s, 'teste', current_date + 30, 'encerrado')"
+            ),
+            {"a": robo, "r": pessoas[0], "s": pessoas[1]},
+        )
+        # A primeira partida que nao confere: intervalo e pausa na mesma transacao.
+        await intervalo(c, desde, ate_1)
+        await pausar(c, pausado, f"Pausado intervalo {s}")
+        await pausar(c, robo, f"Robo encerrado {s}")
         await estado.mudar_saida(c, aberta=False, quem=continuidade.QUEM, motivo="teste do cartao de pausados")
+    async with telas.engine.begin() as c:
+        await intervalo(c, ate_1, ate_2)  # a partida seguinte tambem nao confere e nao pausa ninguem
 
     nav = telas.navegador()
     admin = f"admin-int-{s}"
@@ -268,15 +317,21 @@ async def test_cartao_de_pausados_mostra_o_intervalo_e_a_saida_fechada(telas: te
     try:
         r = await nav.get("/telas/admin/aplicativos")
         assert r.status_code == 200
+        cartao = re.search(r'<section class="cartao" id="pausados">(.*?)</section>', r.text, re.S)
+        assert cartao is not None
         zona = ZoneInfo("America/Sao_Paulo")
         assert (
             "A conferência registrou que pode faltar no extrato o que aconteceu entre "
-            f"{desde.astimezone(zona):%d/%m/%Y %H:%M} e {ate.astimezone(zona):%d/%m/%Y %H:%M}."
-        ) in r.text
-        assert '<a href="/telas/admin/bloqueios">Bloqueios e pausas</a>' in r.text
+            f"{desde.astimezone(zona):%d/%m/%Y %H:%M} e {ate_2.astimezone(zona):%d/%m/%Y %H:%M}."
+        ) in cartao.group(1)
+        assert f"Pausado intervalo {s}" in cartao.group(1)
+        assert f"Robo encerrado {s}" not in cartao.group(1)
+        assert '<a href="/telas/admin/bloqueios">Bloqueios e pausas</a>' in cartao.group(1)
         assert "confira no extrato o que pode ter se perdido" not in r.text
         assert '<p class="atencao" id="saida-fechada">' in r.text
         assert '<a href="/telas/admin/portas">Portas</a>' in r.text
+        portas = await nav.get("/telas/admin/portas")
+        assert f"Robo encerrado {s}" not in portas.text
 
         r = await nav.post(f"/telas/admin/aplicativos/{pausado}/reativar", {}, csrf=token_csrf(r.text))
         r = await nav.get(r.headers["location"])
@@ -309,6 +364,12 @@ async def test_acao_na_hora_com_a_saida_fechada_diz_que_espera(amb: Ambiente, ht
     async with amb.despachante_db.begin() as c:
         await estado.mudar_saida(c, aberta=False, quem=continuidade.QUEM, motivo="teste da tela da acao")
     try:
+        # Ainda com tempo faltando: a tela ja diz que a porta esta fechada, sem prometer a hora.
+        pagina = await nav.get(f"/telas/acoes/{op.id}")
+        assert "A porta de saída está fechada agora." in pagina.text
+        assert "e não antes da hora marcada" in pagina.text
+        assert "para sair." not in pagina.text
+        assert "só sai quando a porta de saída reabrir" in pagina.text
         r = await nav.post(f"/telas/acoes/{op.id}/seguir", csrf=csrf)
         assert r.status_code == 303
         assert r.headers["location"].endswith("?aviso=seguir_agora_saida_fechada")

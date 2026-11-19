@@ -227,7 +227,8 @@ pedidos dele. Se uma ação dele ainda estiver na fila, o despachante a para na 
 da ação diz "Parada por um bloqueio ou uma pausa. Nada seguiu.", com o detalhe "o aplicativo está pausado".
 
 Cada aplicativo volta por decisão da pessoa ADMIN, um de cada vez. O cartão **Aplicativos pausados** mostra
-entre quando e quando pode faltar algo no extrato. Bloqueios e pausas ligados nesse intervalo podem ter se
+entre quando e quando pode faltar algo no extrato, desde a pausa mais antiga que ainda vale (junta as partidas
+seguintes que também não conferiram). Bloqueios e pausas ligados nesse intervalo podem ter se
 perdido: antes de reativar, pergunte às pessoas e ligue de novo, na tela **Bloqueios e pausas**, o que faltar.
 Quando há aplicativo pausado, a tela **Portas** avisa e leva à lista deles. Enquanto a porta de saída estiver
 fechada, a tela **Aplicativos** também avisa e leva à tela **Portas**.
@@ -330,7 +331,9 @@ do tempo (`timeline_id`) do PostgreSQL e compara com a última linha de `continu
 a última linha for a marca "restaurado", a conferência "não confere". Então ele, numa só transação:
 
 1. fecha a porta de saída;
-2. pausa os aplicativos ativos (menos as identidades da ronda e do vigia, que não alcançam sistema real);
+2. pausa os aplicativos ativos (menos as identidades da ronda e do vigia, que não alcançam sistema real). A
+   ronda e o vigia são reconhecidos por `PATROL_CLIENT_ID` e `WATCH_CLIENT_ID`: se a instalação usa valores
+   próprios, eles precisam estar também no ambiente do despachante;
 3. registra no extrato o motivo, o intervalo que pode ter se perdido e cada aplicativo pausado;
 4. faz a sequência do número de protocolo saltar 1.000.000 para frente (`SALTO_NA_RESTAURACAO`);
 5. com sinal de restauração (marca, identificador, linha do tempo ou fechamento mais novo no vigia), para a

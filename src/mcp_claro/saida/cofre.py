@@ -252,18 +252,17 @@ async def avisado_trancado(c: AsyncConnection, saida: estado.EstadoSaida) -> boo
     # So as linhas desde o fechamento (a particao e o indice do extrato vao pela hora): um fechamento antigo nao
     # conta, e a busca nao varre o extrato inteiro.
     desde = saida.mudou_em or datetime.min.replace(tzinfo=UTC)
+    # Os tipos vao escritos no texto (os mesmos de TIPO_TRANCADO_COM_SAIDA_FECHADA e
+    # TIPO_DESTRAVADO_COM_SAIDA_FECHADA; o teste confere): assim o plano da consulta usa o indice parcial mesmo
+    # quando o servidor guarda um plano generico.
     tipo = (
         await c.execute(
             text(
-                "SELECT tipo FROM extrato WHERE criado_em >= :desde AND tipo IN (:t, :d)"
+                "SELECT tipo FROM extrato WHERE criado_em >= :desde"
+                " AND tipo IN ('cofre_trancado_saida_fechada', 'cofre_destravado_saida_fechada')"
                 " AND dados->>'fechada_em' = :f ORDER BY criado_em DESC, id DESC LIMIT 1"
             ),
-            {
-                "desde": desde,
-                "t": TIPO_TRANCADO_COM_SAIDA_FECHADA,
-                "d": TIPO_DESTRAVADO_COM_SAIDA_FECHADA,
-                "f": _fechamento(saida),
-            },
+            {"desde": desde, "f": _fechamento(saida)},
         )
     ).scalar_one_or_none()
     if tipo is not None:

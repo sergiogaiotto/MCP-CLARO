@@ -767,7 +767,13 @@ async def test_indice_dos_avisos_do_cofre_vale_em_todas_as_particoes_do_extrato(
             )
         ).scalar_one()
     assert "(criado_em, id)" in definicao
-    for tipo in ("cofre_trancado_saida_fechada", "cofre_destravado_saida_fechada", "estado_saida_mudou"):
+    for tipo in (
+        "cofre_trancado_saida_fechada",
+        "cofre_destravado_saida_fechada",
+        "estado_saida_mudou",
+        "intervalo_perdido",
+        "aplicativo_pausado_continuidade",
+    ):
         assert tipo in definicao
     assert particoes > 0
     assert indices == particoes

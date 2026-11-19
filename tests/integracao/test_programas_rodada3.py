@@ -89,6 +89,11 @@ async def test_reativar_com_o_programa_pausado_nao_promete_que_os_pedidos_passam
     nav, csrf, programa, base = await _cadastrar(telas)
     assert (await nav.post(f"{base}/pausar", {"motivo": "Conferir"}, csrf=csrf)).status_code == 303
     await _pausar_aplicativo(telas, programa.aplicativo_id)
+    # A tela do programa leva ao intervalo (tela Aplicativos) e a Bloqueios e pausas, antes de reativar.
+    antes = (await nav.get(base)).text
+    assert '<a href="/telas/admin/aplicativos#pausados">Aplicativos</a> mostra o intervalo' in antes
+    assert '<a href="/telas/admin/bloqueios">Bloqueios e pausas</a>' in antes
+    assert "confira no extrato o que pode ter se perdido" not in antes
     r = await nav.post(f"{base}/aplicativo", {}, csrf=csrf)
     assert (r.status_code, r.headers["location"]) == (303, f"{base}?feito=programa_aplicativo_reativado")
     assert await _situacao_do_aplicativo(telas, programa.aplicativo_id) == "ativo"

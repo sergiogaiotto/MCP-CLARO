@@ -570,8 +570,11 @@ class TelasDeAcoes:
             return None
         return op
 
-    async def _saida_aberta(self) -> bool:
-        """A porta de saida esta aberta? Com ela fechada, a acao liberada espera, e a tela diz isso."""
+    async def _saida_aberta(self, op: Operacao) -> bool:
+        """A porta de saida esta aberta? Com ela fechada, a acao liberada espera, e a tela diz isso. So a liberada
+        pergunta (o relogio se atualiza a cada poucos segundos): nas outras, a resposta nao muda nada na tela."""
+        if op.estado != Estado.LIBERADA:
+            return True
         async with self.t.engine.connect() as c:
             return (await estado.ler_saida(c)).aberta
 
@@ -590,7 +593,7 @@ class TelasDeAcoes:
             {
                 "a": montar(op),
                 "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES,
-                "saida_aberta": await self._saida_aberta(),
+                "saida_aberta": await self._saida_aberta(op),
                 "aviso": self._aviso(pedido),
                 "erros": erros or [],
             },
@@ -616,7 +619,7 @@ class TelasDeAcoes:
         return self.t.pagina(
             pedido,
             "acoes/_relogio.html",
-            {"a": montar(op), "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES, "saida_aberta": await self._saida_aberta()},
+            {"a": montar(op), "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES, "saida_aberta": await self._saida_aberta(op)},
         )
 
     async def _mudar(self, pedido: Request, mudanca: str) -> Response:
@@ -651,8 +654,10 @@ class TelasDeAcoes:
             return await self._pagina_acao(pedido, operacao_id, erros=[mensagem], status=status)
         log.info("telas_acao_mudou", mudanca=mudanca)
         aviso = {"cancelar": "cancelada", "seguir": "seguir_agora"}.get(mudanca, "decisao_registrada")
-        if aviso == "seguir_agora" and not await self._saida_aberta():
-            aviso = "seguir_agora_saida_fechada"
+        if aviso == "seguir_agora":
+            async with self.t.engine.connect() as c:
+                if not (await estado.ler_saida(c)).aberta:
+                    aviso = "seguir_agora_saida_fechada"
         return ver_depois(f"/telas/acoes/{operacao_id}", aviso)
 
     @tela
