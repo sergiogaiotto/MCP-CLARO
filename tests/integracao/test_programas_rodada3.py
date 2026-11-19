@@ -98,6 +98,26 @@ async def test_reativar_com_o_programa_pausado_nao_promete_que_os_pedidos_passam
     assert "enquanto o cadastro do programa valer" not in pagina.text
 
 
+async def test_programa_encerrado_com_o_aplicativo_pausado_sai_das_listas_de_pausados(
+    telas: Telinhas,  # noqa: F811
+) -> None:
+    """Programa encerrado nao tem o que reativar: o aplicativo dele, pausado pela conferencia do banco, sai da lista
+    de pausados (``consultas.aplicativos_pausados``), que alimenta o cartao da tela Aplicativos e o aviso da tela
+    Portas. Antes de encerrar, ele esta la."""
+    from mcp_claro.telas import consultas
+
+    async def pausados() -> set[Any]:
+        async with telas.dono.connect() as c:
+            return {linha.id for linha in await consultas.aplicativos_pausados(c)}
+
+    nav, csrf, programa, base = await _cadastrar(telas)
+    await _pausar_aplicativo(telas, programa.aplicativo_id)
+    assert programa.aplicativo_id in await pausados()
+    assert (await nav.post(f"{base}/encerrar", {"motivo": "Contrato acabou"}, csrf=csrf)).status_code == 303
+    assert programa.aplicativo_id not in await pausados()
+    assert await _situacao_do_aplicativo(telas, programa.aplicativo_id) == "pausado"
+
+
 # --- Retomar a ronda ou o vigia com a data de fim vencida -------------------------------------------
 
 

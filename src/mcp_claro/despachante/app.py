@@ -72,7 +72,7 @@ async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) 
     import asyncio
     import ssl
 
-    from mcp_claro.continuidade import conferir_continuidade
+    from mcp_claro.continuidade import conferir_continuidade, poupados_de
     from mcp_claro.vigia.continuidade import numero_no_vigia
 
     numero: int | None = None
@@ -89,7 +89,9 @@ async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) 
             if numero is not None:
                 break
             await asyncio.sleep(2 * (tentativa + 1))
-    resultado = await conferir_continuidade(engine, numero, exigir_vigia=bool(p.CONTINUITY_REQUIRE_WATCH))
+    resultado = await conferir_continuidade(
+        engine, numero, exigir_vigia=bool(p.CONTINUITY_REQUIRE_WATCH), poupados=poupados_de(p)
+    )
     log.info("continuidade", desfecho=str(getattr(resultado, "desfecho", resultado)))
 
 

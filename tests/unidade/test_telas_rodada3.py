@@ -511,7 +511,7 @@ def test_pagina_de_erro_sem_link_fica_como_era() -> None:
 def test_avisos_e_frase_da_reativacao() -> None:
     assert AVISOS["aplicativo_reativado"] == (
         "Pronto. O aplicativo foi reativado. Os pedidos dele voltam a passar, se nenhum bloqueio ou pausa os"
-        " segurar. As ações dele que já tinham parado não voltam."
+        " segurar. As ações dele só saem com a porta de saída aberta. As que já tinham parado não voltam."
     )
     # Vale para todo POST que nao reativa: assistente ativo, programa (pausado ou nao) e id que nao existe.
     assert AVISOS["aplicativo_nada_mudou"] == (

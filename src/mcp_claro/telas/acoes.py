@@ -34,7 +34,7 @@ from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
 
 from mcp_claro.logs import logger
-from mcp_claro.regras import politica
+from mcp_claro.regras import estado, politica
 from mcp_claro.saida import fila
 from mcp_claro.saida.estados import FRASE, Estado
 from mcp_claro.saida.fila import DecisaoRecusada, Operacao
@@ -50,6 +50,8 @@ AVISOS_ACOES: Final[dict[str, str]] = {
     "recusada": "Pronto. A ficha foi recusada. Nada foi para o sistema.",
     "cancelada": "Pronto. A ação foi cancelada antes de sair. Nada chegou ao sistema.",
     "seguir_agora": "Pronto. A ação sai agora, sem esperar o resto do tempo.",
+    "seguir_agora_saida_fechada": "Pronto. A ação não espera mais o resto do tempo. A porta de saída está fechada"
+    " agora: ela sai quando a porta reabrir, depois de conferida de novo.",
     "decisao_registrada": "Pronto. Sua decisão foi registrada. Nada será reenviado.",
 }
 
@@ -568,6 +570,11 @@ class TelasDeAcoes:
             return None
         return op
 
+    async def _saida_aberta(self) -> bool:
+        """A porta de saida esta aberta? Com ela fechada, a acao liberada espera, e a tela diz isso."""
+        async with self.t.engine.connect() as c:
+            return (await estado.ler_saida(c)).aberta
+
     def _nao_achada(self, pedido: Request) -> Response:
         return self.t.erro(pedido, 404, "Ação não encontrada", "Esta ação não é sua ou não existe.")
 
@@ -583,6 +590,7 @@ class TelasDeAcoes:
             {
                 "a": montar(op),
                 "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES,
+                "saida_aberta": await self._saida_aberta(),
                 "aviso": self._aviso(pedido),
                 "erros": erros or [],
             },
@@ -605,7 +613,11 @@ class TelasDeAcoes:
         visto = pedido.query_params.get("visto")
         if visto is not None and visto != str(op.estado) and pedido.headers.get("hx-request") == "true":
             return Response(status_code=200, headers={"HX-Refresh": "true"})
-        return self.t.pagina(pedido, "acoes/_relogio.html", {"a": montar(op), "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES})
+        return self.t.pagina(
+            pedido,
+            "acoes/_relogio.html",
+            {"a": montar(op), "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES, "saida_aberta": await self._saida_aberta()},
+        )
 
     async def _mudar(self, pedido: Request, mudanca: str) -> Response:
         sessao = await self.t.exigir_sessao(pedido)
@@ -639,6 +651,8 @@ class TelasDeAcoes:
             return await self._pagina_acao(pedido, operacao_id, erros=[mensagem], status=status)
         log.info("telas_acao_mudou", mudanca=mudanca)
         aviso = {"cancelar": "cancelada", "seguir": "seguir_agora"}.get(mudanca, "decisao_registrada")
+        if aviso == "seguir_agora" and not await self._saida_aberta():
+            aviso = "seguir_agora_saida_fechada"
         return ver_depois(f"/telas/acoes/{operacao_id}", aviso)
 
     @tela

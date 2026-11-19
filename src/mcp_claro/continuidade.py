@@ -62,7 +62,7 @@ from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.regras.bloqueios import SemPermissao, autor_de, quem_rotina
 from mcp_claro.regras.estado import ler_saida, mudar_saida
-from mcp_claro.ronda.config import CLIENTE_RONDA, CLIENTE_VIGIA
+from mcp_claro.ronda.config import CLIENTE_RONDA, CLIENTE_VIGIA, ler
 
 log = logger("mcp_claro.continuidade")
 
@@ -88,8 +88,15 @@ SEM_SINAL_DE_RESTAURACAO: Final = (
 respondeu e nao houve sinal...". Sem ponto final: a frase do extrato (``continuidade_nao_confere``) poe o dela."""
 QUEM: Final = quem_rotina("continuidade")
 POUPADOS: Final[tuple[str, ...]] = (CLIENTE_RONDA, CLIENTE_VIGIA)
-"""Aplicativos que nao pausam: a ronda e o vigia precisam continuar conferindo o gateway."""
+"""Aplicativos que nao pausam: a ronda e o vigia precisam continuar conferindo o gateway. Estes sao os client_id
+padrao; com ``PATROL_CLIENT_ID`` ou ``WATCH_CLIENT_ID`` proprios, use ``poupados_de``."""
 _TRAVA: Final = "mcp_claro.continuidade"
+
+
+def poupados_de(p: Any) -> tuple[str, ...]:
+    """client_id da ronda e do vigia desta instalacao (``PATROL_CLIENT_ID`` e ``WATCH_CLIENT_ID``), os mesmos que
+    as rotinas nunca pausam (``rotinas.programas.protegidos``)."""
+    return (str(ler(p, "PATROL_CLIENT_ID", CLIENTE_RONDA)), str(ler(p, "WATCH_CLIENT_ID", CLIENTE_VIGIA)))
 
 
 class ReaberturaRecusada(SemPermissao):
@@ -381,13 +388,16 @@ async def _rodar(args: argparse.Namespace) -> int:
     from mcp_claro.config.settings import Parametros
     from mcp_claro.db.engine import criar_engine
 
-    engine = criar_engine(Parametros(), pool_size=1, max_overflow=0)
+    p = Parametros()
+    engine = criar_engine(p, pool_size=1, max_overflow=0)
     try:
         if args.comando == "situacao":
             for chave, valor in (await situacao(engine)).items():
                 print(f"{chave}: {valor}")
         elif args.comando == "conferir":
-            r = await conferir_continuidade(engine, args.vigia, exigir_vigia=not args.sem_exigir_vigia)
+            r = await conferir_continuidade(
+                engine, args.vigia, exigir_vigia=not args.sem_exigir_vigia, poupados=poupados_de(p)
+            )
             print(f"desfecho: {r.desfecho}")
             print(f"motivos: {','.join(r.motivos) or '-'}")
             print(f"timeline_id: {r.atual.timeline_id}")

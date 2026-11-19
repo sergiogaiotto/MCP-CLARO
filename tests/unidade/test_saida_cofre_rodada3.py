@@ -19,7 +19,7 @@ import pytest
 from pydantic import ValidationError
 
 from mcp_claro import continuidade
-from mcp_claro.cofre import CofreIndisponivel, CofreTrancado, EstadoCofre
+from mcp_claro.cofre import AcessoNegado, CofreIndisponivel, CofreTrancado, EstadoCofre, LoginRecusado
 from mcp_claro.config.settings import Parametros
 from mcp_claro.extrato.frases import frase
 from mcp_claro.regras.bloqueios import quem_admin
@@ -283,3 +283,84 @@ def test_motivo_do_vigia_mudo_em_frases_curtas_sem_promessa() -> None:
     linha = frase("continuidade_nao_confere", motivo=f"o vigia nao respondeu e {texto}")
     assert ".." not in linha
     assert linha.startswith("A conferencia do banco na partida nao bateu: o vigia nao respondeu e nao houve sinal")
+
+
+class CifraQueFalha:
+    def __init__(self, erro: Exception) -> None:
+        self.erro = erro
+
+    async def cifrar(self, texto: bytes, contexto: bytes) -> str:
+        raise self.erro
+
+    async def decifrar(self, cifrado: str, contexto: bytes) -> bytes:
+        raise self.erro
+
+
+@pytest.mark.parametrize(
+    ("erro", "detalhe"),
+    [
+        (CofreIndisponivel("sem rede"), "o cofre de chaves nao respondeu"),
+        (LoginRecusado("login recusado", status=400), "nao deu para abrir a chave no cofre"),
+        (AcessoNegado("sem permissao", status=403), "nao deu para abrir a chave no cofre"),
+        (RuntimeError("outra falha"), "nao deu para abrir a chave no cofre"),
+    ],
+)
+async def test_detalhe_da_chave_diz_se_o_cofre_nao_respondeu_ou_recusou(erro: Exception, detalhe: str) -> None:
+    """So a falta de resposta do cofre vira "o cofre de chaves nao respondeu"; o cofre que respondeu e recusou (login
+    vencido, acesso negado) ou outra falha dizem que nao deu para abrir a chave."""
+    porta = PortaDeSaida(Engine(), CifraQueFalha(erro))  # type: ignore[arg-type]
+    op, ferramenta = _op_e_ferramenta()
+    assert await porta._chave(op, ferramenta) == (None, None, detalhe)
+
+
+async def test_assumir_de_novo_esquece_o_que_a_porta_lembrava_do_cofre(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Outra copia pode ter segurado a porta: as contagens seguidas, a chamada que respondeu trancado e os avisos
+    lembrados recomecam, e a porta confere o cofre na hora. So a memoria da espera de 30 minutos fica."""
+    from mcp_claro.saida import despachante as modulo
+
+    saude = Saude(EstadoCofre(inicializado=True, trancado=False, versao="2.7.0"))
+    porta = PortaDeSaida(Engine(), CifraTrancada(), cofre=saude)  # type: ignore[arg-type]
+    porta._cofre_conferido_em = 1e18
+    porta._cofre_sem_resposta = 1
+    porta._cofre_destravado = 240
+    porta._cofre_destravado_desde = 5.0
+    porta._cofre_trancado_na_chamada = True
+    porta._cofre_mudo_no_envio = True
+    porta._cofre_avisado = (None, True)
+    porta._cofre_reabriu_em = 7.0
+    porta._cofre_instavel = True
+
+    class Transacao:
+        async def __aenter__(self) -> Transacao:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    async def retomar(*_: object, **__: object) -> list[str]:
+        return []
+
+    async def registrar(*_: object, **__: object) -> int:
+        return 1
+
+    monkeypatch.setattr(modulo.fila, "retomar_enviando", retomar)
+    monkeypatch.setattr(modulo, "registrar", registrar)
+    monkeypatch.setattr(porta, "_transacao", lambda _dono: Transacao())
+    assert await porta.assumir() == []
+    assert porta._cofre_conferido_em is None
+    assert porta._hora_de_conferir_o_cofre() is True
+    assert (porta._cofre_sem_resposta, porta._cofre_destravado, porta._cofre_destravado_desde) == (0, 0, None)
+    assert (porta._cofre_trancado_na_chamada, porta._cofre_mudo_no_envio, porta._cofre_avisado) == (False, False, None)
+    assert (porta._cofre_reabriu_em, porta._cofre_instavel) == (7.0, True)
+
+
+def test_aviso_de_fechar_de_novo_diz_quando_conta_a_espera() -> None:
+    """A espera de 30 minutos so vale depois de uma reabertura por falta de resposta: o aviso diz isso."""
+    texto = cofre._AVISO_FECHOU_INSTAVEL[1]
+    assert "ja tinha fechado" not in texto
+    assert "Menos de uma hora antes, ela tinha reaberto depois de outra falta de resposta do cofre." in texto
+    assert "30 minutos seguidos" in texto
+
+
+def test_frase_do_cofre_que_passa_a_trancado() -> None:
+    assert frase("cofre_passou_a_trancado").startswith("A porta de saida continua fechada: o cofre voltou a responder")

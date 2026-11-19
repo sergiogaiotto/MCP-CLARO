@@ -631,3 +631,143 @@ async def _perguntou(cofre: CofreFalso, vezes: int) -> bool:
 
 async def _aberta(amb: Ambiente) -> bool:
     return (await saida(amb))[0]
+
+
+async def test_sem_resposta_e_o_admin_fecha_de_novo_o_aviso_de_trancado_ainda_sai(amb: Ambiente) -> None:
+    """O cofre nao respondeu e a saida fechou; o ADMIN fecha de novo com o motivo dele. O ADMIN so sabia que o cofre
+    nao respondia: quando ele aparece trancado, o aviso de trancado sai (uma vez), e depois o da volta."""
+    A_T, A_D, N, F = (
+        saida_cofre.Passo.AVISAR_TRANCADO,
+        saida_cofre.Passo.AVISAR_DESTRAVADO,
+        saida_cofre.Passo.NADA,
+        saida_cofre.Passo.FECHAR,
+    )
+    resultados = {}
+    try:
+        for caso, depois in (("trancado", True), ("destravado", False)):
+            await abrir_a_saida(amb)
+            email = f"admin-{uuid.uuid4().hex[:8]}@exemplo.org"
+            cofre = CofreFalso(amb)
+            cofre.trancado = False
+            cofre.fora_do_ar = True
+            p = porta_com_cofre(amb, cofre, email)
+            passos = [(await p.conferir_o_cofre()).passo for _ in range(2)]
+            async with amb.entrada_db.begin() as c:
+                await estado.mudar_saida(
+                    c, aberta=False, quem=quem_admin(amb.admin_id), motivo="o ADMIN assumiu", papel="entrada"
+                )
+            cofre.fora_do_ar = False
+            cofre.trancado = depois
+            passos += [(await p.conferir_o_cofre()).passo for _ in range(2)]
+            if depois:
+                cofre.trancado = False
+                passos += [(await p.conferir_o_cofre()).passo for _ in range(2)]
+            resultados[caso] = (passos, [(a.evento, a.assunto) for a in await avisos(amb, email)])
+        assert resultados["trancado"] == (
+            [N, F, A_T, N, A_D, N],
+            [
+                ("cofre_trancado", "MCP-CLARO: o cofre nao responde e a porta de saida fechou"),
+                ("cofre_trancado", "MCP-CLARO: o cofre esta trancado"),
+                ("cofre_destravado", "MCP-CLARO: o cofre voltou, e a porta de saida continua fechada"),
+            ],
+        )
+        assert resultados["destravado"] == (
+            [N, F, A_D, N],
+            [
+                ("cofre_trancado", "MCP-CLARO: o cofre nao responde e a porta de saida fechou"),
+                ("cofre_destravado", "MCP-CLARO: o cofre voltou, e a porta de saida continua fechada"),
+            ],
+        )
+    finally:
+        await abrir_a_saida(amb)
+
+
+async def test_sem_resposta_que_passa_a_trancado_nao_diz_que_a_porta_fechou_de_novo(amb: Ambiente) -> None:
+    """Fechada porque o cofre nao respondia, e ele volta a responder trancado: a porta continua fechada desde a mesma
+    hora, o motivo passa a "trancado", e o extrato e o aviso dizem que ela continua fechada, sem outro "fechou".
+    Destravado, reabre na primeira conferencia (regra do cofre trancado)."""
+    await abrir_a_saida(amb)
+    email = f"admin-{uuid.uuid4().hex[:8]}@exemplo.org"
+    cofre = CofreFalso(amb)
+    cofre.trancado = False
+    cofre.fora_do_ar = True
+    p = porta_com_cofre(amb, cofre, email)
+    try:
+        desde = await ultimo_id_do_extrato(amb)
+        assert [(await p.conferir_o_cofre()).passo for _ in range(2)] == [
+            saida_cofre.Passo.NADA,
+            saida_cofre.Passo.FECHAR,
+        ]
+        async with amb.admin.connect() as c:
+            fechada_em = (await c.execute(text("SELECT mudou_em FROM estado_saida WHERE id = 1"))).scalar_one()
+        cofre.fora_do_ar = False
+        cofre.trancado = True
+        assert await p.conferir_o_cofre() == saida_cofre.Decisao(saida_cofre.Passo.FECHAR, saida_cofre.MOTIVO_TRANCADO)
+        assert await p.conferir_o_cofre() == saida_cofre.NADA
+        async with amb.admin.connect() as c:
+            linha = (await c.execute(text("SELECT aberta, motivo, mudou_em FROM estado_saida WHERE id = 1"))).one()
+        assert (linha.aberta, linha.motivo, linha.mudou_em) == (False, saida_cofre.MOTIVO_TRANCADO, fechada_em)
+        tipos = await tipos_depois(amb, desde)
+        assert tipos.count("cofre_fechou_saida") == 1
+        assert tipos.count("estado_saida_mudou") == 1
+        assert tipos.count("cofre_passou_a_trancado") == 1
+        assert [a.assunto for a in await avisos(amb, email)] == [
+            "MCP-CLARO: o cofre nao responde e a porta de saida fechou",
+            "MCP-CLARO: o cofre voltou a responder, mas esta trancado",
+        ]
+        cofre.trancado = False
+        assert (await p.conferir_o_cofre()).passo is saida_cofre.Passo.REABRIR
+        assert (await saida(amb))[0]
+    finally:
+        await abrir_a_saida(amb)
+
+
+async def test_porta_que_assume_de_novo_recomeca_as_contagens_do_cofre(amb: Ambiente) -> None:
+    """A porta A conferiu o cofre bem muitas vezes; a B assume, o cofre para de responder e a B fecha a saida. A A
+    assume de novo: uma resposta destravada so nao reabre (a regra das duas seguidas vale de novo). E uma falta de
+    resposta antiga da A nao conta junto com a primeira depois de assumir."""
+    await abrir_a_saida(amb)
+    email = f"admin-{uuid.uuid4().hex[:8]}@exemplo.org"
+    cofre = CofreFalso(amb)
+    cofre.trancado = False
+    a = porta_com_cofre(amb, cofre, email)
+    b = porta_com_cofre(amb, cofre, email)
+    N, F, R = saida_cofre.Passo.NADA, saida_cofre.Passo.FECHAR, saida_cofre.Passo.REABRIR
+    try:
+        assert [(await a.conferir_o_cofre()).passo for _ in range(5)] == [N] * 5
+        await b.assumir()
+        cofre.fora_do_ar = True
+        assert [(await b.conferir_o_cofre()).passo for _ in range(2)] == [N, F]
+        await a.assumir()
+        cofre.fora_do_ar = False
+        assert [(await a.conferir_o_cofre()).passo for _ in range(2)] == [N, R]
+        # Uma falta de resposta, a troca de porta e outra falta: a saida continua aberta.
+        cofre.fora_do_ar = True
+        assert (await a.conferir_o_cofre()).passo is N
+        await a.assumir()
+        assert (await a.conferir_o_cofre()).passo is N
+        assert (await saida(amb))[0]
+    finally:
+        await abrir_a_saida(amb)
+
+
+async def test_indice_dos_avisos_do_cofre_vale_em_todas_as_particoes_do_extrato(amb: Ambiente) -> None:
+    """A busca dos avisos do cofre com a saida fechada (com a trava exclusiva de "tudo") passa so pelas linhas do
+    indice parcial: ele existe no extrato e em cada particao."""
+    async with amb.admin.connect() as c:
+        definicao = (
+            await c.execute(text("SELECT indexdef FROM pg_indexes WHERE indexname = 'extrato_saida_cofre_idx'"))
+        ).scalar_one()
+        particoes = (
+            await c.execute(text("SELECT count(*) FROM pg_inherits WHERE inhparent = 'extrato'::regclass"))
+        ).scalar_one()
+        indices = (
+            await c.execute(
+                text("SELECT count(*) FROM pg_inherits WHERE inhparent = 'extrato_saida_cofre_idx'::regclass")
+            )
+        ).scalar_one()
+    assert "(criado_em, id)" in definicao
+    for tipo in ("cofre_trancado_saida_fechada", "cofre_destravado_saida_fechada", "estado_saida_mudou"):
+        assert tipo in definicao
+    assert particoes > 0
+    assert indices == particoes

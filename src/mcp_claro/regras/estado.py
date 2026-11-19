@@ -130,16 +130,15 @@ async def mudar_saida(c: AsyncConnection, *, aberta: bool, quem: str, motivo: st
     """Abre ou fecha a porta de saida e registra no extrato.
 
     Fechar toma a trava exclusiva de ``tudo``: um envio em andamento termina de ser marcado antes, e
-    nenhum outro comeca depois. Fechar de novo a saida ja fechada guarda na linha do extrato se o ultimo aviso
-    do cofre ao ADMIN foi o de cofre trancado: o aviso seguinte do cofre continua de onde parou
-    (``saida.cofre.avisado_trancado``).
+    nenhum outro comeca depois. Fechar de novo a saida ja fechada guarda na linha do extrato o que o ADMIN ja
+    sabia do cofre: o aviso seguinte do cofre continua de onde parou (``saida.cofre.avisado_trancado``).
     """
     autor_de(quem)
     from mcp_claro.saida import cofre as saida_cofre
     from mcp_claro.saida import travas
 
     await travas.exclusiva(c, [travas.TUDO])
-    dados: dict[str, bool] = {"aberta": aberta}
+    dados: dict[str, bool | None] = {"aberta": aberta}
     if not aberta:
         anterior = await ler_saida(c)
         if not anterior.aberta:

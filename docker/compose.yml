@@ -29,6 +29,8 @@ x-gateway: &gateway
     DISPATCHER_INTERNAL_URL: https://despachante:9443
     VAULT_ADDR: https://cofre:8200
     VAULT_SEAL_MODE: static
+    # Avisos ao ADMIN: as rotinas (fichas, programas, ronda) e o despachante (cofre trancado fecha a saida).
+    NOTIFY_ADMIN_EMAILS: admin@mcp-claro.localhost
   depends_on:
     migrar:
       condition: service_completed_successfully
@@ -151,7 +153,6 @@ services:
       SMTP_STARTTLS: desligado
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_assinatura
       GRAFANA_WEBHOOK_PASSWORD_FILE: /run/secrets/grafana_webhook
-      NOTIFY_ADMIN_EMAILS: admin@mcp-claro.localhost
       # A porta das rotinas aceita so o Grafana (alertas por webhook interno).
       INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_rotinas.pem
       INTERNAL_CLIENT_CERT_FILE: /run/secrets/rotinas_cliente_cert.pem

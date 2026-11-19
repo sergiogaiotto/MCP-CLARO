@@ -129,7 +129,8 @@ O que se sabe e ficou como está:
   daquele instante vira "não saiu". Depois, a saída fecha pelas regras da conferência do cofre
   ([porta de saída](saida.md));
 - a espera de 30 minutos fica na memória do despachante. Ela vale quando a saída fecha de novo porque o cofre
-  não responde, menos de uma hora depois de a conferência do cofre a ter reaberto. Se o despachante reiniciar
-  ou outra cópia assumir a porta, volta a regra das duas conferências seguidas.
+  não responde, menos de uma hora depois de a conferência do cofre a ter reaberto de um fechamento também por
+  falta de resposta. Se o despachante reiniciar ou outra cópia assumir a porta, volta a regra das duas
+  conferências seguidas (a cópia que assume recomeça as contagens e confere o cofre na hora).
 
 Roteiro para quem cuida do dia a dia: [Porta de saída](saida.md).

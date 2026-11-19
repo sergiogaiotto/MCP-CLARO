@@ -109,10 +109,20 @@ class TelasDoAdmin:
     ) -> Response:
         async with self.t.engine.connect() as c:
             aplicativos = await consultas.todos_aplicativos(c)
+            pausados = await consultas.aplicativos_pausados(c)
+            intervalo = await consultas.intervalo_que_pode_faltar(c) if pausados else None
+            _, saida = await consultas.estado_das_portas(c)
         return self.t.pagina(
             pedido,
             "admin/aplicativos.html",
-            {"aplicativos": aplicativos, "erros": erros or [], "valores": valores or {}},
+            {
+                "aplicativos": aplicativos,
+                "pausados": pausados,
+                "intervalo": intervalo,
+                "saida_fechada": saida is None or not saida.aberta,
+                "erros": erros or [],
+                "valores": valores or {},
+            },
             status=400 if erros else 200,
         )
 

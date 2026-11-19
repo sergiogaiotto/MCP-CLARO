@@ -148,3 +148,11 @@ def test_todo_servico_do_roteiro_de_restauracao_existe(compose: Compose) -> None
     assert {"restaurar-logico", "banco", "backup", "migrar", "despachante"} <= pedidos
     faltam = pedidos - compose.servicos("restauracao")
     assert faltam == set(), f"o roteiro chama servicos que o Compose nao tem: {sorted(faltam)}"
+
+
+def test_quem_avisa_o_admin_tem_o_email_do_admin(compose: Compose) -> None:
+    """O despachante (cofre trancado fecha a saida) e as rotinas avisam o ADMIN por e-mail: os dois recebem
+    ``NOTIFY_ADMIN_EMAILS``. Sem ele, o aviso so iria ao log e aos webhooks."""
+    servicos = compose.resolvido()["services"]
+    for nome in ("despachante", "rotinas"):
+        assert servicos[nome]["environment"].get("NOTIFY_ADMIN_EMAILS") == "admin@mcp-claro.localhost", nome

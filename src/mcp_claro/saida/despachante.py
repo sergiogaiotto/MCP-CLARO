@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import FerramentaVitrine
-from mcp_claro.cofre import CofreTrancado
+from mcp_claro.cofre import CofreIndisponivel, CofreTrancado
 from mcp_claro.despachante import chaves, medida, renovacao
 from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.extrato import registrar
@@ -160,7 +160,7 @@ class PortaDeSaida:
         self._cofre_destravado = 0
         self._cofre_destravado_desde: float | None = None
         # Quando esta porta reabriu a saida fechada por "sem resposta", e se a saida fechada agora por "sem
-        # resposta" ja tinha fechado e reaberto assim na ultima hora (reabre so depois de
+        # resposta" tinha reaberto assim menos de uma hora antes (reabre so depois de
         # ``saida_cofre.ESPERA_SE_INSTAVEL``).
         self._cofre_reabriu_em: float | None = None
         self._cofre_instavel = False
@@ -336,9 +336,16 @@ class PortaDeSaida:
         return None
 
     async def assumir(self, dono: AsyncConnection | None = None) -> list[str]:
-        # Outra copia pode ter segurado a porta e avisado o ADMIN do cofre nesse meio tempo: o que esta porta
-        # lembrava dos avisos nao vale mais, e a proxima conferencia rele o extrato.
+        # Outra copia pode ter segurado a porta nesse meio tempo, conferido o cofre e avisado o ADMIN: o que esta
+        # porta lembrava (avisos, conferencias seguidas, chamada que respondeu trancado) nao vale mais. Ela confere
+        # o cofre na hora, como uma porta nova, e rele o extrato. Fica so a memoria da espera de 30 minutos.
         self._cofre_avisado = None
+        self._cofre_conferido_em = None
+        self._cofre_sem_resposta = 0
+        self._cofre_destravado = 0
+        self._cofre_destravado_desde = None
+        self._cofre_trancado_na_chamada = False
+        self._cofre_mudo_no_envio = False
         async with self._transacao(dono) as c:
             retomadas = await fila.retomar_enviando(c, quem=fila.QUEM_RETOMA)
             await registrar(c, papel="despachante", tipo="despachante_assumiu", campos={"retomadas": len(retomadas)})
@@ -576,9 +583,13 @@ class PortaDeSaida:
                 self._cofre_trancado_na_chamada = True
             log.warning("chave_com_cofre_trancado")
             return None, None, "o cofre de chaves esta trancado"
-        except Exception:
-            log.exception("chave_indisponivel")
+        except CofreIndisponivel:
+            log.warning("chave_com_cofre_sem_resposta")
             return None, None, "o cofre de chaves nao respondeu"
+        except Exception:
+            # O cofre respondeu e recusou (login vencido, acesso negado, cifrado invalido) ou outra falha.
+            log.exception("chave_indisponivel")
+            return None, None, "nao deu para abrir a chave no cofre"
         return segredo, None, None
 
     async def _enviar(

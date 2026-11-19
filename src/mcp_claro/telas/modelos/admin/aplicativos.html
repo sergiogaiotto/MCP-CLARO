@@ -4,13 +4,16 @@
 <p><a href="/telas/admin">Área do ADMIN</a></p>
 <h1>Aplicativos</h1>
 <p>Só aplicativo habilitado aqui pode se ligar ao MCP-CLARO.</p>
-{% set pausados = aplicativos | selectattr("situacao", "equalto", "pausado") | list %}
+{% if saida_fechada %}
+<p class="atencao" id="saida-fechada">A porta de saída está fechada: nenhuma ação sai para os sistemas até alguém reabrir, na tela <a href="/telas/admin/portas">Portas</a>.</p>
+{% endif %}
 {% if pausados %}
 <section class="cartao" id="pausados">
   <h2>Aplicativos pausados</h2>
   <p class="atencao">A conferência do banco, feita quando o despachante liga, pausou {% if pausados | length == 1 %}este aplicativo{% else %}estes aplicativos{% endif %}. Ela pausa quando o banco pode ter voltado de uma cópia ou quando o vigia não respondeu. Por isso, pode faltar no extrato algo que aconteceu antes, como um bloqueio.</p>
   <p>Enquanto um aplicativo está pausado, a entrada recusa os pedidos dele, e nada dele sai para os sistemas. A pausa não sai sozinha, nem quando a porta de saída é reaberta.</p>
-  <p>Antes de reativar, confira no extrato o que pode ter se perdido. Ao reativar, os pedidos dele voltam a passar, se nenhum bloqueio ou pausa os segurar. As ações dele que já pararam não voltam: quem precisar pede de novo.</p>
+  {% if intervalo %}<p id="intervalo">A conferência registrou que pode faltar no extrato o que aconteceu entre {{ intervalo.desde | data_hora }} e {{ intervalo.ate | data_hora }}.</p>{% endif %}
+  <p>Bloqueios e pausas ligados nesse intervalo podem ter se perdido. Antes de reativar, pergunte às pessoas e ligue de novo, em <a href="/telas/admin/bloqueios">Bloqueios e pausas</a>, o que faltar. Ao reativar, os pedidos dele voltam a passar, se nenhum bloqueio ou pausa os segurar. As ações dele que já pararam não voltam: quem precisar pede de novo.</p>
   <ul>
   {% for a in pausados %}
     <li><strong>{{ a.nome }}</strong> <code>{{ a.client_id }}</code>{% if a.tipo == "programa" %}: programa que roda sozinho. <a href="/telas/admin/programas/{{ a.id }}">Reative na tela do programa</a>.{% else %}

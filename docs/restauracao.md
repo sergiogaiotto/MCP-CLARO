@@ -226,16 +226,20 @@ Reabrir a saída **não reativa** os aplicativos. Enquanto um aplicativo estiver
 pedidos dele. Se uma ação dele ainda estiver na fila, o despachante a para na hora de sair, sem enviar. A tela
 da ação diz "Parada por um bloqueio ou uma pausa. Nada seguiu.", com o detalhe "o aplicativo está pausado".
 
-Cada aplicativo volta por decisão da pessoa ADMIN, um de cada vez. Antes, ela confere no extrato o que pode ter
-se perdido, como um bloqueio feito depois da cópia. Quando há aplicativo pausado, a tela **Portas** avisa e
-leva à lista deles.
+Cada aplicativo volta por decisão da pessoa ADMIN, um de cada vez. O cartão **Aplicativos pausados** mostra
+entre quando e quando pode faltar algo no extrato. Bloqueios e pausas ligados nesse intervalo podem ter se
+perdido: antes de reativar, pergunte às pessoas e ligue de novo, na tela **Bloqueios e pausas**, o que faltar.
+Quando há aplicativo pausado, a tela **Portas** avisa e leva à lista deles. Enquanto a porta de saída estiver
+fechada, a tela **Aplicativos** também avisa e leva à tela **Portas**.
 
 - **assistente** (aplicativo usado por pessoas): na área do ADMIN, abra **Aplicativos**. O cartão
   **Aplicativos pausados** mostra o que a conferência do banco pausou. Cada assistente tem o botão
   **Reativar**. Só a pessoa ADMIN chega a essa tela. O passo vai ao extrato com o nome de quem fez
   (`admin_aplicativo_reativado`);
 - **programa que roda sozinho**: o mesmo cartão leva à tela do programa (área do ADMIN, **Programas**). Lá, o
-  ADMIN usa **Reativar o aplicativo**. O passo também vai ao extrato com o nome de quem fez.
+  ADMIN usa **Reativar o aplicativo**. O passo também vai ao extrato com o nome de quem fez. Um programa
+  encerrado não tem o que reativar e não aparece no cartão nem no aviso da tela **Portas**. Se ele for
+  cadastrado de novo, volta a aparecer, e a tela dele mostra **Reativar o aplicativo**.
 
 Depois de reativado, os pedidos novos do aplicativo voltam a passar, se nenhum bloqueio ou pausa os segurar (no
 programa, também é preciso que o cadastro dele valha). As ações dele que já pararam não voltam: quem precisar

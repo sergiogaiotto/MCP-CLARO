@@ -342,6 +342,11 @@ FRASES: Final[dict[str, Frase]] = {
             "cofre_destravado_saida_fechada",
             "O cofre voltou destravado. A porta de saida continua fechada, porque foi fechada por outro motivo.",
         ),
+        Frase(
+            "cofre_passou_a_trancado",
+            "A porta de saida continua fechada: o cofre voltou a responder, mas esta trancado. Ela reabre quando ele"
+            " for destravado, se ninguem a mudar antes.",
+        ),
     )
 }
 

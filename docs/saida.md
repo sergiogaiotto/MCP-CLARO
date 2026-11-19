@@ -69,7 +69,8 @@ outra ação: devolve a original, e nada novo sai.
 "Não saiu" vale para a falha comprovada antes de executar: conexão recusada, recusa na porta (401, 403,
 redirecionamento), erro do protocolo que o sistema devolve antes de executar (método ou argumentos
 inválidos) ou chave que não ficou pronta antes do envio (a pessoa ainda não autorizou o sistema, a autorização
-venceu ou a renovação falhou). Num 401, a chave da pessoa naquele sistema fica dada como vencida: o próximo
+venceu, a renovação falhou ou o cofre recusou abrir a chave: o detalhe diz "não deu para abrir a chave no
+cofre"). Num 401, a chave da pessoa naquele sistema fica dada como vencida: o próximo
 pedido a renova antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada. Qualquer outra
 falha, ou a dúvida, vira "não confirmada".
 
@@ -77,7 +78,9 @@ Com o cofre trancado ou sem resposta, a ação em geral não vira "não saiu": o
 de marcar "enviando", e a ação espera. Ela só vira "não saiu" se o cofre trancar ou parar de responder no curto
 intervalo entre essa pergunta e a abertura da chave (em geral, menos de um segundo; mais, quando a chave da
 pessoa precisa ser renovada). O detalhe diz "o cofre de chaves está trancado" ou "o cofre de chaves não
-respondeu".
+respondeu". O cofre que responde mas recusa (por exemplo, um acesso do despachante vencido) não fecha a porta:
+cada ação daquele sistema vira "não saiu", com o detalhe "não deu para abrir a chave no cofre", até alguém
+corrigir o acesso.
 
 ## Limites por aproximação
 
@@ -155,6 +158,7 @@ aberta:
   passa antes da conferência seguinte não fecha a porta.
 
 Com a porta fechada, nenhuma ação nova ganha número. O que já estava na fila espera, sem virar "não saiu".
+Na tela da ação, a pessoa lê que a porta de saída está fechada e que a ação sai quando ela reabrir.
 Quando a porta reabre, cada ação é conferida de novo antes de sair. O extrato registra o fechamento. O ADMIN
 recebe um aviso por e-mail (`NOTIFY_ADMIN_EMAILS`) e pelos webhooks que assinam o evento `cofre_trancado` ou
 todos os eventos.
@@ -167,13 +171,15 @@ Quando o cofre volta destravado, depende de quem fechou a porta:
   destravado. Mas, se ela já tinha reaberto assim menos de uma hora antes de fechar de novo pela falta de
   resposta, espera o cofre ficar 30 minutos seguidos destravado. Assim, uma rede que vai e volta não abre e
   fecha a porta a cada pouco. Se, com a porta fechada porque o cofre não respondia, ele passa a responder
-  trancado, o motivo muda para "trancado", com um novo aviso, e vale a regra do cofre trancado. O ADMIN pode
-  reabrir antes, na tela **Portas**;
+  trancado, a porta continua fechada desde a mesma hora: só o motivo muda para "trancado", com um aviso próprio
+  ("o cofre voltou a responder, mas está trancado"), e vale a regra do cofre trancado. O ADMIN pode reabrir
+  antes, na tela **Portas**;
 - **o ADMIN ou a conferência do banco**: a porta continua fechada. Se a conferência encontra o cofre trancado,
   o ADMIN recebe um aviso. Quando depois o encontra destravado, recebe outro. Os avisos não se repetem a cada
   conferência, nem quando alguém fecha de novo a porta que já estava fechada: se o ADMIN fecha de novo a porta
-  que o cofre fechou, ele não recebe outro aviso de cofre trancado, e recebe o de cofre de volta quando o cofre
-  voltar. Os eventos são os mesmos (`cofre_trancado` e `cofre_destravado`), e o texto do aviso diz se a porta
+  que o cofre fechou por estar trancado, ele não recebe outro aviso de cofre trancado, e recebe o de cofre de
+  volta quando o cofre voltar. Se a porta tinha fechado porque o cofre não respondia, o aviso de cofre trancado
+  ainda sai quando o cofre aparecer trancado. Os eventos são os mesmos (`cofre_trancado` e `cofre_destravado`), e o texto do aviso diz se a porta
   fechou ou se já estava fechada. Reabrir é decisão do ADMIN.
 
 **"Restauramos o banco."** Na partida, a conferência de continuidade percebe a volta. A porta de saída fica

@@ -21,7 +21,7 @@
 <form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/aplicativo" class="cartao parar">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <p><strong>O aplicativo deste programa está pausado.</strong> A entrada recusa os pedidos dele, mesmo com o cadastro do programa valendo. Essa pausa não sai sozinha: retomar ou cadastrar de novo o programa não mexe nela.</p>
-  <p>Ela pode vir da conferência do banco, depois de uma restauração. Antes de reativar, confira no extrato o que pode ter se perdido, como um bloqueio feito depois da cópia.</p>
+  <p>Ela pode vir da conferência do banco, depois de uma restauração. Bloqueios e pausas feitos depois da cópia podem ter se perdido: a tela <a href="/telas/admin/aplicativos#pausados">Aplicativos</a> mostra o intervalo. Antes de reativar, ligue de novo, em <a href="/telas/admin/bloqueios">Bloqueios e pausas</a>, o que faltar.</p>
   <button type="submit">Reativar o aplicativo</button>
 </form>
 {% elif programa.situacao != "encerrado" and situacao_aplicativo != "ativo" %}

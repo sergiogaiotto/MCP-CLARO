@@ -236,12 +236,34 @@ async def aplicativo_existe(c: AsyncConnection, client_id: str) -> bool:
 
 
 async def aplicativos_pausados(c: AsyncConnection) -> Sequence[Row[Any]]:
-    """Aplicativos pausados (``aplicativos.situacao``; hoje so a conferencia do banco na partida pausa assim)."""
+    """Aplicativos pausados que ainda podem voltar (``aplicativos.situacao``; hoje so a conferencia do banco na
+    partida pausa assim). O de um programa encerrado fica de fora: nao ha o que reativar (se o programa for
+    cadastrado de novo, ele volta a aparecer)."""
     return (
         await c.execute(
-            text("SELECT id, nome, client_id, tipo FROM aplicativos WHERE situacao = 'pausado' ORDER BY tipo, nome")
+            text(
+                "SELECT a.id, a.nome, a.client_id, a.tipo FROM aplicativos a WHERE a.situacao = 'pausado'"
+                " AND NOT EXISTS (SELECT 1 FROM programas pr WHERE pr.aplicativo_id = a.id"
+                " AND pr.situacao = 'encerrado') ORDER BY a.tipo, a.nome"
+            )
         )
     ).all()
+
+
+async def intervalo_que_pode_faltar(c: AsyncConnection) -> Row[Any] | None:
+    """Da conferencia do banco que pausou os aplicativos ainda pausados: entre quando e quando pode faltar algo no
+    extrato (a linha ``intervalo_perdido``, gravada na mesma transacao que pausou). ``None``: sem aplicativo
+    pausado, ou sem a linha."""
+    return (
+        await c.execute(
+            text(
+                "SELECT (dados->>'desde')::timestamptz AS desde, (dados->>'ate')::timestamptz AS ate FROM extrato"
+                " WHERE tipo = 'intervalo_perdido' AND pessoa_id IS NULL"
+                " AND criado_em >= (SELECT min(atualizado_em) FROM aplicativos WHERE situacao = 'pausado')"
+                " ORDER BY criado_em DESC, id DESC LIMIT 1"
+            )
+        )
+    ).first()
 
 
 async def reativar_assistente(c: AsyncConnection, aplicativo_id: uuid.UUID) -> Row[Any] | None:

@@ -224,3 +224,104 @@ async def test_criar_depois_da_revisao_do_admin_leva_a_criar_de_novo(amb: Ambien
     credencial = await assinar(ana, aut, "/telas/limites/desafio", csrf, novo)
     r = await ana.post("/telas/limites", {**novo, "credencial": credencial}, csrf=csrf)
     assert r.status_code == 303, r.text
+
+
+# --- Revisao final: o cartao de pausados mostra o intervalo, e a saida fechada aparece ---
+
+
+async def test_cartao_de_pausados_mostra_o_intervalo_e_a_saida_fechada(telas: test_telas.Ambiente) -> None:
+    """A conferencia do banco pausa e grava "intervalo_perdido" (sem pessoa). O cartao mostra entre quando e quando
+    pode faltar algo no extrato e leva a Bloqueios e pausas; com a saida fechada, a pagina diz isso e leva a Portas,
+    tambem depois de reativar."""
+    from datetime import UTC, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from mcp_claro import continuidade
+    from mcp_claro.extrato import registrar
+    from mcp_claro.regras import estado
+    from mcp_claro.regras.bloqueios import quem_admin
+
+    s = test_telas.sufixo()
+    ate = datetime.now(UTC).replace(microsecond=0)
+    desde = ate - timedelta(hours=5)
+    async with telas.engine.begin() as c:
+        pausado = await repositorio.habilitar_aplicativo(
+            c, client_id=f"pausado-int-{s}", nome=f"Pausado intervalo {s}", familia="x"
+        )
+        await c.execute(
+            text("UPDATE aplicativos SET situacao = 'pausado', atualizado_em = now() WHERE id = :i"), {"i": pausado}
+        )
+        await registrar(
+            c,
+            papel="despachante",
+            tipo="intervalo_perdido",
+            campos={"desde": desde.isoformat(), "ate": ate.isoformat()},
+            dados={"desde": desde.isoformat(), "ate": ate.isoformat(), "fechamentos_perdidos": 1},
+        )
+        await estado.mudar_saida(c, aberta=False, quem=continuidade.QUEM, motivo="teste do cartao de pausados")
+
+    nav = telas.navegador()
+    admin = f"admin-int-{s}"
+    await telas.entrar(nav, admin, "Carla Admin")
+    await telas.tornar_admin(admin)
+    admin_id = (await telas.pessoa(admin)).id
+    try:
+        r = await nav.get("/telas/admin/aplicativos")
+        assert r.status_code == 200
+        zona = ZoneInfo("America/Sao_Paulo")
+        assert (
+            "A conferência registrou que pode faltar no extrato o que aconteceu entre "
+            f"{desde.astimezone(zona):%d/%m/%Y %H:%M} e {ate.astimezone(zona):%d/%m/%Y %H:%M}."
+        ) in r.text
+        assert '<a href="/telas/admin/bloqueios">Bloqueios e pausas</a>' in r.text
+        assert "confira no extrato o que pode ter se perdido" not in r.text
+        assert '<p class="atencao" id="saida-fechada">' in r.text
+        assert '<a href="/telas/admin/portas">Portas</a>' in r.text
+
+        r = await nav.post(f"/telas/admin/aplicativos/{pausado}/reativar", {}, csrf=token_csrf(r.text))
+        r = await nav.get(r.headers["location"])
+        assert "As ações dele só saem com a porta de saída aberta." in r.text
+        assert '<p class="atencao" id="saida-fechada">' in r.text
+    finally:
+        async with telas.engine.begin() as c:
+            await estado.mudar_saida(c, aberta=True, quem=quem_admin(admin_id), motivo="fim do teste do cartao")
+    r = await nav.get("/telas/admin/aplicativos")
+    assert 'id="saida-fechada"' not in r.text
+
+
+async def test_acao_na_hora_com_a_saida_fechada_diz_que_espera(amb: Ambiente, http: httpx2.AsyncClient) -> None:
+    """Com a porta de saida fechada, a acao liberada na hora nao diz "sai em instantes": diz que espera a porta
+    reabrir. "Seguir agora" tambem diz isso. Reaberta, ela sai uma vez."""
+    from mcp_claro import continuidade
+    from mcp_claro.regras import estado
+    from mcp_claro.regras.bloqueios import quem_admin
+    from mcp_claro.saida.estados import Estado
+    from tests.integracao.test_saida import chamadas, esperar_estado, operacao, politica
+    from tests.integracao.test_telas_acoes import ficha_de, pedir, protocolo_de
+
+    await politica(amb, OUTBOX_HOLD_SECONDS=600)
+    protocolo = protocolo_de(await pedir(amb, "criar_chamado", {"titulo": "Espera a porta"}))
+    op = await ficha_de(amb, protocolo)
+    nav = await entrar(amb, http)
+    csrf = token_csrf((await nav.get(f"/telas/fichas/{op.ficha_id}")).text)
+    assert (await nav.post(f"/telas/fichas/{op.ficha_id}/confirmar", csrf=csrf)).status_code == 303
+    antes = chamadas(amb, "criar_chamado")
+    async with amb.despachante_db.begin() as c:
+        await estado.mudar_saida(c, aberta=False, quem=continuidade.QUEM, motivo="teste da tela da acao")
+    try:
+        r = await nav.post(f"/telas/acoes/{op.id}/seguir", csrf=csrf)
+        assert r.status_code == 303
+        assert r.headers["location"].endswith("?aviso=seguir_agora_saida_fechada")
+        pagina = await nav.get(r.headers["location"])
+        assert "A porta de saída está fechada agora: ela sai quando a porta reabrir" in pagina.text
+        assert "A porta de saída está fechada agora. A ação espera e sai quando ela reabrir" in pagina.text
+        assert "sai em instantes" not in pagina.text
+        parte = await nav.get(f"/telas/acoes/{op.id}/estado")
+        assert "A porta de saída está fechada agora." in parte.text
+        assert "sai em instantes" not in parte.text
+        assert (await operacao(amb, protocolo)).estado == Estado.LIBERADA
+        assert chamadas(amb, "criar_chamado") == antes
+    finally:
+        await continuidade.reabrir_saida(amb.entrada_db, quem_admin(amb.admin_id), "Fim do teste da tela da acao")
+    await esperar_estado(amb, protocolo, Estado.ENVIADA, prazo=15)
+    assert chamadas(amb, "criar_chamado") == antes + 1

@@ -11,15 +11,19 @@ trancado. Esta parte decide e grava; quem chama e a porta.
 - Destravado de novo: a saida reabre sozinha so se quem a fechou foi esta conferencia e nada mudou depois
   (``estado_saida.mudou_por`` e o motivo do cofre). Fechada porque o cofre estava trancado, reabre na primeira
   conferencia destravada. Fechada porque o cofre nao respondia, espera ``DESTRAVADO_PARA_REABRIR`` conferencias
-  seguidas destravadas. Se ela ja tinha fechado e reaberto assim na ultima hora (``JANELA_INSTAVEL``), espera
+  seguidas destravadas. Se ela tinha reaberto, depois de outra falta de resposta, menos de ``JANELA_INSTAVEL``
+  antes de fechar de novo, espera
   tambem o cofre responder destravado por ``ESPERA_SE_INSTAVEL`` seguidos: rede que vai e volta nao abre e
   fecha a porta (nem manda aviso) a cada poucas conferencias.
 - Fechada pelo ADMIN ou pela conferencia do banco na partida: continua fechada, mas o ADMIN fica sabendo do
   cofre. Sai um aviso quando o cofre aparece trancado e outro quando ele volta
   (``cofre_trancado_saida_fechada`` e ``cofre_destravado_saida_fechada`` no extrato, que guardam a hora do
   fechamento a que se referem). Quem fecha de novo a saida ja fechada nao recomeca a conta: a linha
-  ``estado_saida_mudou`` guarda se o ultimo aviso foi o de cofre trancado (``CAMPO_HERDADO``). Assim, a saida
-  que o cofre fechou e o ADMIN fechou de novo da o aviso de que o cofre voltou, sem repetir o de trancado.
+  ``estado_saida_mudou`` guarda o que o ADMIN ja sabia do cofre (``CAMPO_HERDADO``: trancado, sem resposta ou
+  nada). Assim, a saida que o cofre fechou e o ADMIN fechou de novo da o aviso de que o cofre voltou, sem repetir
+  o de trancado; e, se o cofre so nao respondia, o aviso de trancado ainda sai quando ele aparecer trancado.
+- Fechada pelo cofre "sem resposta", e ele volta a responder trancado: a saida continua fechada, o motivo passa a
+  "trancado" (vale a regra de reabrir do cofre trancado), com uma linha e um aviso proprios, sem dizer que fechou.
 
 Cada mudanca e gravada numa transacao so, com a trava exclusiva de ``tudo`` (a mesma de fechar a saida) e a
 linha do estado relida: a linha ``estado_saida_mudou`` e a frase do cofre no extrato e um aviso ao ADMIN
@@ -71,9 +75,10 @@ EVENTO_TRANCADO: Final = "cofre_trancado"
 EVENTO_DESTRAVADO: Final = "cofre_destravado"
 TIPO_TRANCADO_COM_SAIDA_FECHADA: Final = "cofre_trancado_saida_fechada"
 TIPO_DESTRAVADO_COM_SAIDA_FECHADA: Final = "cofre_destravado_saida_fechada"
+TIPO_PASSOU_A_TRANCADO: Final = "cofre_passou_a_trancado"
 CAMPO_HERDADO: Final = "cofre_trancado_avisado"
-"""Na linha ``estado_saida_mudou`` de quem fecha de novo a saida ja fechada: o ultimo aviso do cofre ao ADMIN,
-antes deste fechamento, foi o de cofre trancado (ou a saida estava fechada pelo cofre)."""
+"""Na linha ``estado_saida_mudou`` de quem fecha de novo a saida ja fechada: o que o ADMIN sabia do cofre antes
+deste fechamento (``avisado_trancado``): ``true`` (trancado), ``null`` (so que nao respondia) ou ``false``."""
 
 _AVISO_FECHOU: Final[dict[str, tuple[str, str]]] = {
     MOTIVO_TRANCADO: (
@@ -91,9 +96,14 @@ _AVISO_FECHOU: Final[dict[str, tuple[str, str]]] = {
 _AVISO_FECHOU_INSTAVEL: Final = (
     "MCP-CLARO: o cofre nao responde e a porta de saida fechou de novo",
     "O cofre nao respondeu em duas conferencias seguidas. A porta de saida fechou: nenhuma acao sai para os"
-    " sistemas, e as ja liberadas esperam. Ela ja tinha fechado e reaberto assim na ultima hora. Por isso so reabre"
-    f" sozinha depois de o cofre responder destravado por {int(ESPERA_SE_INSTAVEL // 60)} minutos seguidos, se"
-    " ninguem a mudar antes. O ADMIN pode reabrir antes.",
+    " sistemas, e as ja liberadas esperam. Menos de uma hora antes, ela tinha reaberto depois de outra falta de"
+    " resposta do cofre. Por isso so reabre sozinha depois de o cofre responder destravado por"
+    f" {int(ESPERA_SE_INSTAVEL // 60)} minutos seguidos, se ninguem a mudar antes. O ADMIN pode reabrir antes.",
+)
+_AVISO_PASSOU_A_TRANCADO: Final = (
+    "MCP-CLARO: o cofre voltou a responder, mas esta trancado",
+    "O cofre voltou a responder, mas esta trancado. A porta de saida continua fechada: nenhuma acao sai para os"
+    " sistemas. Quando o cofre for destravado, ela reabre sozinha, se ninguem a mudar antes.",
 )
 _AVISO_REABRIU: Final = (
     "MCP-CLARO: o cofre voltou e a porta de saida reabriu",
@@ -189,8 +199,9 @@ def decidir(
     """O que fazer com a saida diante da leitura do cofre. ``sem_resposta_seguidas`` ja conta esta leitura.
 
     ``pronta``: a saida fechada porque o cofre nao respondia ja pode reabrir (``pronta_para_reabrir``).
-    ``avisado_trancado``: com a saida fechada por outro motivo, se o ultimo aviso deste fechamento foi o de cofre
-    trancado (``True``), o de cofre de volta ou nenhum (``False``), ou se a porta ainda nao sabe (``None``).
+    ``avisado_trancado``: com a saida fechada por outro motivo, se o ultimo aviso ao ADMIN foi o de cofre trancado
+    (``True``), o de cofre de volta ou nenhum (``False``), ou se a porta ainda nao sabe ou o ADMIN so sabe que o
+    cofre nao respondia (``None``: avisa tanto o trancado quanto a volta).
     """
     if saida.aberta:
         if leitura is Leitura.TRANCADO:
@@ -226,16 +237,18 @@ def _fechamento(saida: estado.EstadoSaida) -> str:
     return saida.mudou_em.isoformat() if saida.mudou_em is not None else "?"
 
 
-async def avisado_trancado(c: AsyncConnection, saida: estado.EstadoSaida) -> bool:
-    """O ultimo aviso do cofre ao ADMIN, com a saida fechada como esta, foi o de cofre trancado?
+async def avisado_trancado(c: AsyncConnection, saida: estado.EstadoSaida) -> bool | None:
+    """O que o ADMIN ja sabe do cofre, com a saida fechada como esta: ``True``, o ultimo aviso foi o de cofre
+    trancado; ``False``, foi o de volta, ou nenhum; ``None``, so sabe que o cofre nao respondia (``decidir`` avisa
+    tanto o trancado quanto a volta).
 
-    Saida fechada pelo cofre: sim (o aviso de fechar disse que o cofre estava trancado ou sem resposta). Fechada
-    por outro: le o extrato desde o fechamento; sem aviso do cofre neste fechamento, vale o que a linha
-    ``estado_saida_mudou`` dele herdou do fechamento anterior (``CAMPO_HERDADO``)."""
+    Saida fechada pelo cofre: o aviso de fechar disse "trancado" ou "nao responde". Fechada por outro: le o extrato
+    desde o fechamento; sem aviso do cofre neste fechamento, vale o que a linha ``estado_saida_mudou`` dele herdou
+    do fechamento anterior (``CAMPO_HERDADO``)."""
     if saida.aberta:
         return False
     if fechada_pelo_cofre(saida):
-        return True
+        return True if saida.motivo == MOTIVO_TRANCADO else None
     # So as linhas desde o fechamento (a particao e o indice do extrato vao pela hora): um fechamento antigo nao
     # conta, e a busca nao varre o extrato inteiro.
     desde = saida.mudou_em or datetime.min.replace(tzinfo=UTC)
@@ -256,16 +269,21 @@ async def avisado_trancado(c: AsyncConnection, saida: estado.EstadoSaida) -> boo
     if tipo is not None:
         return bool(tipo == TIPO_TRANCADO_COM_SAIDA_FECHADA)
     # A linha do proprio fechamento: com a saida como esta, e a ultima "estado_saida_mudou" desde ele.
+    # Indice parcial ``extrato_saida_cofre_idx`` (migracao 0005): a busca nao passa pelas outras linhas.
     herdado = (
         await c.execute(
             text(
-                "SELECT dados->>:campo FROM extrato WHERE criado_em >= :desde AND tipo = 'estado_saida_mudou'"
-                " ORDER BY criado_em DESC, id DESC LIMIT 1"
+                "SELECT jsonb_typeof(dados -> :campo) AS tipo, dados ->> :campo AS valor FROM extrato"
+                " WHERE criado_em >= :desde AND tipo = 'estado_saida_mudou' ORDER BY criado_em DESC, id DESC LIMIT 1"
             ),
             {"campo": CAMPO_HERDADO, "desde": desde},
         )
-    ).scalar_one_or_none()
-    return herdado == "true"
+    ).first()
+    if herdado is None or herdado.tipo is None:
+        return False
+    if herdado.tipo == "null":
+        return None
+    return bool(herdado.valor == "true")
 
 
 async def aplicar(
@@ -292,6 +310,22 @@ async def aplicar(
     decisao = decidir(leitura, sem_resposta_seguidas, saida, pronta=pronta, avisado_trancado=avisado)
     if decisao.passo is Passo.NADA:
         return decisao, saida
+    if decisao.passo is Passo.FECHAR and fechada_pelo_cofre(saida):
+        # Ja fechada pelo cofre "sem resposta", e ele voltou a responder trancado: a porta continua fechada, desde a
+        # mesma hora. So o motivo muda (para reabrir, vale a regra do cofre trancado), com linha e aviso proprios.
+        await c.execute(text("UPDATE estado_saida SET motivo = :m WHERE id = 1"), {"m": MOTIVO_TRANCADO})
+        await registrar(c, papel=papel, tipo=TIPO_PASSOU_A_TRANCADO, dados={"fechada_em": _fechamento(saida)})
+        assunto, texto_aviso = _AVISO_PASSOU_A_TRANCADO
+        await avisar_admin(
+            c,
+            EVENTO_TRANCADO,
+            assunto,
+            {"texto": texto_aviso, "motivo": MOTIVO_TRANCADO},
+            f"saida-cofre:{EVENTO_TRANCADO}:passou:{_fechamento(saida)}",
+            emails_admin,
+        )
+        log.warning("saida_pelo_cofre", passo="passou_a_trancado", leitura=str(leitura))
+        return Decisao(Passo.FECHAR, MOTIVO_TRANCADO), saida
     if decisao.passo is Passo.FECHAR:
         motivo = decisao.motivo or MOTIVO_TRANCADO
         await estado.mudar_saida(c, aberta=False, quem=QUEM, motivo=motivo, papel=papel)

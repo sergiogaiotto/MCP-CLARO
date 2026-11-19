@@ -20,7 +20,7 @@ AVISOS: Final[dict[str, str]] = {
     "aplicativo_habilitado": "Pronto. O aplicativo foi habilitado.",
     "aplicativo_reativado": (
         "Pronto. O aplicativo foi reativado. Os pedidos dele voltam a passar, se nenhum bloqueio ou pausa os"
-        " segurar. As ações dele que já tinham parado não voltam."
+        " segurar. As ações dele só saem com a porta de saída aberta. As que já tinham parado não voltam."
     ),
     "aplicativo_nada_mudou": (
         "Nada mudou: este aplicativo não é um assistente pausado. Um programa pausado volta pela tela do programa."

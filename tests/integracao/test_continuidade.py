@@ -425,3 +425,32 @@ async def test_marca_restaurado_adianta_o_protocolo_antes_de_a_entrada_subir(ban
     assert numero(depois_da_conferencia) > depois_da_marca
     assert numero(depois_da_conferencia) >= depois_da_marca + SALTO_NA_RESTAURACAO
     assert protocolo_valido(depois_da_conferencia)
+
+
+async def test_partida_poupa_a_ronda_e_o_vigia_pelos_client_id_desta_instalacao(banco: Banco) -> None:
+    """Com PATROL_CLIENT_ID e WATCH_CLIENT_ID proprios, a conferencia na partida do despachante (o mesmo caminho do
+    app) poupa esses dois, e nao os client_id padrao: a ronda e o vigia continuam conferindo o gateway."""
+    from mcp_claro.despachante.app import _conferir_continuidade_na_partida
+
+    comum = await banco.aplicativo("app-comum")
+    ronda = await banco.aplicativo("ronda-acme", tipo="programa")
+    vigia = await banco.aplicativo("vigia-acme", tipo="programa")
+    padrao = await banco.aplicativo("mcp-claro-ronda", tipo="programa")
+    await conferir_continuidade(banco.despachante, 0)
+    await marcar_restaurado(banco.despachante, "Pessoa da operacao", "Ensaio com client_id proprios")
+    p = Parametros(
+        **(
+            banco.p.model_dump()
+            | {
+                "PATROL_CLIENT_ID": "ronda-acme",
+                "WATCH_CLIENT_ID": "vigia-acme",
+                "WATCH_CONTINUITY_URL": None,
+                "CONTINUITY_REQUIRE_WATCH": False,
+            }
+        )
+    )
+
+    await _conferir_continuidade_na_partida(p, banco.despachante)
+
+    situacoes = dict(await banco.linhas("SELECT id, situacao FROM aplicativos"))
+    assert situacoes == {comum: "pausado", ronda: "ativo", vigia: "ativo", padrao: "pausado"}
