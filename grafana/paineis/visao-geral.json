@@ -811,6 +811,241 @@
       },
       "timeFrom": "395d",
       "hideTimeOverride": false
+    },
+    {
+      "type": "row",
+      "id": 17,
+      "title": "Acoes (Fase 2)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "id": 18,
+      "title": "Fila de saida agora",
+      "description": "Quantas acoes esperam a pessoa (ficha), esperam a hora de sair, estao saindo, e quantas ficaram nao confirmadas sem decisao da pessoa. 'Desde' e a mais antiga de cada grupo.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 63,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT estado AS \"Estado\", acoes AS \"Acoes\", desde AS \"Desde\"\nFROM medicoes.v_fila_agora\nORDER BY estado"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 19,
+      "title": "Acoes enviadas, por estado final",
+      "description": "Como cada envio terminou: enviada, nao saiu, sistema pediu dados ou nao confirmada.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 63,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT minuto AS time, estado AS metric, sum(contagem) AS \"Acoes\"\nFROM medicoes.v_acoes\nWHERE $__timeFilter(minuto)\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Acoes pedidas, por caminho",
+      "description": "Por onde cada acao pedida passou: ficha, limite, risco alto (passkey) ou periodo de experiencia.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT minuto AS time, rota AS metric, sum(contagem) AS \"Acoes\"\nFROM medicoes.v_acoes_pedidas\nWHERE $__timeFilter(minuto)\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Acoes paradas antes de sair, por motivo",
+      "description": "O despachante reconfere tudo antes de enviar: bloqueio, ordem que mudou, codigo de conferencia que nao bate.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 71,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT minuto AS time, motivo AS metric, sum(contagem) AS \"Acoes\"\nFROM medicoes.v_acoes_paradas\nWHERE $__timeFilter(minuto)\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     }
   ]
 }

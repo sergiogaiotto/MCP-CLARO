@@ -206,6 +206,39 @@ CREATE TRIGGER comprovantes_sem_update_delete BEFORE UPDATE OR DELETE ON comprov
   FOR EACH ROW EXECUTE FUNCTION extrato_recusa_mudanca();
 """
 
+# Medicoes da Fase 2 para o Grafana: so contagens, nunca protocolo, argumento nem pessoa.
+VISOES = r"""
+CREATE VIEW medicoes.v_acoes AS
+  SELECT minuto, coalesce(rotulos ->> 'estado', 'sem_estado') AS estado,
+         coalesce(rotulos ->> 'sistema', 'sem_sistema') AS sistema, valor AS contagem
+  FROM medicoes.minuto WHERE nome = 'acoes';
+COMMENT ON VIEW medicoes.v_acoes IS 'Fim do envio de cada acao, por minuto, estado e sistema.';
+
+CREATE VIEW medicoes.v_acoes_pedidas AS
+  SELECT minuto, coalesce(rotulos ->> 'rota', 'sem_rota') AS rota, valor AS contagem
+  FROM medicoes.minuto WHERE nome = 'acoes_pedidas';
+COMMENT ON VIEW medicoes.v_acoes_pedidas IS 'Acoes pedidas por minuto e caminho (ficha, limite, risco alto, experiencia).';
+
+CREATE VIEW medicoes.v_acoes_paradas AS
+  SELECT minuto, coalesce(rotulos ->> 'motivo', 'sem_motivo') AS motivo, valor AS contagem
+  FROM medicoes.minuto WHERE nome = 'acoes_paradas';
+COMMENT ON VIEW medicoes.v_acoes_paradas IS 'Acoes paradas pelo despachante antes de sair, por minuto e motivo.';
+
+-- Retrato da fila agora: o que espera a pessoa, o que espera a hora e o que esta em duvida sem decisao.
+CREATE VIEW medicoes.v_fila_agora AS
+  SELECT f.estado, count(*) AS acoes, min(f.mudou_em) AS desde
+  FROM public.fila_saida f
+  WHERE f.estado IN ('aguardando_ficha', 'liberada', 'enviando')
+     OR (f.estado = 'nao_confirmada'
+         AND NOT EXISTS (SELECT 1 FROM public.decisoes_nao_confirmada d WHERE d.operacao_id = f.operacao_id))
+  GROUP BY f.estado;
+COMMENT ON VIEW medicoes.v_fila_agora IS
+  'Fila de saida agora: aguardando ficha, liberada, enviando e nao confirmada ainda sem decisao da pessoa.';
+
+GRANT SELECT ON medicoes.v_acoes, medicoes.v_acoes_pedidas, medicoes.v_acoes_paradas, medicoes.v_fila_agora
+  TO grafana_leitor;
+"""
+
 GRANTS = r"""
 GRANT USAGE ON SEQUENCE protocolo_seq TO mcp_claro_entrada;
 GRANT SELECT, INSERT ON operacoes, fichas, fila_saida TO mcp_claro_entrada;
@@ -237,6 +270,7 @@ GRANT UPDATE (desfecho) ON operacoes TO mcp_claro_entrada, mcp_claro_rotinas;
 def upgrade() -> None:
     sql_em_bloco(SQL)
     sql_em_bloco(GRANTS)
+    sql_em_bloco(VISOES)
 
 
 def downgrade() -> None:
