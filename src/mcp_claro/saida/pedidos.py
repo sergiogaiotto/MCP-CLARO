@@ -31,7 +31,7 @@ from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios, politica
-from mcp_claro.saida import fila
+from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import FINAIS, FRASE, Estado
 from mcp_claro.saida.fila import Operacao, Rota
 from mcp_claro.saida.protocolo import FUSO, chave_pedido_igual, protocolo_valido
@@ -109,7 +109,14 @@ class Pedidos:
             raise AcaoRecusada("fora_da_ordem", "Ferramenta fora da sua ordem de servico. Nada foi enviado.")
         chave = chave_pedido_igual(pedido.pessoa_id, pedido.aplicativo.id, f.id, pedido.argumentos)
         async with self.engine.begin() as c:
+            # Mesma trava do envio: um bloqueio ligado agora ou entrou antes (e e visto aqui) ou espera este
+            # pedido terminar (e o para, com ele no comprovante).
+            await travas.compartilhar_envio(c, pedido.pessoa_id, pedido.aplicativo.id, f.sistema.id)
             await fila.travar_pedido_igual(c, chave)
+            vigentes = await bloqueios.ativos(c, pessoa_id=pedido.pessoa_id, aplicativo_id=pedido.aplicativo.id)
+            bloqueio = vigentes.para(f.sistema.id)
+            if bloqueio is not None:
+                raise AcaoRecusada(bloqueio.motivo_recusa(), bloqueio.mensagem())
             valores = await politica.varios(
                 c,
                 "DUPLICATE_WINDOW_MINUTES",

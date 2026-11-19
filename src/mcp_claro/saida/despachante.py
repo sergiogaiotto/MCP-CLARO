@@ -21,12 +21,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import mcp_types as types
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import FerramentaVitrine
@@ -103,10 +103,10 @@ class PortaDeSaida:
                 if not await pg.fetchval("SELECT pg_try_advisory_lock($1)", travas.DESPACHANTE_UNICO):
                     return
                 await pg.add_listener(CANAL, self._aviso)
-                await self.assumir()
+                await self.assumir(dono)
                 while True:
                     await pg.fetchval("SELECT 1")  # a trava segue nossa enquanto a conexao vive
-                    if not await self.enviar_uma():
+                    if not await self.enviar_uma(dono):
                         await self._esperar()
             finally:
                 # A conexao nao volta ao pool: com ela vai a trava de sessao e o LISTEN.
@@ -129,8 +129,18 @@ class PortaDeSaida:
             await asyncio.wait_for(self._acordar.wait(), timeout=espera)
         self._acordar.clear()
 
-    async def assumir(self) -> list[str]:
-        async with self.engine.begin() as c:
+    @contextlib.asynccontextmanager
+    async def _transacao(self, dono: AsyncConnection | None) -> AsyncIterator[AsyncConnection]:
+        """Transacao na conexao que segura a trava (se houver): se ela cair, a trava some e a gravacao falha."""
+        if dono is None:
+            async with self.engine.begin() as c:
+                yield c
+        else:
+            async with dono.begin():
+                yield dono
+
+    async def assumir(self, dono: AsyncConnection | None = None) -> list[str]:
+        async with self._transacao(dono) as c:
             retomadas = await fila.retomar_enviando(c, quem="despachante:retomada")
             await registrar(c, papel="despachante", tipo="despachante_assumiu", campos={"retomadas": len(retomadas)})
         self.assumiu.set()
@@ -139,8 +149,13 @@ class PortaDeSaida:
 
     # Uma acao
 
-    async def enviar_uma(self) -> bool:
-        """Processa a proxima acao na hora. Devolve ``False`` quando nao ha o que fazer agora."""
+    async def enviar_uma(self, dono: AsyncConnection | None = None) -> bool:
+        """Processa a proxima acao na hora. Devolve ``False`` quando nao ha o que fazer agora.
+
+        ``dono`` e a conexao que segura a trava de despachante unico: a reconferencia e a marca "enviando"
+        sao gravadas nela. O fim do envio vai por outra conexao, para a resposta ficar guardada mesmo se a
+        trava cair no meio (ai ela so entra no extrato e na tela de decisao).
+        """
         async with self.engine.connect() as c:
             if not (await estado.ler_saida(c)).aberta:
                 return False
@@ -155,7 +170,7 @@ class PortaDeSaida:
             ).first()
         if candidata is None:
             return False
-        async with self.engine.begin() as c:
+        async with self._transacao(dono) as c:
             await travas.compartilhar_envio(c, candidata.pessoa_id, candidata.aplicativo_id, candidata.sistema_id)
             if not (await estado.ler_saida(c)).aberta:
                 return False

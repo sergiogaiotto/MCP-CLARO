@@ -360,14 +360,15 @@ A porta de saída é a parte mais delicada do produto. Aqui está como ela evita
 - aguardando ficha: vira liberada, vencida ou cancelada;
 - liberada, com hora de saída: vira enviando, cancelada ou parada por bloqueio;
 - enviando: vira enviada, não saiu, sistema pediu dados ou não confirmada;
-- não confirmada: muda só pela decisão registrada da pessoa, e a linha nunca é reenviada.
+- não confirmada: muda só pela decisão registrada da pessoa, e a linha nunca é reenviada;
+- aguardando ficha e liberada também viram parada por restauração, quando o banco volta de um backup.
 
-Vencida, enviada, não saiu, sistema pediu dados, cancelada e parada por bloqueio são estados finais.
+Vencida, enviada, não saiu, sistema pediu dados, cancelada, parada por bloqueio e parada por restauração são estados finais.
 
 **Regras de mudança.**
 
 - Cada mudança é um UPDATE que exige o estado anterior, pela tabela de transições do módulo `saida`. Se o estado já mudou, nada acontece.
-- Só vira "não saiu" a falha comprovada antes do envio, como conexão recusada. Qualquer falha depois disso, ou na dúvida, vira "não confirmada".
+- Só vira "não saiu" a falha comprovada antes do envio, como conexão recusada, recusa do sistema na porta (401, 403, redirecionamento) ou erro do protocolo que o sistema devolve antes de executar (método ou argumentos inválidos). Qualquer falha depois disso, ou na dúvida, vira "não confirmada".
 - O cliente do kit entrega tempo esgotado e resposta fora de 2xx como `MCPError`. Por isso essa separação tem regra escrita e teste próprio.
 - Ao assumir a trava, o despachante muda todo "enviando" para "não confirmada" antes de enviar qualquer coisa.
 - Resposta que chega depois só entra no extrato e na tela de decisão. Ela não muda o estado.
@@ -376,9 +377,10 @@ Vencida, enviada, não saiu, sistema pediu dados, cancelada e parada por bloquei
 
 - O despachante segura uma trava consultiva do PostgreSQL, para haver um só ativo. Um despachante de reserva espera a trava.
 - Toda gravação de "enviando" usa a conexão que segura a trava. Se ela cair, a trava some e a gravação falha.
-- Numa transação, ele pega a linha liberada com `SELECT ... FOR UPDATE SKIP LOCKED`, que pula linhas já travadas. Trava também, com `FOR SHARE`, as linhas do aplicativo e da pessoa.
+- Numa transação, ele toma, compartilhadas e sempre na mesma ordem, as travas consultivas de alcance (tudo, sistema, aplicativo e pessoa). Depois pega a linha liberada com `SELECT ... FOR UPDATE SKIP LOCKED`, que pula linhas já travadas.
 - Na mesma transação, confere bloqueio e cancelamento, grava "enviando" e faz COMMIT. Só depois chama o sistema, uma vez.
-- Bloquear trava as mesmas linhas com `FOR UPDATE` e monta o comprovante na mesma transação. Criar uma linha liberada também passa por essa trava.
+- Bloquear toma, exclusiva, a trava do seu alcance e monta o comprovante na mesma transação. Fechar a porta de saída toma a de "tudo". Criar uma linha liberada e confirmar uma ficha também passam pela trava compartilhada.
+- Travas consultivas, e não `FOR SHARE` nas linhas de pessoas e aplicativos, porque travar uma linha exige permissão de alterar a tabela, e o despachante não altera o cadastro.
 - Gastar um limite é um UPDATE que só passa se houver saldo. Cada ficha libera uma linha só, por restrição única.
 - O despachante acorda por LISTEN/NOTIFY, os avisos do próprio PostgreSQL, e faz uma varredura de reserva. Não se usa PgBouncer em modo de transação, que quebra esses avisos e a trava.
 - Bibliotecas de fila prontas, como `pgqueuer` e `procrastinate`, ficam fora do caminho das ações. Elas repetem tarefas, e a porta de saída tenta uma vez só.

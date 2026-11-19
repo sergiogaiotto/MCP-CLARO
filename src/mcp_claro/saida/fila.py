@@ -419,6 +419,19 @@ async def em_experiencia(c: AsyncConnection, pessoa_id: uuid.UUID, aplicativo_id
 
 
 async def _ficha_travada(c: AsyncConnection, ficha_id: uuid.UUID, pessoa_id: uuid.UUID) -> Row[Any]:
+    alvo = (
+        await c.execute(
+            text(
+                "SELECT o.pessoa_id, o.aplicativo_id, o.sistema_id FROM fichas fi"
+                " JOIN operacoes o ON o.id = fi.operacao_id WHERE fi.id = :f"
+            ),
+            {"f": ficha_id},
+        )
+    ).first()
+    if alvo is None or alvo.pessoa_id != pessoa_id:
+        raise DecisaoRecusada("ficha_desconhecida", "Ficha nao encontrada.")
+    # Liberar uma acao passa pela mesma trava do envio e do bloqueio (ordem: consultiva, ficha, fila).
+    await travas.compartilhar_envio(c, alvo.pessoa_id, alvo.aplicativo_id, alvo.sistema_id)
     linha = (
         await c.execute(
             text(
