@@ -4,6 +4,7 @@
 <h1>{{ titulo }}</h1>
 <div class="cartao recusa" role="alert">
   <p>{{ mensagem }}</p>
+  {% if link is defined %}<p><a class="botao" href="{{ link }}" hx-boost="false">{{ link_texto }}</a></p>{% endif %}
 </div>
 <p><a href="/telas">Voltar para o início</a>{% if not sessao %} · <a href="/telas/login" hx-boost="false">Entrar</a>{% endif %}</p>
 {% endblock %}

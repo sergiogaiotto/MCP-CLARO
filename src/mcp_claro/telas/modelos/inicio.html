@@ -12,7 +12,19 @@
 {% else %}
 <h1>Olá, {{ sessao.pessoa.nome or "pessoa" }}.</h1>
 <p>O que você quer fazer?</p>
+{% if pendencias is defined and pendencias and pendencias.total %}
+<p class="atencao"><a href="/telas/pendencias">Caixa de pendências: {{ pendencias.total }} {% if pendencias.total == 1 %}coisa espera{% else %}coisas esperam{% endif %} por você</a>.
+  {% if pendencias.fichas %}{{ pendencias.fichas | length }} {% if pendencias.fichas | length == 1 %}ficha{% else %}fichas{% endif %} para decidir.{% endif %}</p>
+{% endif %}
 <div class="cartoes">
+  <section class="cartao">
+    <h2><a href="/telas/pendencias">Caixa de pendências{% if pendencias is defined and pendencias %} ({{ pendencias.total }}){% endif %}</a></h2>
+    <p>Fichas para você decidir, ações na espera para sair e resultados que ainda não foram confirmados.</p>
+  </section>
+  <section class="cartao">
+    <h2><a href="/telas/acoes">Minhas ações</a></h2>
+    <p>Cada ação pedida em seu nome, pelo número de protocolo. Busque e veja o andamento.</p>
+  </section>
   <section class="cartao">
     <h2><a href="/telas/ordens">Minhas ordens de serviço</a></h2>
     <p>Veja o que cada aplicativo pode ler por você, e até quando.</p>
@@ -35,6 +47,20 @@
     <h2><a href="/telas/autorizar">Autorizar um sistema</a></h2>
     <p>Alguns sistemas pedem que você autorize na página deles. Comece por aqui.</p>
   </section>
+  <section class="cartao">
+    <h2><a href="/telas/limites">Meus limites</a></h2>
+    <p>Deixe um aplicativo fazer uma ação sem ficha, poucas vezes por dia e por pouco tempo.</p>
+  </section>
+  <section class="cartao">
+    <h2><a href="/telas/passkeys" hx-boost="false">Minhas passkeys</a></h2>
+    <p>A passkey confirma que é você nas ações de risco alto e nos limites.</p>
+  </section>
+  {% if cuida_de_programa is defined and cuida_de_programa %}
+  <section class="cartao">
+    <h2><a href="/telas/programas">Meus programas</a></h2>
+    <p>Programas que rodam sozinhos e têm você como responsável ou substituto. Veja cada um e confirme, na revisão periódica, que ele segue valendo.</p>
+  </section>
+  {% endif %}
   {% if sessao.admin %}
   <section class="cartao">
     <h2><a href="/telas/admin">Área do ADMIN</a></h2>

@@ -29,6 +29,8 @@ x-gateway: &gateway
     DISPATCHER_INTERNAL_URL: https://despachante:9443
     VAULT_ADDR: https://cofre:8200
     VAULT_SEAL_MODE: static
+    # Avisos ao ADMIN: as rotinas (fichas, programas, ronda) e o despachante (cofre trancado fecha a saida).
+    NOTIFY_ADMIN_EMAILS: admin@mcp-claro.localhost
   depends_on:
     migrar:
       condition: service_completed_successfully
@@ -151,7 +153,6 @@ services:
       SMTP_STARTTLS: desligado
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_assinatura
       GRAFANA_WEBHOOK_PASSWORD_FILE: /run/secrets/grafana_webhook
-      NOTIFY_ADMIN_EMAILS: admin@mcp-claro.localhost
       # A porta das rotinas aceita so o Grafana (alertas por webhook interno).
       INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_rotinas.pem
       INTERNAL_CLIENT_CERT_FILE: /run/secrets/rotinas_cliente_cert.pem
@@ -382,9 +383,25 @@ services:
 
   # So no roteiro de restauracao (docs/restauracao.md), nunca sobe sozinho:
   #   docker compose ... --profile restauracao run --rm restaurar-logico /var/lib/mcp-claro-backup/logico/<carimbo>
-
-  # So no roteiro de restauracao (docs/restauracao.md), nunca sobe sozinho:
-  #   docker compose ... --profile restauracao run --rm restaurar-logico /var/lib/mcp-claro-backup/logico/<carimbo>
+  # Usa o dono do servidor (db_migracao) e a senha da cifra (backup_cifra), que voltam do lugar seguro.
+  restaurar-logico:
+    image: mcp-claro-backup:dev
+    profiles: ["restauracao"]
+    restart: "no"
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    entrypoint: ["/usr/local/bin/restaurar-logico.sh"]
+    secrets:
+      - backup_cifra
+      - db_migracao
+      - ca_interna.pem
+    volumes:
+      - backup_local:/var/lib/mcp-claro-backup:ro
+    logging:
+      driver: local
+    networks: [interna]
 
   portao:
     build: ./caddy

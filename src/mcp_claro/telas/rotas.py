@@ -1,7 +1,11 @@
 """Rotas das telas, montadas em ``/telas`` no app da entrada.
 
-Telas da pessoa: inicio, entrar e sair, "Minhas ordens de servico", "Meu extrato", "Bloquear agora"
-e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema" (``telas/autorizar.py``).
+Telas da pessoa (``TelasDaPessoa``): entrar e sair (e entrar de novo na hora, o login refeito com
+``prompt=login`` e ``max_age=0``, que as acoes de maior risco sem passkey e as passkeys pedem), "Minhas ordens de
+servico" e "Meu extrato". "Bloquear agora" e "Pausar" ficam em ``telas/bloqueio.py`` e "Autorizar um sistema" em
+``telas/autorizar.py``. Fase 2: o inicio (``/`` e ``/telas``, com a caixa de pendencias e os cartoes), ficha,
+"Minhas acoes" e "estamos confirmando" (``telas/acoes.py``), passkeys (``telas/passkeys.py``), limites por
+aproximacao (``telas/limites.py``) e "Meus programas" (``telas/admin_programas.py``).
 Telas do ADMIN: em ``telas/admin.py`` (cadastro) e ``telas/admin_portas.py`` (bloqueios, portas,
 pessoas, autorizacao e chaves dos sistemas).
 """
@@ -21,13 +25,24 @@ from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada.cracha import ChavesPublicas
 from mcp_claro.logs import logger
-from mcp_claro.telas import admin, admin_portas, consultas
+from mcp_claro.telas import admin, admin_portas, admin_programas, consultas
+from mcp_claro.telas.acoes import TelasDeAcoes
 from mcp_claro.telas.autorizar import TelasDeAutorizacao
 from mcp_claro.telas.bloqueio import TelasDeBloqueio
 from mcp_claro.telas.config import ConfigTelas
+from mcp_claro.telas.limites import TelasDeLimites
 from mcp_claro.telas.login import LoginRecusado, ProvedorLogin
-from mcp_claro.telas.nucleo import PortaInterna, Telas, numero_pagina, tela, uuid_ou_none, ver_depois
+from mcp_claro.telas.nucleo import (
+    PortaInterna,
+    Telas,
+    numero_pagina,
+    tela,
+    uuid_ou_none,
+    ver_depois,
+    voltar_refeito,
+)
 from mcp_claro.telas.paginas import PASTA_ESTATICOS, criar_ambiente
+from mcp_claro.telas.passkeys import TelasDePasskeys
 from mcp_claro.telas.seguranca import (
     COOKIE_LOGIN,
     COOKIE_SESSAO,
@@ -56,18 +71,24 @@ class TelasDaPessoa:
     def __init__(self, t: Telas) -> None:
         self.t = t
 
-    # --- Inicio, entrar e sair ---
-
-    async def inicio(self, pedido: Request) -> Response:
-        await self.t.sessao(pedido)
-        return self.t.pagina(pedido, "inicio.html")
+    # --- Entrar e sair (o inicio e ``TelasDeAcoes.inicio``, com a caixa de pendencias) ---
 
     async def entrar(self, pedido: Request) -> Response:
-        voltar = caminho_seguro(pedido.query_params.get("voltar"))
+        return await self._ao_provedor(pedido, caminho_seguro(pedido.query_params.get("voltar")))
+
+    async def refazer(self, pedido: Request) -> Response:
+        """Login refeito na hora: o provedor pede a senha de novo (``prompt=login``, ``max_age=0``) e a pessoa volta
+        para a tela de onde saiu (so caminho local das telas). A sessao nova guarda o ``auth_time`` novo.
+
+        Pedem isso as acoes de maior risco sem a passkey e mexer nas passkeys (``Telas.login_recente``)."""
+        voltar = voltar_refeito(pedido.query_params.get("voltar") or "/telas")
+        return await self._ao_provedor(pedido, voltar, refazer=True)
+
+    async def _ao_provedor(self, pedido: Request, voltar: str, *, refazer: bool = False) -> Response:
         try:
             async with self.t.engine.begin() as c:
                 login = await criar_login(c, voltar_para=voltar, prazo_segundos=self.t.cfg.login_segundos)
-            destino = await self.t.provedor.url_login(login)
+            destino = await self.t.provedor.url_login(login, refazer=refazer)
         except (httpx2.HTTPError, LoginRecusado) as erro:
             log.warning("telas_login_indisponivel", erro=type(erro).__name__)
             return self.t.erro(
@@ -296,6 +317,7 @@ def rotas_telas(
     chaves = ChavesPublicas(_url_jwks(p), cache_segundos=p.IDP_JWKS_CACHE_SECONDS, http=http)
     t = Telas(p, cfg, engine, despachante, ProvedorLogin(p, cfg, http, chaves), criar_ambiente(cfg.fuso))
     pessoa = TelasDaPessoa(t)
+    acoes = TelasDeAcoes(t)  # Fase 2; o inicio mostra a contagem da caixa de pendencias
     adm = admin.TelasDoAdmin(t)
 
     def g(caminho: str, funcao: object) -> Route:
@@ -305,9 +327,10 @@ def rotas_telas(
         return Route(caminho, funcao, methods=["POST"])  # type: ignore[arg-type]
 
     internas: list[BaseRoute] = [
-        g("/", pessoa.inicio),
+        g("/", acoes.inicio),
         g("/login", pessoa.entrar),
         g("/login/volta", pessoa.volta),
+        g("/login/refazer", pessoa.refazer),
         post("/sair", pessoa.sair),
         g("/ordens", pessoa.ordens),
         post("/ordens", pessoa.dar_ordem),
@@ -315,6 +338,10 @@ def rotas_telas(
         g("/extrato", pessoa.extrato),
         *TelasDeBloqueio(t).rotas(),
         *TelasDeAutorizacao(t).rotas(),
+        *acoes.rotas(),
+        *TelasDePasskeys(t).rotas(),
+        *TelasDeLimites(t).rotas(),
+        *admin_programas.rotas_admin_programas(t),  # antes de adm.rotas(): /admin/programas e destas telas
         *adm.rotas(),
         *admin_portas.TelasDoAdminPortas(t).rotas(),
         Mount("/estaticos", app=StaticFiles(directory=PASTA_ESTATICOS), name="estaticos"),
@@ -322,7 +349,7 @@ def rotas_telas(
     protecao = [Middleware(CabecalhosSeguranca, hsts=p.PUBLIC_BASE_URL.startswith("https://"))]
     roteador = Router(routes=internas, default=pessoa.nao_achada, redirect_slashes=False)
     return [
-        Route("/telas", pessoa.inicio, methods=["GET"], middleware=protecao),
+        Route("/telas", acoes.inicio, methods=["GET"], middleware=protecao),
         Mount("/telas", app=roteador, name="telas", middleware=protecao, max_body_size=MAXIMO_FORMULARIO),
     ]
 

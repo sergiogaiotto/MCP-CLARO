@@ -41,6 +41,7 @@ OUTRO_RECURSO = "https://outro-servico.teste/api"
 RONDA = "mcp-claro-ronda"
 VIGIA = "mcp-claro-vigia"
 ADMIN = "admin-ronda@exemplo.teste"
+LIMITE_DA_RONDA_NOS_TESTES = 10000  # PROGRAM_MAX_REQUESTS_PER_MINUTE da entrada nestes testes
 
 
 def engine_como(p: Parametros, papel: str | None, **extra: Any) -> AsyncEngine:
@@ -157,6 +158,10 @@ def parametros_entrada(banco: Parametros, idp: IdpFalso, porta_idp: int) -> Para
                 "IDP_ISSUER_URL": idp.emissor,
                 "IDP_JWKS_URL": f"http://127.0.0.1:{porta_idp}/jwks",
                 "PATROL_FAILS_TO_CLOSE": 2,
+                # A ronda e o vigia sao programas: cada pedido deles conta no limite por minuto. Varias rodadas no
+                # mesmo minuto, nos testes, passariam do padrao (30), e o controle no limite e inconclusivo. O teste
+                # do limite enche a contagem de proposito (test_ronda_no_limite_por_minuto_e_inconclusiva).
+                "PROGRAM_MAX_REQUESTS_PER_MINUTE": LIMITE_DA_RONDA_NOS_TESTES,
             }
         )
     )
@@ -166,11 +171,23 @@ async def cadastrar(dono: AsyncEngine, idp: IdpFalso) -> str:
     """Programas da ronda e do vigia (pessoas de teste, sem ordem) e Ana com uma ferramenta na vitrine dela."""
     sufixo = uuid.uuid4().hex[:8]
     async with dono.begin() as c:
+        responsavel = await repositorio.pessoa_no_login(c, idp.emissor, "responsavel-ronda", "Responsavel da ronda")
+        substituto = await repositorio.pessoa_no_login(c, idp.emissor, "substituto-ronda", "Substituto da ronda")
         for client_id in (RONDA, VIGIA):
-            await repositorio.habilitar_aplicativo(
+            app = await repositorio.habilitar_aplicativo(
                 c, client_id=client_id, nome=client_id, familia="mcp-claro", tipo="programa"
             )
             await c.execute(text("UPDATE aplicativos SET situacao = 'ativo' WHERE client_id = :c"), {"c": client_id})
+            # Fase 2 (decisao 9): programa so passa com cadastro valendo, com responsavel e substituto.
+            await c.execute(
+                text(
+                    "INSERT INTO programas (aplicativo_id, responsavel_id, substituto_id, finalidade, fim)"
+                    " VALUES (:a, :r, :s, 'Ronda das portas do MCP-CLARO.', current_date + 30)"
+                    " ON CONFLICT (aplicativo_id) DO UPDATE SET situacao = 'ativo', fim = EXCLUDED.fim,"
+                    " responsavel_id = EXCLUDED.responsavel_id, substituto_id = EXCLUDED.substituto_id"
+                ),
+                {"a": app, "r": responsavel.id, "s": substituto.id},
+            )
             programa = await repositorio.pessoa_no_login(c, idp.emissor, f"service-account-{client_id}", None)
             await c.execute(text("UPDATE pessoas SET teste = true WHERE id = :p"), {"p": programa.id})
         app_id = await repositorio.habilitar_aplicativo(

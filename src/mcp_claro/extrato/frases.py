@@ -43,6 +43,180 @@ FRASES: Final[dict[str, Frase]] = {
             "Resultado nao confirmado para o protocolo {protocolo}; nada sera reenviado.",
         ),
         Frase("acao_cancelada", "Acao do protocolo {protocolo} cancelada antes de sair."),
+        # Fase 2: porta unica de saida, fichas, limites e "estamos confirmando".
+        Frase(
+            "acao_repetida",
+            "Pedido igual ao do protocolo {protocolo}: devolvida a operacao original, nada novo saiu.",
+        ),
+        Frase("acao_recusada", "Acao em {ferramenta} recusada antes de virar protocolo: {motivo}."),
+        Frase("ficha_confirmada", "Ficha do protocolo {protocolo} confirmada pela pessoa ({como})."),
+        Frase("ficha_recusada", "Ficha do protocolo {protocolo} recusada pela pessoa; nada saiu."),
+        Frase("ficha_vencida", "A ficha do protocolo {protocolo} venceu sem resposta; nada saiu."),
+        Frase("ficha_avisada", "A pessoa foi avisada da ficha pendente do protocolo {protocolo}."),
+        Frase("seguir_agora", "A pessoa pediu para a acao do protocolo {protocolo} seguir agora, sem esperar."),
+        Frase("acao_parada", "Acao do protocolo {protocolo} parada antes de sair: {motivo}."),
+        Frase("acao_nao_saiu", "Acao do protocolo {protocolo} nao saiu: {motivo}. Nada aconteceu no sistema."),
+        Frase(
+            "acao_sistema_pediu_dados",
+            "O sistema pediu dados no meio da acao do protocolo {protocolo}; o MCP-CLARO nao repassa nem reenvia.",
+        ),
+        Frase("nao_confirmada_decidida", "A pessoa registrou sobre o protocolo {protocolo}: {decisao}."),
+        Frase(
+            "fila_parada_restauracao",
+            "Banco restaurado: {paradas} acoes paradas na fila e {duvida} nao confirmadas; nada sai sem nova"
+            " confirmacao.",
+        ),
+        Frase(
+            "teto_confirmacoes",
+            "O aplicativo {aplicativo} passou do teto de {teto} fichas por hora e foi pausado.",
+        ),
+        Frase(
+            "despachante_assumiu",
+            "Um despachante assumiu a porta de saida; {retomadas} acoes em envio ficaram nao confirmadas.",
+        ),
+        Frase("limite_criado", "A pessoa criou um limite de {por_dia} por dia para {ferramenta}, com passkey."),
+        Frase("limite_ampliado", "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, com passkey."),
+        Frase("limite_encerrado", "O limite de {ferramenta} foi encerrado: {motivo}."),
+        Frase("passkey_cadastrada", "A pessoa cadastrou uma passkey."),
+        Frase("passkey_desativada", "Uma passkey da pessoa foi desativada."),
+        # Fase 2: correcoes da revisao (programas).
+        Frase(
+            "programa_das_portas_mantido",
+            "Programa {programa}, responsavel {responsavel}: a rotina nao o {acao} porque ele testa as portas do"
+            " MCP-CLARO; {motivo}. O ADMIN precisa resolver na tela do programa.",
+        ),
+        Frase(
+            "admin_programa_recadastrado",
+            "Programa {programa}, responsavel {responsavel}, cadastrado de novo por {quem} depois de encerrado;"
+            " substituto {substituto}, valido ate {fim}.",
+        ),
+        Frase(
+            "admin_programa_fim_estendido",
+            "Programa {programa}, responsavel {responsavel}: {quem} estendeu a data de fim de {antes} para {fim}.",
+        ),
+        Frase(
+            "admin_programa_aplicativo_reativado",
+            "Programa {programa}, responsavel {responsavel}: {quem} reativou o aplicativo do programa, que estava"
+            " pausado.",
+        ),
+        # Acoes de um programa ("programa X, responsavel Y"), pelas mesmas regras de acao_*. Hoje so a recusa
+        # acontece de verdade: com PROGRAM_ACTIONS_ENABLED desligado, nenhuma acao de programa vira protocolo.
+        Frase(
+            "programa_acao_recusada",
+            "Acao em {ferramenta} pelo programa {programa}, responsavel {responsavel}, recusada antes de virar"
+            " protocolo: {motivo}.",
+        ),
+        Frase(
+            "programa_acao_pedida",
+            "Acao {ferramenta} pedida pelo programa {programa}, responsavel {responsavel}; protocolo {protocolo}.",
+        ),
+        Frase(
+            "programa_acao_repetida",
+            "Pedido do programa {programa}, responsavel {responsavel}, igual ao do protocolo {protocolo}: devolvida"
+            " a operacao original, nada novo saiu.",
+        ),
+        # Fase 2: correcoes da revisao (nucleo).
+        Frase(
+            "comprovante_bloqueio_partes",
+            "Comprovante do bloqueio: {paradas} acoes paradas antes de sair; {ja_saidas} ja tinham saido;"
+            " {em_conferencia} ainda em conferencia.",
+        ),
+        Frase(
+            "ficha_avisada_webhooks",
+            "O aviso da ficha pendente do protocolo {protocolo} foi so aos webhooks da instalacao; nao houve aviso"
+            " por e-mail a pessoa.",
+        ),
+        Frase(
+            "fila_restauracao_envio_com_dono",
+            "Na conferencia do banco, {enviando} acoes estavam saindo por um despachante no ar; ele mesmo grava o"
+            " fim delas.",
+        ),
+        # Fase 2: segunda rodada (telas).
+        Frase(
+            "limite_criado_login_refeito",
+            "A pessoa criou um limite de {por_dia} por dia para {ferramenta}, com o login refeito na hora (passkey"
+            " desligada nesta instalacao).",
+        ),
+        Frase(
+            "limite_ampliado_login_refeito",
+            "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, com o login refeito na hora (passkey"
+            " desligada nesta instalacao).",
+        ),
+        # Fase 2: terceira rodada (telas).
+        Frase(
+            "admin_aplicativo_reativado",
+            "Aplicativo {aplicativo} reativado por {quem}; estava pausado pela conferencia do banco na partida.",
+        ),
+        # Fase 2: programas que rodam sozinhos (decisao 9).
+        Frase(
+            "programa_leitura_feita",
+            "Leitura em {ferramenta} feita pelo programa {programa}, responsavel {responsavel}.",
+        ),
+        Frase(
+            "programa_leitura_recusada",
+            "Leitura em {ferramenta} pelo programa {programa}, responsavel {responsavel}, recusada: {motivo}.",
+        ),
+        Frase(
+            "programa_pedido_recusado",
+            "Pedido {metodo} do programa {programa}, responsavel {responsavel}, recusado: {motivo}.",
+        ),
+        Frase("programa_recusado", "Pedido do programa {programa}, responsavel {responsavel}, recusado: {motivo}."),
+        Frase(
+            "programa_sem_cadastro",
+            "Pedido do aplicativo {aplicativo}, do tipo programa, recusado: falta o cadastro de programa, com"
+            " responsavel.",
+        ),
+        Frase(
+            "admin_programa_pausado",
+            "Programa {programa}, responsavel {responsavel}, pausado por {quem}: {motivo}.",
+        ),
+        Frase("admin_programa_retomado", "Programa {programa}, responsavel {responsavel}, retomado por {quem}."),
+        Frase(
+            "admin_programa_encerrado",
+            "Programa {programa}, responsavel {responsavel}, encerrado por {quem}: {motivo}.",
+        ),
+        Frase(
+            "admin_programa_responsaveis",
+            "Programa {programa}: {quem} passou a responsabilidade a {responsavel}, com substituto {substituto}.",
+        ),
+        Frase(
+            "admin_programa_chave_trocada",
+            "Programa {programa}, responsavel {responsavel}: {quem} registrou a troca da chave do programa.",
+        ),
+        Frase(
+            "admin_programa_ordem",
+            "Programa {programa}, responsavel {responsavel}: {quem} deu a ordem de servico {modelo}, valida ate {fim}.",
+        ),
+        Frase(
+            "programa_recertificado",
+            "Programa {programa}, responsavel {responsavel}: {quem} confirmou que ele segue valendo.",
+        ),
+        Frase(
+            "programa_pausado_sem_uso",
+            "Programa {programa}, responsavel {responsavel}, pausado: {dias} dias sem pedido.",
+        ),
+        Frase(
+            "programa_pausado_revisao",
+            "Programa {programa}, responsavel {responsavel}, pausado: a revisao de cada {dias} dias venceu sem"
+            " confirmacao; o responsavel foi avisado.",
+        ),
+        Frase(
+            "programa_pausado_chave",
+            "Programa {programa}, responsavel {responsavel}, pausado: a chave passou de {dias} dias sem troca.",
+        ),
+        Frase(
+            "programa_pausado_responsavel",
+            "Programa {programa}, responsavel {responsavel}, pausado: o responsavel ou o substituto nao esta mais"
+            " ativo.",
+        ),
+        Frase(
+            "programa_chave_a_vencer",
+            "A chave do programa {programa}, responsavel {responsavel}, vence em {fim}; o responsavel foi avisado.",
+        ),
+        Frase(
+            "programa_encerrado_fim",
+            "Programa {programa}, responsavel {responsavel}, encerrado: o cadastro valia ate {fim}.",
+        ),
         Frase("bloqueio", "Bloqueio ligado por {quem}: {alcance}."),
         Frase("fechamento", "Fechamento {numero} calculado com {linhas} linhas."),
         Frase(
@@ -149,6 +323,29 @@ FRASES: Final[dict[str, Frase]] = {
         Frase(
             "restauracao_marcada",
             "O roteiro de restauracao marcou o banco como restaurado; a porta de saida fecha na proxima partida.",
+        ),
+        # Fase 2: terceira rodada (nucleo).
+        Frase(
+            "cofre_fechou_saida",
+            "A porta de saida fechou porque {motivo}. Nenhuma acao sai para os sistemas; as ja liberadas esperam.",
+        ),
+        Frase(
+            "cofre_reabriu_saida",
+            "O cofre voltou destravado. A porta de saida, que a conferencia do cofre tinha fechado, reabriu sozinha.",
+        ),
+        Frase(
+            "cofre_trancado_saida_fechada",
+            "O cofre esta trancado. A porta de saida ja estava fechada por outro motivo e continua fechada. Quando"
+            " o cofre voltar, ela nao reabre sozinha.",
+        ),
+        Frase(
+            "cofre_destravado_saida_fechada",
+            "O cofre voltou destravado. A porta de saida continua fechada, porque foi fechada por outro motivo.",
+        ),
+        Frase(
+            "cofre_passou_a_trancado",
+            "A porta de saida continua fechada: o cofre voltou a responder, mas esta trancado. Ela reabre quando ele"
+            " for destravado, se ninguem a mudar antes.",
         ),
     )
 }

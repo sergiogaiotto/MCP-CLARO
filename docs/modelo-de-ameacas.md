@@ -21,7 +21,7 @@ Versão curta, revista a cada fase. Diz o que protegemos, de quem e onde está a
 | Servidor de terceiros | Pede senha à pessoa, escreve instruções na resposta | Sala de visitas; pedidos do servidor barrados; resposta marcada como texto de estranhos (Fase 3) |
 | Resposta perdida e repetição | O aplicativo repete o pedido depois de perder a resposta | Número de protocolo; pedido igual devolve a operação original; "não confirmada" nunca é reenviada |
 | Operador com acesso ao banco | Apagar ou mudar linhas do extrato | Extrato só de acrescentar (gatilho e permissões); fechamento encadeado guardado no vigia, em outra máquina |
-| Restauração de backup | Voltar o banco e reenviar ações antigas | Conferência de continuidade na partida; porta de saída fechada e fila vira "não confirmada" |
+| Restauração de backup | Voltar o banco e reenviar ações antigas, ou dar de novo um número de protocolo já usado | Conferência de continuidade na partida; porta de saída fechada e aplicativos pausados; "enviando" vira "não confirmada" e o que esperava fica parado por restauração; o número de protocolo salta para frente ([restauração](restauracao.md)) |
 | Vazamento por logs e rastros | Crachá ou argumento num log | Logs sem conteúdo (`mcp_claro.logs`); extrato recusa chaves de conteúdo; rastros sem conteúdo |
 | DNS rebinding e cabeçalhos forjados | Pedido com `Host` estranho ou `X-Forwarded-For` falso | `ALLOWED_HOSTS`; `FORWARDED_ALLOW_IPS` só o portão; identidade vem do crachá, nunca do endereço |
 | Cadeia de fornecimento | Imagem ou pacote trocado | Imagens por digest, ações por commit, `uv.lock`, pip-audit, Trivy, Syft, gitleaks |

@@ -1,0 +1,55 @@
+{# O estado de uma acao. So o relogio se atualiza sozinho (htmx); os botoes ficam parados, para o toque nao se
+   perder numa troca. Quando o estado muda, a pagina inteira recarrega (HX-Refresh). #}
+<section id="estado-acao" class="cartao">
+  {% include "acoes/_relogio.html" %}
+  {% if a.op.estado == "aguardando_ficha" %}
+  <p><a class="botao" href="/telas/fichas/{{ a.op.ficha_id }}" hx-boost="false">Abrir a ficha</a></p>
+  {% elif a.op.estado == "liberada" %}
+  <form class="em-linha" method="post" action="/telas/acoes/{{ a.op.id }}/cancelar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="grande">Cancelar antes de sair</button>
+  </form>
+  <form class="em-linha" method="post" action="/telas/acoes/{{ a.op.id }}/seguir">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="secundario">Seguir agora</button>
+  </form>
+  <p class="dica">Cancelar: nada chega ao sistema. Seguir agora: {% if saida_aberta is defined and not saida_aberta %}deixa de esperar o resto do tempo, mas só sai quando a porta de saída reabrir.{% else %}sai sem esperar o resto do tempo.{% endif %}</p>
+  <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>
+  {% elif a.op.estado == "enviando" %}
+  <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>
+  {% elif a.op.estado == "nao_confirmada" %}
+  <p>O pedido saiu uma vez para o sistema {{ a.op.sistema_nome }}, mas a resposta não chegou inteira. Ele pode ter chegado ao sistema.</p>
+  <p><strong>Nada será reenviado.</strong> Confira no sistema se a ação aconteceu e conte para nós.</p>
+  {% if a.op.decisao_pessoa %}
+  <p>Você registrou: <strong>{{ a.decisao }}</strong>.</p>
+  {% if a.op.decisao_pessoa == "nao_aconteceu" %}
+  <p class="dica">Um novo pedido igual fica liberado: ele vira outra ação, com outra ficha.</p>
+  {% else %}
+  <p class="dica">Um pedido igual devolve esta mesma ação. Nada novo sai.</p>
+  {% endif %}
+  {% else %}
+  <form method="post" action="/telas/acoes/{{ a.op.id }}/decidir">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <fieldset>
+      <legend>O que aconteceu no sistema?</legend>
+      <label class="opcao"><input type="radio" name="decisao" value="aconteceu" required> <span><strong>Aconteceu.</strong> <span class="dica">Um pedido igual devolve esta mesma ação. Nada novo sai.</span></span></label>
+      <label class="opcao"><input type="radio" name="decisao" value="nao_aconteceu"> <span><strong>Não aconteceu.</strong> <span class="dica">Um novo pedido igual fica liberado: ele vira outra ação, com outra ficha.</span></span></label>
+      <label class="opcao"><input type="radio" name="decisao" value="nao_sei"> <span><strong>Ainda não sei.</strong> <span class="dica">Um pedido igual devolve esta mesma ação. Nada novo sai.</span></span></label>
+    </fieldset>
+    <label for="observacao">Observação (opcional, até 500 letras)</label>
+    <textarea id="observacao" name="observacao" maxlength="500"></textarea>
+    <button type="submit">Registrar a decisão</button>
+  </form>
+  <p class="dica">A decisão fica registrada uma vez, no seu extrato.</p>
+  {% endif %}
+  {% endif %}
+  {% if a.textos %}
+  <h3>O que o sistema respondeu</h3>
+  <div class="estranho">
+    {% for t in a.textos %}<p>{% for linha in t.splitlines() %}{{ linha | escondidos }}{% if not loop.last %}<br>{% endif %}{% endfor %}</p>{% endfor %}
+  </div>
+  <p class="dica">Texto escrito pelo sistema.</p>
+  {% elif a.op.desfecho and a.op.estado not in ("aguardando_ficha", "liberada", "enviando") %}
+  <p class="dica">Detalhe: {{ a.op.desfecho }}.</p>
+  {% endif %}
+</section>

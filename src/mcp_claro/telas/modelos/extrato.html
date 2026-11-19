@@ -17,7 +17,7 @@
   {% for l in linhas %}
     <tr>
       <td>{{ l.criado_em | data_hora }}</td>
-      <td>{{ l.frase }}{% if l.protocolo %} <span class="dica">Protocolo {{ l.protocolo }}.</span>{% endif %}</td>
+      <td>{{ l.frase | escondidos }}{% if l.protocolo %} <span class="dica">Protocolo {{ l.protocolo }}.</span>{% endif %}</td>
       <td>{{ l.aplicativo or "" }}</td>
       <td>{{ l.sistema or "" }}</td>
     </tr>

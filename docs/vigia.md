@@ -10,11 +10,11 @@ endereço público (`PUBLIC_BASE_URL`), como um aplicativo de fora. Cada rodada 
 
 | Caso | O que a ronda manda | O que precisa voltar |
 | --- | --- | --- |
-| `controle` | Crachá de verdade da ronda, pedido certo na 2026-07-28 | Resposta do servidor (o crachá passou) |
+| `controle` | Crachá de verdade da ronda, lista de ferramentas (`tools/list`) certa na 2026-07-28 | A vitrine da ronda. Qualquer recusa deixa o caso inconclusivo |
 | `cracha_falso` | Cópia do crachá de verdade, com o mesmo `kid`, assinada por chave da própria ronda | 401 |
 | `cracha_vencido` | Crachá de verdade guardado de rondas anteriores, já vencido | 401 |
 | `outro_condominio` | Crachá de verdade do mesmo provedor, com a audiência de outro recurso | 401 |
-| `outra_pessoa` | Crachá de verdade da ronda chamando uma ferramenta da vitrine de outra pessoa | Recusa `fora_da_vitrine` |
+| `outra_pessoa` | Crachá de verdade da ronda chamando uma ferramenta da vitrine de outra pessoa | Recusa `fora_da_vitrine`, e só ela |
 | `versao_antiga_initialize` | `initialize` da geração antiga | 400 com -32022 |
 | `versao_antiga_cabecalho` | Pedido com o cabeçalho `2025-11-25` | 400 com -32022 |
 
@@ -26,15 +26,31 @@ Cada caso tem um desfecho:
 - **pulado**: o caso não pode ser feito agora. Exemplo: nas duas primeiras rodadas depois da partida, ainda não
   há crachá vencido guardado.
 
+No caso `outra_pessoa`, só a recusa `fora_da_vitrine` prova que a vitrine segurou a ferramenta. A recusa que a
+entrada dá antes de olhar a vitrine não prova nada e fica **inconclusiva**: aplicativo ou conta da ronda sem
+valer, cadastro de programa da ronda sem valer, limite por minuto, entrada fechada, bloqueio ou pausa geral.
+Qualquer outra recusa, ou um resultado, é **passagem**. Exemplo: com a vitrine furada, a entrada acha a
+ferramenta da Ana e recusa depois, porque a ronda é um programa e o sistema usa chave por pessoa
+(`programa_sem_chave_propria`). Isso é passagem.
+
+O `controle` só é **conforme** quando a entrada devolve a vitrine da ronda. Toda recusa da lista de ferramentas
+vem antes de olhar a vitrine, e o caso fica **inconclusivo**: aplicativo ou conta da ronda sem valer, cadastro de
+programa dela pausado, encerrado, vencido, sem responsável ativo ou ausente, limite por minuto, entrada fechada,
+bloqueio ou pausa geral (de tudo, do aplicativo ou da conta da ronda) e qualquer motivo novo. Sem o controle
+conforme, a rodada nunca sai "conforme": sai inconclusiva ou, se outro caso passou, "passou". Essa passagem vai
+ao extrato e ao log, mas não conta para fechar a entrada (veja a seguir).
+
 Cada tentativa vira uma linha na tabela `ronda`, só de acrescentar. A coluna `defendeu` é falsa só quando
 houve passagem; o desfecho fica em `detalhes.situacao`. Nenhum crachá vai à tabela, ao log nem ao extrato.
 
 ### Quando algo passa
 
 1. A rodada com passagem registra no extrato: "A ronda das portas achou uma passagem indevida: …".
-2. A ronda conta as rodadas seguidas com passagem **e com o controle em dia**, desde a última mudança do estado
-   da entrada. Rodada sem controle (o crachá da ronda não passou, ou o gateway não respondeu) é inconclusiva e
-   zera a contagem: alarme falso não fecha a entrada.
+2. A ronda conta as rodadas seguidas com passagem **e com o controle conforme**, desde a última mudança do
+   estado da entrada. Rodada sem controle conforme (o crachá da ronda não passou, o gateway não respondeu ou
+   recusou a ronda antes da vitrine) não conta e zera a contagem: alarme falso não fecha a entrada. Por isso,
+   com a ronda bloqueada ou pausada, ou com a entrada fechada, uma passagem fica na tabela `ronda`, no extrato
+   e no log, mas não fecha a entrada.
 3. A cada `PATROL_FAILS_TO_CLOSE` (2) rodadas seguidas, a entrada desce um degrau: aberta, depois só de
    leitura, depois fechada. Cada degrau vai ao extrato ("A ronda das portas achou passagem indevida em 2 rondas
    seguidas e deixou a entrada só de leitura. Só o ADMIN reabre, depois de apurar.") e a um aviso ao ADMIN, por
@@ -53,7 +69,7 @@ com banco próprio. Ele não tem acesso ao banco do gateway e não depende do Gr
 | Parte | Ritmo | O que faz |
 | --- | --- | --- |
 | Pulso | `WATCH_PING_SECONDS` (60 s) | Pede `/.well-known/oauth-protected-resource/mcp` no endereço público. Sem resposta boa por `WATCH_SILENCE_ALARM_SECONDS` (900 s), dispara o alarme de silêncio, uma vez por silêncio. Quando o gateway volta, avisa que voltou |
-| Ronda de fora | `WATCH_PROBE_INTERVAL_SECONDS` (600 s) | Os mesmos sete casos da ronda, com a identidade do vigia. Com `PATROL_FAILS_TO_CLOSE` rodadas seguidas com passagem, dispara alarme. O vigia não fecha a entrada |
+| Ronda de fora | `WATCH_PROBE_INTERVAL_SECONDS` (600 s) | Os mesmos sete casos da ronda, com a identidade do vigia. Com `PATROL_FAILS_TO_CLOSE` rodadas seguidas com passagem e controle conforme, dispara alarme. O vigia não fecha a entrada |
 | Fechamentos | `WATCH_PROBE_INTERVAL_SECONDS` | Busca os fechamentos na entrada com o crachá do programa `mcp-claro-vigia` e guarda só acrescentando |
 | Continuidade | Sob pedido | Diz ao despachante, na partida, qual é o último fechamento guardado |
 
@@ -132,6 +148,17 @@ do tipo programa, com a pessoa da conta de serviço marcada como de teste, sem o
 A ronda escolhe no cadastro uma ferramenta que está na ordem de outra pessoa e não na dela. O vigia, sem acesso
 ao cadastro, usa `WATCH_FOREIGN_TOOL` ou um nome inventado.
 
+**Cadastro em Programas (Fase 2).** A entrada só deixa passar um programa com cadastro valendo. Por isso, a ronda
+e o vigia precisam de cadastro nas telas do ADMIN, em **Programas** ([programas.md](programas.md)): responsável,
+substituto e data de fim. Sem esse cadastro, ou com ele pausado, vencido ou sem responsável ativo, a ronda e a
+ronda de fora ficam inconclusivas.
+
+A rotina dos programas nunca pausa nem encerra a ronda e o vigia (`PATROL_CLIENT_ID` e `WATCH_CLIENT_ID`). Quando
+a revisão periódica vence, a chave passa do prazo, o responsável sai, a data de fim passa ou um deles para de
+fazer pedidos, a rotina avisa com destaque ("IMPORTANTE") o ADMIN, o responsável e o substituto, uma vez por
+situação, e registra no extrato. O ADMIN resolve na tela do programa: confirma que ele segue valendo, registra a
+troca da chave, troca o responsável ou estende a data de fim (até um ano a partir de hoje).
+
 ## Segunda máquina
 
 O arquivo `docker/vigia/compose.vigia.yml` sobe, na segunda máquina, o banco do vigia (`postgres:18.7`, com
@@ -157,14 +184,14 @@ com o valor inicial enquanto não entram em `config/settings.py`.
 
 | Parâmetro | Tipo | Valor inicial | Quem lê | Regra de recusa |
 | --- | --- | --- | --- | --- |
-| `PATROL_CLIENT_ID` | texto | `mcp-claro-ronda` | rotinas | Vazio |
+| `PATROL_CLIENT_ID` | texto | `mcp-claro-ronda` | rotinas e despachante (a conferência do banco na partida não pausa a ronda) | Vazio |
 | `PATROL_KEY_FILE` | caminho | nenhum | rotinas | Obrigatório em piloto e produção |
 | `PATROL_KEY_ID` | texto | nenhum | rotinas | |
 | `PATROL_TOKEN_URL` | URL | derivado do emissor (Keycloak) ou descoberta OIDC | rotinas | Fora de `https://` em piloto e produção |
 | `PATROL_TOKEN_SCOPE` | texto | `mcp-claro` | rotinas | |
 | `PATROL_OTHER_AUDIENCE_SCOPE` | texto | `outro-servico` | rotinas | Vazio desliga o caso |
 | `PATROL_CA_FILE` | caminho | nenhum | rotinas | Só em desenvolvimento |
-| `WATCH_CLIENT_ID` | texto | `mcp-claro-vigia` | vigia e entrada | Vazio |
+| `WATCH_CLIENT_ID` | texto | `mcp-claro-vigia` | vigia, entrada, rotinas e despachante (a rotina dos programas e a conferência do banco não pausam o vigia) | Vazio |
 | `WATCH_KEY_FILE` | caminho | nenhum | vigia | Obrigatório em piloto e produção |
 | `WATCH_KEY_ID` | texto | nenhum | vigia | |
 | `WATCH_TOKEN_URL` | URL | como `PATROL_TOKEN_URL` | vigia | Fora de `https://` em piloto e produção |

@@ -35,8 +35,12 @@
   {% else %}
   <p><strong>Sem estado gravado: a porta de saída conta como fechada.</strong></p>
   {% endif %}
-  <p class="dica">Fechada, nada vai a sistema nenhum. Reabrir é sempre decisão registrada.</p>
+  <p class="dica">Fechada, nada vai a sistema nenhum. Quem reabre é uma pessoa, e fica registrado. Há uma exceção: a saída que a conferência do cofre fechou reabre sozinha quando o cofre volta destravado, se ninguém a mudou depois.</p>
 </div>
+{% if pausados %}
+{% set um = pausados | length == 1 %}
+<p class="atencao" id="aplicativos-pausados">{% if um %}Um aplicativo está pausado{% else %}{{ pausados | length }} aplicativos estão pausados{% endif %} pela conferência do banco: {% for a in pausados %}{{ a.nome }}{% if not loop.last %}, {% endif %}{% endfor %}. Reabrir a saída não {% if um %}o reativa, e o que ele pediu{% else %}os reativa, e o que eles pediram{% endif %} fica parado na hora de sair. Para o que espera seguir, reative {% if um %}o aplicativo{% else %}os aplicativos{% endif %} antes de reabrir a saída. <a href="/telas/admin/aplicativos#pausados">{% if um %}Reativar o aplicativo{% else %}Reativar os aplicativos{% endif %}</a>.</p>
+{% endif %}
 <form method="post" action="/telas/admin/portas/saida" class="cartao">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <fieldset>

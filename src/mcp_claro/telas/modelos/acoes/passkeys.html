@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block titulo %}Minhas passkeys{% endblock %}
+{% block conteudo %}
+<h1>Minhas passkeys</h1>
+{% if not ligada %}
+<p class="atencao">A passkey está desligada nesta instalação. No lugar dela, confirmar uma ação de risco alto e criar ou ampliar um limite pedem um login refeito na hora.</p>
+{% else %}
+<p>A passkey confirma que é você mesmo, com a digital, o rosto ou o PIN do seu aparelho.</p>
+<p>Ela é pedida para confirmar ações de risco alto e para criar ou ampliar um limite.</p>
+{% endif %}
+
+{% if ligada or passkeys %}{% include "_login_refeito.html" %}{% endif %}
+
+<h2>Cadastradas</h2>
+{% if not passkeys %}
+<p class="cartao">Você ainda não tem passkey cadastrada.</p>
+{% else %}
+<table>
+  <thead><tr><th>Nome</th><th>Cadastrada em</th><th>Último uso</th><th>Situação</th><th></th></tr></thead>
+  <tbody>
+  {% for p in passkeys %}
+    <tr>
+      <td>{{ p.apelido or "Sem nome" }}</td>
+      <td>{{ p.criada_em | data_hora }}</td>
+      <td>{% if p.ultimo_uso %}{{ p.ultimo_uso | data_hora }}{% else %}Ainda não usada{% endif %}</td>
+      <td>{% if p.ativa %}<span class="etiqueta bom">Ativa</span>{% else %}<span class="etiqueta">Desativada</span>{% endif %}</td>
+      <td>
+        {% if p.ativa %}
+        <form class="em-linha" method="post" action="/telas/passkeys/{{ p.id }}/desativar">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secundario">Desativar</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="dica">Desativada, a passkey não serve mais para confirmar nada. Perdeu o aparelho? Desative a passkey dele aqui.</p>
+{% endif %}
+
+{% if ligada %}
+<h2>Cadastrar uma passkey</h2>
+<form method="post" action="/telas/passkeys" class="cartao" data-passkey="cadastrar" data-desafio="/telas/passkeys/desafio" hx-boost="false">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="credencial" value="">
+  <label for="apelido">Um nome para lembrar deste aparelho (opcional)</label>
+  <input type="text" id="apelido" name="apelido" maxlength="60" placeholder="Meu celular">
+  <p class="erros" data-passkey-aviso role="alert" hidden></p>
+  <button type="submit">Cadastrar passkey neste aparelho</button>
+  <noscript><p class="atencao">A passkey precisa do JavaScript ligado neste navegador.</p></noscript>
+</form>
+<script src="/telas/estaticos/passkey.js" defer></script>
+{% endif %}
+<p><a href="/telas/pendencias">Caixa de pendências</a> · <a href="/telas/limites">Meus limites</a></p>
+{% endblock %}

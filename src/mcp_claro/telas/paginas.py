@@ -18,6 +18,13 @@ AVISOS: Final[dict[str, str]] = {
     "ordem_dada": "Pronto. A ordem de serviço foi dada ao aplicativo.",
     "ordem_revogada": "Pronto. A ordem foi revogada. O aplicativo não pode mais usá-la.",
     "aplicativo_habilitado": "Pronto. O aplicativo foi habilitado.",
+    "aplicativo_reativado": (
+        "Pronto. O aplicativo foi reativado. Os pedidos dele voltam a passar, se nenhum bloqueio ou pausa os"
+        " segurar. As ações dele só saem com a porta de saída aberta. As que já tinham parado não voltam."
+    ),
+    "aplicativo_nada_mudou": (
+        "Nada mudou: este aplicativo não é um assistente pausado. Um programa pausado volta pela tela do programa."
+    ),
     "declaracoes_lidas": "Pronto. Lemos as ferramentas que o sistema declara hoje.",
     "ferramenta_revisada": "Pronto. A revisão foi gravada. A ferramenta já pode entrar em modelos de ordem.",
     "modelo_criado": "Pronto. O modelo de ordem de serviço foi criado.",
@@ -52,6 +59,17 @@ AVISOS: Final[dict[str, str]] = {
     "autorizacao_configurada": "Pronto. A autorização por pessoa deste sistema foi configurada.",
     "segredo_guardado": "Pronto. O segredo foi entregue ao cofre. Ele não aparece mais nas telas.",
     "chave_guardada": "Pronto. A chave foi entregue ao cofre. Ela não aparece mais nas telas.",
+    # Fase 2: fichas, acoes, passkeys e limites (pessoa).
+    "confirmada": "Pronto. A ficha foi confirmada. A ação espera a hora de sair; ainda dá para cancelar.",
+    "recusada": "Pronto. A ficha foi recusada. Nada foi para o sistema.",
+    "cancelada": "Pronto. A ação foi cancelada antes de sair. Nada chegou ao sistema.",
+    "seguir_agora": "Pronto. A ação sai agora, sem esperar o resto do tempo.",
+    "decisao_registrada": "Pronto. Sua decisão foi registrada. Nada será reenviado.",
+    "passkey_cadastrada": "Pronto. A passkey foi cadastrada. Use-a para confirmar ações de risco alto e limites.",
+    "passkey_desativada": "Pronto. A passkey foi desativada. Ela não serve mais para confirmar nada.",
+    "limite_criado": "Pronto. O limite foi criado e vale a partir de agora.",
+    "limite_ampliado": "Pronto. O limite foi ampliado.",
+    "limite_encerrado": "Pronto. O limite foi encerrado. A partir de agora, essa ação volta a pedir ficha.",
 }
 
 SITUACOES: Final[dict[str, str]] = {
@@ -116,4 +134,10 @@ def criar_ambiente(fuso: str) -> Environment:
     ambiente.filters["situacao"] = lambda v: SITUACOES.get(str(v), str(v))
     ambiente.filters["classe"] = lambda v: CLASSES.get(str(v), str(v))
     ambiente.filters["tipo_chave"] = lambda v: TIPOS_CHAVE.get(str(v), str(v))
+    # Nome de campo e texto vindo do sistema (ou do aplicativo), no texto visivel: os caracteres escondidos viram
+    # uma marca como [U+200B], como na ficha. O ``value=`` dos formularios fica cru. Importado aqui, e nao no topo:
+    # telas/acoes.py importa este modulo.
+    from mcp_claro.telas import acoes
+
+    ambiente.filters["escondidos"] = lambda v: acoes.marcar_escondidos(str(v))
     return ambiente

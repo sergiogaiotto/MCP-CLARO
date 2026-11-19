@@ -4,9 +4,9 @@
 2. Guarda cada tentativa na tabela ``ronda`` (so de acrescentar), com o desfecho em ``detalhes``.
    ``defendeu`` e falso so quando houve passagem indevida.
 3. Se houve passagem, registra ``ronda_falha`` no extrato.
-4. Conta as rodadas seguidas com passagem e com o teste de controle em dia, desde a ultima mudanca
-   do estado da entrada. A cada ``PATROL_FAILS_TO_CLOSE`` delas, a entrada desce um degrau:
-   ``aberta`` -> ``so_leitura`` -> ``fechada``. Cada degrau vai ao extrato (``ronda_fechou_entrada``
+4. Conta as rodadas seguidas com passagem e com o teste de controle em dia (a entrada devolveu a vitrine
+   da ronda), desde a ultima mudanca do estado da entrada. A cada ``PATROL_FAILS_TO_CLOSE`` delas, a entrada
+   desce um degrau: ``aberta`` -> ``so_leitura`` -> ``fechada``. Cada degrau vai ao extrato (``ronda_fechou_entrada``
    e ``estado_entrada_mudou``) e a um aviso ao ADMIN. Reabrir e decisao humana registrada: a
    reabertura muda o estado e zera a contagem.
 5. Com ``PATROL_AUTOCLOSE_ENABLED`` desligado, a ronda nao fecha nada: registra
@@ -38,7 +38,7 @@ from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import estado
 from mcp_claro.regras.bloqueios import quem_rotina
-from mcp_claro.ronda.casos import Caso, Resumo, Situacao, Tentativa, fazer_tentativas
+from mcp_claro.ronda.casos import ESPERADO, Caso, Resumo, Situacao, Tentativa, fazer_tentativas
 from mcp_claro.ronda.config import CLIENTE_RONDA, ConfigRonda, IdentidadePrograma, identidade_da_ronda, ler
 from mcp_claro.ronda.cracha import ChavesProprias, FonteCrachas, fonte_do_programa
 from mcp_claro.rotinas.agendador import Tarefa
@@ -248,7 +248,7 @@ async def rodar_ronda(
         tentativas = [
             Tentativa(
                 Caso.CONTROLE,
-                "cracha aceito (resposta JSON-RPC)",
+                ESPERADO[Caso.CONTROLE],
                 "sem identidade da ronda (PATROL_KEY_FILE)",
                 Situacao.INCONCLUSIVO,
                 {"por_que": "sem identidade da ronda"},

@@ -56,8 +56,8 @@
   <tbody>
   {% for v in vistas %}
     <tr>
-      <td><code>{{ v.nome }}</code></td>
-      <td class="estranho">{{ v.definicao.get("description", "") }}</td>
+      <td><code>{{ v.nome | escondidos }}</code></td>
+      <td class="estranho">{{ v.definicao.get("description", "") | escondidos }}</td>
       <td>{% if not v.revisada_id %}<span class="etiqueta">Sem revisão</span>
           {% elif v.impressao != v.impressao_revisada %}<span class="etiqueta ruim">Mudou desde a revisão</span>
           {% else %}<span class="etiqueta bom">Revisada</span> <code>{{ v.nome_vitrine }}</code> · {{ v.classe | classe }}{% endif %}</td>

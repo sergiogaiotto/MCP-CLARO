@@ -303,6 +303,8 @@ async def bloquear(
 ) -> Bloqueio:
     """Liga um bloqueio ou uma pausa, na transacao do chamador, e registra no extrato.
 
+    Na mesma transacao, para as acoes do alcance que ainda nao sairam e grava o comprovante (Fase 2).
+
     Levanta ``BloqueioInvalido`` (campos) ou ``SemPermissao`` (ver ``pode_ligar``). ``papel`` e o papel
     do gateway que grava (entrada pelas telas, rotinas pela ronda).
     """
@@ -313,6 +315,14 @@ async def bloquear(
     if not pode_ligar(autor, tipo, alcance, pessoa_id):
         raise SemPermissao("A pessoa so pode bloquear ou pausar o proprio acesso.")
     await _conferir_autor(conexao, autor)
+    from mcp_claro.saida import fila, travas
+
+    # Trava exclusiva do alcance antes de gravar: o despachante, que toma a mesma trava compartilhada,
+    # ou ja marcou "enviando" (e a acao aparece no comprovante como ja saida) ou enxerga este bloqueio.
+    await travas.exclusiva(
+        conexao,
+        travas.chaves_do_alcance(alcance, pessoa_id=pessoa_id, aplicativo_id=aplicativo_id, sistema_id=sistema_id),
+    )
     linha = (
         await conexao.execute(
             text(
@@ -341,6 +351,8 @@ async def bloquear(
         sistema_id=sistema_id,
         dados={"bloqueio_id": str(b.id), "alcance": alcance, "por": autor.papel},
     )
+    # Fase 2: o que esperava na porta de saida para aqui, e o comprovante em tres partes fica guardado.
+    await fila.parar_por_bloqueio(conexao, b, papel=papel)
     return b
 
 

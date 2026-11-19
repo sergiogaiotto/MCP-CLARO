@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block titulo %}Limite de {{ l.linha.ferramenta | escondidos }}{% endblock %}
+{% block conteudo %}
+<h1>Limite de {{ l.linha.ferramenta | escondidos }}</h1>
+<section class="cartao comprovante">
+  <dl>
+    <dt>Ação</dt><dd>{{ l.linha.ferramenta | escondidos }}, no sistema {{ l.linha.sistema }}</dd>
+    <dt>Aplicativo</dt><dd>{{ l.linha.aplicativo }}</dd>
+    <dt>Destinatários</dt><dd>{{ l.destinatarios }}</dd>
+    <dt>Por dia</dt><dd>até {{ l.linha.por_dia }} vezes; hoje, {{ l.linha.usados_hoje }}</dd>
+    <dt>Até</dt><dd>{{ l.linha.valido_ate | data_hora }}</dd>
+    <dt>Situação</dt><dd>{{ l.situacao }}{% if l.linha.motivo %} ({{ l.linha.motivo }}){% endif %}</dd>
+    <dt>Criado em</dt><dd>{{ l.linha.criado_em | data_hora }}</dd>
+    <dt>Passkey</dt><dd id="passkey-do-limite">{% if l.linha.com_passkey %}Pedida ao criar e a cada ampliação{% else %}Criado ou ampliado sem a passkey{% endif %}</dd>
+  </dl>
+</section>
+{% if l.nao_vale_com_passkey %}
+<p class="atencao" id="nao-vale-com-passkey"><strong>Não vale com a passkey ligada.</strong> Este limite foi criado ou ampliado sem a passkey, quando ela estava desligada nesta instalação. Agora que a passkey está ligada, ele não é usado: as ações dele passam pela ficha. Ele também não pode ser ampliado. Para voltar a ter um limite, encerre este e crie outro, com a passkey.</p>
+{% endif %}
+{% if l.ativo and not l.nao_vale_com_passkey %}
+<h2>Ampliar</h2>
+<p>Ampliar só aumenta: mais vezes por dia ou mais prazo. Para mudar os destinatários, encerre e crie outro.</p>
+{% if acima_do_teto %}
+<p class="atencao">O teto mudou: agora um limite vai até {{ maximo_dia }} vezes por dia e até {{ maximo_dias }} dias. Este limite ainda vale como foi criado, mas, se você ampliar o prazo, ele passa a {{ maximo_dia }} vezes por dia.</p>
+{% endif %}
+{% if not ligada %}{% include "_login_refeito.html" %}{% endif %}
+{% if ligada and not tem_passkey %}
+<p class="atencao">Ampliar pede a sua passkey, e você ainda não tem uma. <a href="/telas/passkeys" hx-boost="false">Cadastre uma passkey</a>.</p>
+{% endif %}
+<form method="post" action="/telas/limites/{{ l.linha.id }}/ampliar" class="cartao"{% if ligada %} data-passkey="entrar" data-desafio="/telas/limites/{{ l.linha.id }}/desafio" hx-boost="false"{% endif %}>
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="credencial" value="">
+  <label for="por_dia">Vezes por dia, no máximo (de {{ minimo_dia }} a {{ maximo_dia }})</label>
+  <input type="number" id="por_dia" name="por_dia" min="{{ minimo_dia }}" max="{{ maximo_dia }}" value="{{ minimo_dia }}" required>
+  <label for="dias">Vale por quantos dias, a contar de hoje? (de 1 a {{ maximo_dias }})</label>
+  <input type="number" id="dias" name="dias" min="1" max="{{ maximo_dias }}" value="{{ maximo_dias }}" required>
+  <p class="erros" data-passkey-aviso role="alert" hidden></p>
+  <button type="submit">{% if ligada %}Ampliar com a passkey{% else %}Ampliar{% endif %}</button>
+</form>
+{% if ligada %}<script src="/telas/estaticos/passkey.js" defer></script>{% endif %}
+{% endif %}
+{% if l.ativo %}
+<h2>Encerrar</h2>
+<form method="post" action="/telas/limites/{{ l.linha.id }}/encerrar">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="secundario">Encerrar este limite</button>
+</form>
+<p class="dica">Encerrado, esta ação volta a pedir ficha. O que este limite já liberou e ainda espera a hora de sair é cancelado: nada disso chega ao sistema. Encerrar não pede passkey.</p>
+{% endif %}
+<p><a href="/telas/limites">Voltar para Meus limites</a></p>
+{% endblock %}

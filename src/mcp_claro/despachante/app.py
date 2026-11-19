@@ -6,10 +6,16 @@ Rotas internas (nunca expostas ao portao):
 - ``POST /interno/sondar``: sondagem de versao no cadastro de um sistema;
 - ``POST /interno/declaracoes``: le o que o sistema declara (revisao e mudou-parou);
 - ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN).
+
+Na partida, depois da conferencia de continuidade, sobe a porta unica de saida (``saida.despachante``):
+a fila de acoes e enviada por um despachante so, mesmo com varias copias do papel no ar. Quando o papel entra
+no cofre de verdade, a porta tambem confere a saude dele a cada ``VAULT_CHECK_SECONDS`` e fecha a saida
+enquanto ele estiver trancado (``saida.cofre``).
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
@@ -29,6 +35,7 @@ from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.despachante.servico import DeclaracoesIndisponiveis, Despachante, LeituraRecusada, PedidoLeitura
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
+from mcp_claro.saida.despachante import PortaDeSaida
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
 
@@ -65,7 +72,7 @@ async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) 
     import asyncio
     import ssl
 
-    from mcp_claro.continuidade import conferir_continuidade
+    from mcp_claro.continuidade import conferir_continuidade, poupados_de
     from mcp_claro.vigia.continuidade import numero_no_vigia
 
     numero: int | None = None
@@ -82,8 +89,16 @@ async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) 
             if numero is not None:
                 break
             await asyncio.sleep(2 * (tentativa + 1))
-    resultado = await conferir_continuidade(engine, numero, exigir_vigia=bool(p.CONTINUITY_REQUIRE_WATCH))
+    resultado = await conferir_continuidade(
+        engine, numero, exigir_vigia=bool(p.CONTINUITY_REQUIRE_WATCH), poupados=poupados_de(p)
+    )
     log.info("continuidade", desfecho=str(getattr(resultado, "desfecho", resultado)))
+
+
+async def _parar_tarefa(tarefa: asyncio.Task[None]) -> None:
+    tarefa.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await tarefa
 
 
 def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | None = None) -> Starlette:
@@ -94,6 +109,16 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         do_cofre = _CifraDoCofre()
         cifra = do_cofre
     despachante = Despachante(engine, cifra, prazo_leitura=float(p.RESPONSE_MAX_WAIT_SECONDS))
+    porta = PortaDeSaida(
+        engine,
+        cifra,
+        prazo_envio=float(p.RESPONSE_MAX_WAIT_SECONDS),
+        varredura=float(p.OUTBOX_SWEEP_SECONDS),
+        acoes_de_programas=p.PROGRAM_ACTIONS_ENABLED,
+        limite_exige_passkey=p.FEATURE_PASSKEY,
+        conferir_cofre=float(p.VAULT_CHECK_SECONDS),
+        emails_admin=p.NOTIFY_ADMIN_EMAILS,
+    )
 
     async def ler(pedido: Request) -> JSONResponse:
         try:
@@ -172,8 +197,14 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
 
                 cofre = await pilha.enter_async_context(Cofre(p))
                 do_cofre.alvo = cofre.cifra()
+                # So com o cofre de verdade: a porta confere a saude dele e fecha a saida enquanto estiver trancado.
+                porta.cofre = cofre
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
             await _conferir_continuidade_na_partida(p, engine)
+            # Porta unica de saida (Fase 2): so depois da conferencia de continuidade, que para a fila se o
+            # banco voltou de um backup. Varias copias do papel podem subir; so uma envia por vez.
+            tarefa = asyncio.create_task(porta.rodar(), name="porta-de-saida")
+            pilha.push_async_callback(_parar_tarefa, tarefa)
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 

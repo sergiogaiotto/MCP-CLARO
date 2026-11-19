@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block titulo %}Programa {{ programa.nome }}{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin/programas">Programas</a></p>
+<h1>Programa {{ programa.nome }}</h1>
+<p><code>{{ programa.client_id }}</code> · {{ programa.situacao | situacao }}{% if situacao_aplicativo != "ativo" %} · o aplicativo está {{ situacao_aplicativo | situacao | lower }}{% endif %}</p>
+<p>{{ programa.finalidade }}</p>
+
+<div class="cartao">
+  <p><strong>Responsável:</strong> {{ programa.responsavel }}{% if not programa.responsavel_ativo %} <span class="etiqueta ruim">não está ativo</span>{% endif %}</p>
+  <p><strong>Substituto:</strong> {{ programa.substituto }}{% if not programa.substituto_ativo %} <span class="etiqueta ruim">não está ativo</span>{% endif %}</p>
+  <p><strong>Vale até:</strong> {{ programa.fim | data }}</p>
+  <p><strong>Revisão do responsável vence em:</strong> {{ prazos.revisao_vence | data }}{% if prazos.revisao_vencida %} <span class="etiqueta ruim">venceu</span>{% endif %}</p>
+  <p><strong>Chave do programa vence em:</strong> {{ prazos.chave_vence | data }}{% if prazos.chave_vencida %} <span class="etiqueta ruim">venceu</span>{% endif %}</p>
+  <p><strong>Último pedido:</strong> {% if prazos.ultimo_pedido %}{{ prazos.ultimo_pedido | data_hora }}{% else %}nenhum ainda{% endif %}.
+    {% if programa.situacao == "ativo" %}Sem pedido, ele pausa em {{ prazos.pausa_sem_uso | data }}.{% endif %}</p>
+  <p class="dica">Nesta fase, o programa só lê. Ações de programas ficam desligadas.</p>
+</div>
+
+{% if programa.situacao != "encerrado" and situacao_aplicativo == "pausado" %}
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/aplicativo" class="cartao parar">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p><strong>O aplicativo deste programa está pausado.</strong> A entrada recusa os pedidos dele, mesmo com o cadastro do programa valendo. Essa pausa não sai sozinha: retomar ou cadastrar de novo o programa não mexe nela.</p>
+  <p>Ela pode vir da conferência do banco, depois de uma restauração. Bloqueios e pausas feitos depois da cópia podem ter se perdido: a tela <a href="/telas/admin/aplicativos#pausados">Aplicativos</a> mostra o intervalo. Antes de reativar, ligue de novo, em <a href="/telas/admin/bloqueios">Bloqueios e pausas</a>, o que faltar.</p>
+  <button type="submit">Reativar o aplicativo</button>
+</form>
+{% elif programa.situacao != "encerrado" and situacao_aplicativo != "ativo" %}
+<p class="cartao">O aplicativo deste programa está {{ situacao_aplicativo | situacao | lower }}. A entrada recusa os pedidos dele, mesmo com o cadastro do programa valendo.</p>
+{% endif %}
+
+{% if programa.situacao == "encerrado" %}
+<p class="cartao">Este programa foi encerrado e nada passa por ele. Para usá-lo de novo, cadastre-o outra vez em <a href="/telas/admin/programas">Programas</a>, com o mesmo client_id, responsável, substituto e uma nova data de fim.</p>
+{% else %}
+<h2>Revisão e chave</h2>
+<form class="em-linha" method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/recertificar">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="secundario">Confirmar que o programa segue valendo</button>
+</form>
+<form class="em-linha" method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/chave">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="secundario">Registrar que a chave foi trocada no provedor de login</button>
+</form>
+
+<h2>Data de fim</h2>
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/fim" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p>O programa vale até {{ programa.fim | data }}. Depois dessa data, nada mais passa por ele.</p>
+  <label for="novo_fim">Nova data de fim</label>
+  <input type="date" id="novo_fim" name="fim" required min="{{ fim_minimo.isoformat() }}" max="{{ fim_maximo.isoformat() }}" value="{{ valores.get('fim', '') }}">
+  <p class="dica">A nova data precisa ser depois da data de fim atual e em até um ano a partir de hoje.</p>
+  <button type="submit" class="secundario">Estender a data de fim</button>
+</form>
+
+<h2>Situação</h2>
+{% if programa.situacao == "ativo" %}
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/pausar" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="motivo_pausa">Motivo da pausa</label>
+  <input type="text" id="motivo_pausa" name="motivo" required maxlength="300" value="{{ valores.get('motivo', '') }}">
+  <button type="submit">Pausar o programa</button>
+</form>
+{% else %}
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/retomar" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p>Retomar conta como a sua revisão: você confirma que o programa segue valendo.</p>
+  <button type="submit">Retomar o programa</button>
+</form>
+{% endif %}
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/encerrar" class="cartao parar">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p>Encerrar para o programa de vez: nada mais passa por ele. Para usá-lo de novo, é preciso cadastrá-lo outra vez, com responsável, substituto e data de fim.</p>
+  <label for="motivo_fim">Motivo do encerramento</label>
+  <input type="text" id="motivo_fim" name="motivo" required maxlength="300">
+  <button type="submit" class="secundario">Encerrar o programa</button>
+</form>
+
+<h2>Responsável e substituto</h2>
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/responsaveis" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="responsavel">Responsável</label>
+  <select id="responsavel" name="responsavel" required>
+    {% for pe in pessoas %}<option value="{{ pe.id }}" {% if pe.id == programa.responsavel_id %}selected{% endif %}>{{ pe.nome }}</option>{% endfor %}
+  </select>
+  <label for="substituto">Substituto</label>
+  <select id="substituto" name="substituto" required>
+    {% for pe in pessoas %}<option value="{{ pe.id }}" {% if pe.id == programa.substituto_id %}selected{% endif %}>{{ pe.nome }}</option>{% endfor %}
+  </select>
+  <button type="submit" class="secundario">Trocar o responsável e o substituto</button>
+</form>
+
+<h2>Ordem de serviço do programa</h2>
+<p>A ordem diz o que o programa pode ler. Só servem modelos com ferramentas que leem, em sistemas com chave própria do programa.</p>
+{% if not modelos %}
+<p class="cartao">Nenhum modelo serve ainda. Monte um em <a href="/telas/admin/modelos">Modelos de ordem</a>, só com ferramentas de sistemas com chave do programa.</p>
+{% else %}
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/ordem" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <label for="modelo">Modelo</label>
+  <select id="modelo" name="modelo" required>
+    <option value="">Escolha um modelo</option>
+    {% for m in modelos %}<option value="{{ m.id }}" {% if valores.get('modelo') == m.id|string %}selected{% endif %}>{{ m.nome }} ({{ m.quantas }} ferramentas)</option>{% endfor %}
+  </select>
+  <label for="dias">Dias</label>
+  <input type="number" id="dias" name="dias" required min="1" max="{{ maximo_dias }}" value="{{ valores.get('dias', '') }}">
+  {% if conta %}
+  <p class="dica">Conta de serviço do programa: <code>{{ conta.sujeito }}</code>.</p>
+  {% else %}
+  <label for="sujeito">Identificador da conta de serviço no provedor de login (o sub do crachá do programa)</label>
+  <input type="text" id="sujeito" name="sujeito" required maxlength="200" value="{{ valores.get('sujeito', '') }}">
+  {% endif %}
+  <button type="submit">Dar a ordem ao programa</button>
+</form>
+{% endif %}
+{% endif %}
+
+{% if ordens %}
+<table>
+  <thead><tr><th>Modelo</th><th>Desde</th><th>Até</th><th>Último uso</th><th>Situação</th></tr></thead>
+  <tbody>
+  {% for o in ordens %}
+    <tr><td>{{ o.modelo }}</td><td>{{ o.inicio | data }}</td><td>{{ o.fim | data }}</td>
+      <td>{% if o.ultimo_uso %}{{ o.ultimo_uso | data_hora }}{% else %}nunca{% endif %}</td><td>{{ o.situacao | situacao }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

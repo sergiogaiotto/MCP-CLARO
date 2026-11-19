@@ -24,3 +24,9 @@ def test_extrato_recusa_conteudo() -> None:
     with pytest.raises(ValueError, match="nao guarda conteudo"):
         _sem_conteudo({"argumentos": {"x": 1}})
     assert _sem_conteudo({"motivo": "audiencia"}) == {"motivo": "audiencia"}
+
+
+def test_frase_do_comprovante_e_so_a_de_tres_partes() -> None:
+    """A frase antiga do comprovante (duas partes) saiu: o comprovante do bloqueio grava a de tres partes."""
+    assert "comprovante_bloqueio" not in FRASES
+    assert FRASES["comprovante_bloqueio_partes"].campos() == {"paradas", "ja_saidas", "em_conferencia"}

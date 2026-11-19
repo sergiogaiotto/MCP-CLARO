@@ -15,7 +15,9 @@
 #
 # Depois de restaurar o banco do gateway, grava a marca "restaurado" (continuidade_marcar_restaurado): uma
 # copia logica posta de volta no mesmo servidor nao muda o identificador nem a linha do tempo do
-# PostgreSQL, e sem a marca o despachante nao teria como perceber.
+# PostgreSQL, e sem a marca o despachante nao teria como perceber. A marca tambem adianta o numero de
+# protocolo; ela e gravada aqui, logo depois do pg_restore e com o gateway ainda parado (passo 1 do roteiro),
+# antes de a entrada voltar a dar numeros.
 set -euo pipefail
 
 : "${RESTAURAR_HOST:=banco}" "${RESTAURAR_PORTA:=5432}" "${RESTAURAR_USUARIO:=mcp_claro_migracao}"

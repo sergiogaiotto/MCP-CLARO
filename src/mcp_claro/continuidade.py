@@ -18,6 +18,20 @@ motivo, o intervalo que pode ter se perdido e cada aplicativo pausado, e uma nov
 ``continuidade_banco``. Reabrir a saida e decisao humana registrada (``reabrir_saida``). Na primeira
 partida, so grava a linha.
 
+Com sinal de restauracao (marca, identificador, linha do tempo ou vigia mais novo), a fila de saida para
+tambem (``parar_por_restauracao``): o que esperava fica parado por restauracao, e nada sai sem nova
+confirmacao.
+
+So com o vigia sem resposta, nao ha sinal de que o banco voltou no tempo, mas tambem falta a testemunha de
+fora: uma copia logica posta no mesmo PostgreSQL sem a marca guarda o identificador e a linha do tempo. Por
+isso o extrato ainda registra o intervalo que pode faltar, e a sequencia do protocolo salta para frente
+(``fila.saltar_protocolo``). A fila nao para, nada muda de estado e o extrato nao fala em restauracao: a
+saida fechada segura tudo (o despachante nao envia com ela fechada). Reabrir a saida nao reativa os
+aplicativos. Com a saida reaberta, o despachante confere cada acao na hora dela: a de aplicativo ja
+reativado sai; a de aplicativo ainda pausado fica parada, sem sair, com o desfecho "o aplicativo esta
+pausado". Para o que espera seguir, o aplicativo volta antes de reabrir. O extrato e o motivo da saida
+fechada dizem isso em frases curtas (``SEM_SINAL_DE_RESTAURACAO``).
+
 ``ultimo_fechamento_no_vigia``: ``None`` quando o vigia nao respondeu; ``0`` quando respondeu e ainda
 nao guarda fechamento nenhum.
 
@@ -48,7 +62,7 @@ from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.regras.bloqueios import SemPermissao, autor_de, quem_rotina
 from mcp_claro.regras.estado import ler_saida, mudar_saida
-from mcp_claro.ronda.config import CLIENTE_RONDA, CLIENTE_VIGIA
+from mcp_claro.ronda.config import CLIENTE_RONDA, CLIENTE_VIGIA, ler
 
 log = logger("mcp_claro.continuidade")
 
@@ -66,10 +80,23 @@ MOTIVOS: Final[dict[str, str]] = {
 _SINAIS_DE_RESTAURACAO: Final = frozenset(
     {"marca_restaurado", "identificador_mudou", "linha_do_tempo_mudou", "vigia_mais_novo"}
 )
+SEM_SINAL_DE_RESTAURACAO: Final = (
+    "nao houve sinal de banco restaurado. A fila de saida nao parou. Quando a saida reabrir, o que espera volta"
+    " a ser conferido antes de sair. A acao de um aplicativo que continua pausado fica parada e nao sai"
+)
+"""Acrescentado ao motivo quando so o vigia nao respondeu (a fila nao para, so a saida fecha): "o vigia nao
+respondeu e nao houve sinal...". Sem ponto final: a frase do extrato (``continuidade_nao_confere``) poe o dela."""
 QUEM: Final = quem_rotina("continuidade")
 POUPADOS: Final[tuple[str, ...]] = (CLIENTE_RONDA, CLIENTE_VIGIA)
-"""Aplicativos que nao pausam: a ronda e o vigia precisam continuar conferindo o gateway."""
+"""Aplicativos que nao pausam: a ronda e o vigia precisam continuar conferindo o gateway. Estes sao os client_id
+padrao; com ``PATROL_CLIENT_ID`` ou ``WATCH_CLIENT_ID`` proprios, use ``poupados_de``."""
 _TRAVA: Final = "mcp_claro.continuidade"
+
+
+def poupados_de(p: Any) -> tuple[str, ...]:
+    """client_id da ronda e do vigia desta instalacao (``PATROL_CLIENT_ID`` e ``WATCH_CLIENT_ID``), os mesmos que
+    as rotinas nunca pausam (``rotinas.programas.protegidos``)."""
+    return (str(ler(p, "PATROL_CLIENT_ID", CLIENTE_RONDA)), str(ler(p, "WATCH_CLIENT_ID", CLIENTE_VIGIA)))
 
 
 class ReaberturaRecusada(SemPermissao):
@@ -258,21 +285,23 @@ async def conferir_continuidade(
                 {"limite": limite},
             )
         ).scalar_one_or_none() or ultima.visto_em
+        restauracao = bool(_SINAIS_DE_RESTAURACAO.intersection(motivos))
+        motivo = _legivel(motivos) if restauracao else f"{_legivel(motivos)} e {SEM_SINAL_DE_RESTAURACAO}"
         dados: dict[str, Any] = {
             "motivos": list(motivos),
+            "fila_parada": restauracao,
+            "protocolo_saltou": True,
             "timeline_anterior": anterior.timeline_id,
             "timeline_atual": atual.timeline_id,
             "identificador_mudou": anterior.system_identifier != atual.system_identifier,
             "fechamento_banco": fechamento_banco,
             "fechamento_vigia": ultimo_fechamento_no_vigia,
         }
-        await mudar_saida(c, aberta=False, quem=QUEM, motivo=_legivel(motivos), papel=papel)
-        if _SINAIS_DE_RESTAURACAO.intersection(motivos):
+        await mudar_saida(c, aberta=False, quem=QUEM, motivo=motivo, papel=papel)
+        if restauracao:
             await registrar(c, papel=papel, tipo="restauracao_detectada", dados=dados)
         else:
-            await registrar(
-                c, papel=papel, tipo="continuidade_nao_confere", campos={"motivo": _legivel(motivos)}, dados=dados
-            )
+            await registrar(c, papel=papel, tipo="continuidade_nao_confere", campos={"motivo": motivo}, dados=dados)
         perdidos = None
         if ultimo_fechamento_no_vigia is not None and ultimo_fechamento_no_vigia > (fechamento_banco or 0):
             perdidos = ultimo_fechamento_no_vigia - (fechamento_banco or 0)
@@ -284,8 +313,23 @@ async def conferir_continuidade(
             dados={"desde": desde.isoformat(), "ate": ate.isoformat(), "fechamentos_perdidos": perdidos},
         )
         pausados = await _pausar_aplicativos(c, papel, poupados)
+        from mcp_claro.saida import fila
+
+        if restauracao:
+            # Fase 2: o que estava "enviando" (sem despachante no ar) fica nao confirmado; o que esperava na fila
+            # para por restauracao. A sequencia do protocolo salta junto.
+            await fila.parar_por_restauracao(c, papel=papel)
+        else:
+            # So o vigia sem resposta: a fila fica como esta, segura pela saida fechada. O protocolo salta assim
+            # mesmo, porque sem o vigia nao da para saber se o banco voltou de uma copia sem a marca.
+            await fila.saltar_protocolo(c)
         linha_id = await _gravar(c, atual, fechamento_banco, ultimo_fechamento_no_vigia, "nao_confere", motivos)
-    log.warning("continuidade_nao_confere", motivos=list(motivos), aplicativos_pausados=len(pausados))
+    log.warning(
+        "continuidade_nao_confere",
+        motivos=list(motivos),
+        aplicativos_pausados=len(pausados),
+        fila_parada=restauracao,
+    )
     return Resultado(
         "nao_confere", atual, anterior, fechamento_banco, ultimo_fechamento_no_vigia, motivos, pausados, linha_id
     )
@@ -344,13 +388,16 @@ async def _rodar(args: argparse.Namespace) -> int:
     from mcp_claro.config.settings import Parametros
     from mcp_claro.db.engine import criar_engine
 
-    engine = criar_engine(Parametros(), pool_size=1, max_overflow=0)
+    p = Parametros()
+    engine = criar_engine(p, pool_size=1, max_overflow=0)
     try:
         if args.comando == "situacao":
             for chave, valor in (await situacao(engine)).items():
                 print(f"{chave}: {valor}")
         elif args.comando == "conferir":
-            r = await conferir_continuidade(engine, args.vigia, exigir_vigia=not args.sem_exigir_vigia)
+            r = await conferir_continuidade(
+                engine, args.vigia, exigir_vigia=not args.sem_exigir_vigia, poupados=poupados_de(p)
+            )
             print(f"desfecho: {r.desfecho}")
             print(f"motivos: {','.join(r.motivos) or '-'}")
             print(f"timeline_id: {r.atual.timeline_id}")

@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block titulo %}Revisar {{ nome }}{% endblock %}
+{% block titulo %}Revisar {{ nome | escondidos }}{% endblock %}
 {% block conteudo %}
 <p><a href="/telas/admin/sistemas/{{ sistema.id }}">Sistema {{ sistema.nome }}</a></p>
-<h1>Revisar a ferramenta <code>{{ nome }}</code></h1>
+<h1>Revisar a ferramenta <code>{{ nome | escondidos }}</code></h1>
 {% if mudou %}
 <p class="recusa">O sistema mudou esta ferramenta desde a última revisão. Confira tudo de novo.</p>
 {% endif %}
@@ -10,9 +10,9 @@
 <section class="cartao">
   <h2>O que o sistema declara</h2>
   <p class="dica">Este texto vem do sistema. Ele não é mostrado às pessoas nem aos aplicativos.</p>
-  <p class="estranho">{{ definicao.get("description", "(sem descrição)") }}</p>
+  <p class="estranho">{{ definicao.get("description", "(sem descrição)") | escondidos }}</p>
   <p><strong>Campos que a ferramenta pede:</strong></p>
-  <pre>{{ esquema_entrada }}</pre>
+  <pre>{{ esquema_entrada | escondidos }}</pre>
 </section>
 
 <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/ferramenta" class="cartao">
@@ -43,10 +43,21 @@
     <legend>Campos pessoais da resposta</legend>
     <p class="dica">Estes campos são mascarados antes de chegar ao aplicativo.</p>
     {% for campo in campos_saida %}
-    <label class="opcao"><input type="checkbox" name="campos" value="{{ campo }}" {% if campo in valores.campos %}checked{% endif %}> <code>{{ campo }}</code></label>
+    <label class="opcao"><input type="checkbox" name="campos" value="{{ campo }}" {% if campo in valores.campos %}checked{% endif %}> <code>{{ campo | escondidos }}</code></label>
     {% endfor %}
     <label for="outros_campos">Outros campos (separados por vírgula)</label>
     <input type="text" id="outros_campos" name="outros_campos" maxlength="1000" value="{{ outros_campos }}">
+  </fieldset>
+  <fieldset id="campos-destinatario">
+    <legend>Campos do pedido que dizem o destinatário</legend>
+    <p class="dica">Marque os campos que dizem para quem a ação vai: por exemplo, para, cópia e cópia oculta. Não marque o texto da mensagem nem outros dados.</p>
+    <p class="dica">Para que serve: uma pessoa pode criar um limite "só estes destinatários" para esta ação. O MCP-CLARO confere só os campos marcados aqui: um deles precisa trazer um destinatário que a pessoa aceitou, e os outros marcados precisam vir vazios. O resto do pedido fica livre. Sem nenhum campo marcado, o limite desta ação só pode valer para qualquer destinatário.</p>
+    <p class="dica">Se você marcar um campo que não estava marcado, os limites "só estes destinatários" desta ação criados antes terminam agora (eles não conferem o campo novo), e o que eles liberaram e ainda espera a hora de sair é cancelado. Cada pessoa vê isso no extrato e pode criar outro limite.</p>
+    {% for campo in campos_entrada %}
+    <label class="opcao"><input type="checkbox" name="destinatario" value="{{ campo }}" {% if campo in valores.get("destinatario", []) %}checked{% endif %}> <code>{{ campo | escondidos }}</code></label>
+    {% else %}
+    <p>Esta ferramenta não pede nenhum campo.</p>
+    {% endfor %}
   </fieldset>
   <button type="submit">Gravar a revisão</button>
   {% if revisao %}<p class="dica">Revisão atual: versão {{ revisao.versao }}. Gravar cria a versão seguinte.</p>{% endif %}

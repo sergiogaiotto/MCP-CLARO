@@ -401,8 +401,32 @@ async def test_ronda_de_fora_recusa_tudo(entrada: Entrada, engine_vigia: AsyncEn
     assert all(t.situacao is Situacao.CONFORME for t in r.tentativas), [(t.caso, t.obtido) for t in r.tentativas]
     assert not r.alarmou
     async with engine_vigia.connect() as c:
-        casos = (await c.execute(text("SELECT caso FROM rondas_vigia WHERE rodada = :r"), {"r": r.id})).scalars()
-        assert set(casos) == {str(c) for c in Caso}
+        esperados = dict(
+            (await c.execute(text("SELECT caso, esperado FROM rondas_vigia WHERE rodada = :r"), {"r": r.id})).all()
+        )
+    assert set(esperados) == {str(c) for c in Caso}
+    assert esperados["controle"] == "vitrine da ronda (resultado do tools/list)"
+
+
+async def test_ronda_de_fora_sem_identidade_grava_controle_inconclusivo(
+    entrada: Entrada, engine_vigia: AsyncEngine
+) -> None:
+    v = Vigia(config(entrada), engine_vigia, None, emissor=entrada.idp.emissor, recurso=RECURSO)
+    async with httpx2.AsyncClient(timeout=5) as http:
+        r = await v.ronda.rodar(http)
+    (t,) = r.tentativas
+    assert (t.caso, t.situacao) == (Caso.CONTROLE, Situacao.INCONCLUSIVO)
+    assert not r.alarmou
+    async with engine_vigia.connect() as c:
+        (linha,) = (
+            await c.execute(text("SELECT caso, esperado, obtido FROM rondas_vigia WHERE rodada = :r"), {"r": r.id})
+        ).all()
+    # O que o controle espera e a vitrine (um resultado), nao so o cracha aceito.
+    assert (linha.caso, linha.esperado, linha.obtido) == (
+        "controle",
+        "vitrine da ronda (resultado do tools/list)",
+        "sem identidade do vigia (WATCH_KEY_FILE)",
+    )
 
 
 async def test_ronda_de_fora_alarma_com_falha_plantada(banco_migrado: Parametros, engine_vigia: AsyncEngine) -> None:

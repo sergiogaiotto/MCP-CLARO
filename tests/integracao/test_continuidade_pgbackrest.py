@@ -1,7 +1,7 @@
 """pgBackRest de verdade: copia completa, recuperacao para um ponto no tempo e conferencia na partida.
 
-Sobe so o banco e o backup com os arquivos do repositorio (docker/compose.yml mais o fragmento
-docker/backup/compose.backup.yml), numa copia temporaria do projeto com segredos de teste, e segue o roteiro
+Sobe so o banco e o backup com os arquivos do repositorio (docker/compose.yml, onde o backup entrou na
+Fase 1), numa copia temporaria do projeto com segredos de teste, e segue o roteiro
 de docs/restauracao.md: espera a primeira copia completa, grava marcas no extrato antes e depois de um
 momento, restaura para aquele momento com docker/postgres/restaurar.sh e confere que (1) a marca de depois
 sumiu, (2) o banco abriu numa nova linha do tempo e (3) a conferencia de continuidade fecha a porta de saida
@@ -29,7 +29,19 @@ from tests.conftest import RAIZ
 
 pytestmark = [pytest.mark.integracao, pytest.mark.lento]
 
-COPIAR = ("docker", "grafana", "scripts", "src", "migrations", "alembic.ini", "pyproject.toml", "uv.lock", "README.md")
+COPIAR = (
+    "docker",
+    "grafana",
+    "scripts",
+    "src",
+    "migrations",
+    "migrations_vigia",
+    "alembic.ini",
+    "alembic_vigia.ini",
+    "pyproject.toml",
+    "uv.lock",
+    "README.md",
+)
 SEM_REDE = ("Could not resolve", "Failed to fetch", "Temporary failure resolving", "Unable to locate package")
 
 
@@ -46,8 +58,6 @@ class Projeto:
             self.nome,
             "-f",
             "docker/compose.yml",
-            "-f",
-            "docker/backup/compose.backup.yml",
             *args,
         ]
         r = subprocess.run(comando, cwd=self.raiz, capture_output=True, text=True, timeout=prazo, check=False)  # noqa: S603

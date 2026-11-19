@@ -2,14 +2,18 @@
 
 Cada rodada faz, em ordem, um pedido por caso:
 
-- ``controle``: cracha de verdade da ronda, pedido certo na 2026-07-28. Precisa passar pela porta
-  do cracha e pela de versao (qualquer resposta JSON-RPC serve). Sem controle em dia, a rodada e
-  inconclusiva e nao conta para fechar a entrada.
+- ``controle``: cracha de verdade da ronda, ``tools/list`` certo na 2026-07-28. So e conforme quando a
+  entrada devolve a vitrine da ronda (um resultado). Qualquer recusa (aplicativo, conta ou cadastro de
+  programa da ronda sem valer, limite por minuto, entrada fechada, bloqueio ou pausa geral) quer dizer que
+  a vitrine nao foi testada: inconclusivo. Sem controle em dia, a rodada e inconclusiva e nao conta para
+  fechar a entrada.
 - ``cracha_falso``: copia do cracha de verdade, assinada por chave propria da ronda. Espera 401.
 - ``cracha_vencido``: cracha de verdade guardado de rondas anteriores, ja vencido. Espera 401.
 - ``outro_condominio``: cracha de verdade do mesmo provedor com audiencia de outro recurso. Espera 401.
 - ``outra_pessoa``: cracha de verdade da ronda chamando uma ferramenta que nao esta na vitrine dela
-  (de preferencia, uma que esta na vitrine de outra pessoa). Espera a recusa ``fora_da_vitrine``.
+  (de preferencia, uma que esta na vitrine de outra pessoa). Espera a recusa ``fora_da_vitrine``, e so
+  ela. Recusa que a entrada da antes de olhar a vitrine nao prova nada (inconclusivo); qualquer outra
+  recusa, ou um resultado, e passagem.
 - ``versao_antiga_initialize``: ``initialize`` da geracao antiga, com cracha valido. Espera 400 e -32022.
 - ``versao_antiga_cabecalho``: pedido com cabecalho ``2025-11-25``, com cracha valido. Espera 400 e -32022.
 
@@ -37,11 +41,13 @@ from mcp_types import (
     CLIENT_CAPABILITIES_META_KEY,
     CLIENT_INFO_META_KEY,
     HEADER_MISMATCH,
+    INTERNAL_ERROR,
     PROTOCOL_VERSION_META_KEY,
     UNSUPPORTED_PROTOCOL_VERSION,
 )
 
 from mcp_claro import __version__
+from mcp_claro.regras.bloqueios import ALCANCES, TIPOS
 from mcp_claro.ronda.cracha import (
     MARGEM_VENCIDO_SEGUNDOS,
     ChavesProprias,
@@ -57,20 +63,51 @@ VERSAO_ANTIGA: Final = "2025-11-25"
 FERRAMENTA_INVENTADA: Final = "mcp_claro_ronda_ferramenta_alheia"
 CHAVE_MOTIVO: Final = PREFIXO_META + "motivo"
 
-MOTIVOS_DEPOIS_DA_VITRINE: Final = frozenset(
+MOTIVO_DA_VITRINE: Final = "fora_da_vitrine"
+"""A unica recusa que prova que a porta da vitrine segurou a ferramenta de outra pessoa."""
+
+MOTIVOS_DO_CADASTRO_DO_PROGRAMA: Final = frozenset(
     {
-        "argumento_fora_do_esquema",
-        "entrada_so_leitura",
-        "acao_em_sistema_compartilhado",
-        "acoes_desligadas",
-        "bloqueio_sistema",
-        "pausa_sistema",
-        "catraca",
+        "programa_sem_cadastro",
+        "programa_pausado",
+        "programa_encerrado",
+        "programa_vencido",
+        "programa_sem_responsavel",
+        "programa_limite_minuto",
     }
 )
-"""Recusas que a entrada so da depois de achar a ferramenta na vitrine (ver ``entrada/servidor.py``).
+"""Recusas de ``regras/programas.conferir_pedido``: o cadastro de programa da ronda (ou do vigia) nao vale agora."""
 
-Se a ferramenta de outra pessoa receber uma delas, a porta da vitrine deixou passar."""
+_RECUSAS_DA_PROPRIA_RONDA: Final = frozenset({"sem_cracha", "fase1_desligada"}) | (
+    MOTIVOS_DO_CADASTRO_DO_PROGRAMA - {"programa_limite_minuto"}
+)
+"""O cadastro da ronda nao vale. O limite por minuto fica de fora: passa sozinho e nao diz que o cadastro falhou
+(``recusa_antes_da_vitrine`` o pega pelos motivos do cadastro)."""
+_PREFIXOS_DA_PROPRIA_RONDA: Final = ("app_", "pessoa_")  # aplicativo ou conta da ronda sem valer (``quem``)
+
+MOTIVOS_ANTES_DA_VITRINE_GERAIS: Final = frozenset(
+    {"entrada_fechada"} | {f"{tipo}_{alcance}" for tipo in TIPOS for alcance in ALCANCES if alcance != "sistema"}
+)
+"""Recusas da entrada fechada e dos bloqueios e pausas que valem para qualquer pedido (``Vigentes.geral``).
+
+Vem antes de olhar a vitrine (ver ``entrada/servidor.py``, ``chamar``). Bloqueio e pausa de um sistema
+(``bloqueio_sistema``, ``pausa_sistema``) vem depois da vitrine e nao entram aqui."""
+
+
+def recusa_da_propria_ronda(motivo: str | None) -> bool:
+    """A entrada recusou porque a propria ronda nao pode pedir agora: aplicativo, conta ou cadastro de programa."""
+    if motivo is None:
+        return False
+    return motivo in _RECUSAS_DA_PROPRIA_RONDA or motivo.startswith(_PREFIXOS_DA_PROPRIA_RONDA)
+
+
+def recusa_antes_da_vitrine(motivo: str | None) -> bool:
+    """Recusa que a entrada da antes de procurar a ferramenta na vitrine: nao diz nada sobre a vitrine."""
+    return (
+        recusa_da_propria_ronda(motivo)
+        or motivo in MOTIVOS_DO_CADASTRO_DO_PROGRAMA
+        or motivo in MOTIVOS_ANTES_DA_VITRINE_GERAIS
+    )
 
 
 class Situacao(enum.StrEnum):
@@ -101,7 +138,7 @@ NOMES_LEGIVEIS: Final[dict[str, str]] = {
 }
 
 ESPERADO: Final[dict[str, str]] = {
-    Caso.CONTROLE: "cracha aceito (resposta JSON-RPC)",
+    Caso.CONTROLE: "vitrine da ronda (resultado do tools/list)",
     Caso.CRACHA_FALSO: "401",
     Caso.CRACHA_VENCIDO: "401",
     Caso.OUTRO_CONDOMINIO: "401",
@@ -248,7 +285,15 @@ def _passou_das_portas(r: Resposta) -> bool:
 
 
 def classificar_controle(r: Resposta) -> Situacao:
-    return Situacao.CONFORME if _passou_das_portas(r) else Situacao.INCONCLUSIVO
+    """Conforme so quando o cracha de verdade passou pelas portas e a entrada devolveu a vitrine (um resultado).
+
+    Qualquer recusa no controle vem antes da vitrine (``entrada/servidor.py``, ``quem`` e ``listar``): a propria
+    ronda sem valer, limite por minuto, entrada fechada, bloqueio ou pausa geral, ou um motivo novo. Com ela, o
+    caso ``outra_pessoa`` tambem nao testa a vitrine, e a rodada nao pode dizer "conforme": inconclusivo.
+    """
+    if _passou_das_portas(r) and r.tem_resultado:
+        return Situacao.CONFORME
+    return Situacao.INCONCLUSIVO
 
 
 def classificar_cracha(r: Resposta) -> Situacao:
@@ -272,14 +317,24 @@ def classificar_versao(r: Resposta) -> Situacao:
 
 
 def classificar_outra_pessoa(r: Resposta) -> Situacao:
-    """Porta da vitrine: recusa antes de achar a ferramenta. Resultado, ou recusa de depois da vitrine, e passagem."""
+    """Porta da vitrine: so a recusa ``fora_da_vitrine`` e conforme.
+
+    Recusa de antes da vitrine (aplicativo, conta, cadastro de programa, limite por minuto, entrada fechada,
+    bloqueio geral) e erro interno do servidor nao provam nada. Qualquer outra recusa (de depois de achar a
+    ferramenta, como ``programa_sem_chave_propria`` ou ``argumento_fora_do_esquema``), ou um resultado, e
+    passagem: a vitrine deixou a ferramenta de outra pessoa seguir.
+    """
     if not _passou_das_portas(r):
         return Situacao.INCONCLUSIVO
     if r.tem_resultado:
         return Situacao.PASSOU
-    if r.motivo in MOTIVOS_DEPOIS_DA_VITRINE:
-        return Situacao.PASSOU
-    return Situacao.CONFORME
+    if r.motivo == MOTIVO_DA_VITRINE:
+        return Situacao.CONFORME
+    if recusa_antes_da_vitrine(r.motivo):
+        return Situacao.INCONCLUSIVO
+    if r.motivo is None and r.codigo == INTERNAL_ERROR:
+        return Situacao.INCONCLUSIVO
+    return Situacao.PASSOU
 
 
 Classificador = Callable[[Resposta], Situacao]

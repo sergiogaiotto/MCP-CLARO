@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Partida do PostgreSQL do MCP-CLARO: TLS sempre; com PGBACKREST_LIGADO=ligado (fragmento
-# docker/backup/compose.backup.yml), tambem o servidor TLS do pgBackRest e o archive_command, que manda
-# cada WAL ao conteiner de backup.
+# Partida do PostgreSQL do MCP-CLARO: TLS sempre; com PGBACKREST_LIGADO=ligado (servico banco de
+# docker/compose.yml), tambem o servidor TLS do pgBackRest e o archive_command, que manda cada WAL ao
+# conteiner de backup.
 set -euo pipefail
 /usr/local/bin/preparar-tls.sh
 

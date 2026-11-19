@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block titulo %}Meus limites{% endblock %}
+{% block conteudo %}
+<h1>Meus limites</h1>
+<p>Um limite deixa um aplicativo fazer uma ação sem ficha, até um número de vezes por dia e até uma data.</p>
+<p>Encerrar um limite cancela também o que ele já liberou e ainda espera a hora de sair.</p>
+<p>Ações de risco alto nunca entram em limite: sempre passam pela ficha.</p>
+{% if ligada %}
+<p>Criar e ampliar um limite pede a sua <a href="/telas/passkeys" hx-boost="false">passkey</a>. Encerrar não pede.</p>
+{% else %}
+<p class="atencao">A passkey está desligada nesta instalação. No lugar dela, criar e ampliar um limite pedem um login refeito na hora. Encerrar não pede.</p>
+{% endif %}
+
+<h2>Valendo agora</h2>
+{% if not ativos %}
+<p class="cartao">Nenhum limite seu vale agora. Toda ação passa pela ficha.</p>
+{% else %}
+<table>
+  <thead><tr><th>Ação</th><th>Destinatários</th><th>Hoje</th><th>Até</th><th></th></tr></thead>
+  <tbody>
+  {% for x in ativos %}
+    <tr>
+      <td>{{ x.linha.ferramenta | escondidos }} <span class="dica">pelo aplicativo {{ x.linha.aplicativo }}, no sistema {{ x.linha.sistema }}</span>{% if x.nao_vale_com_passkey %}<br><strong>Não vale com a passkey ligada.</strong> <span class="dica">Foi criado ou ampliado sem a passkey: as ações dele passam pela ficha. Encerre e crie outro, com a passkey.</span>{% endif %}</td>
+      <td>{{ x.destinatarios }}</td>
+      <td>{{ x.linha.usados_hoje }} de {{ x.linha.por_dia }}</td>
+      <td>{{ x.linha.valido_ate | data_hora }}</td>
+      <td>
+        <a href="/telas/limites/{{ x.linha.id }}" hx-boost="false">{% if x.nao_vale_com_passkey %}Ver{% else %}Ver ou ampliar{% endif %}</a>
+        <form class="em-linha" method="post" action="/telas/limites/{{ x.linha.id }}/encerrar">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="secundario">Encerrar</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Criar um limite</h2>
+<p>Só entram ações das suas ordens de serviço que valem agora. Por dia, até {{ maximo_dia }} vezes; de prazo, até {{ maximo_dias }} dias.</p>
+{% if not escolhas %}
+<p class="cartao">Nenhuma ação das suas ordens de serviço pode entrar num limite agora.</p>
+{% endif %}
+{% for e in escolhas %}
+<section class="cartao">
+  <h3>{{ e.nome_vitrine }} <span class="dica">pelo aplicativo {{ e.aplicativo }}, no sistema {{ e.sistema }}</span></h3>
+  <p>{{ e.descricao }}</p>
+  <p><a class="botao" href="/telas/limites/novo?escolha={{ e.chave }}" hx-boost="false">Criar limite para esta ação</a></p>
+</section>
+{% endfor %}
+{% if de_risco_alto %}
+<p class="dica">Estas ações são de risco alto e sempre passam pela ficha: {% for e in de_risco_alto %}{{ e.nome_vitrine }}{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+{% endif %}
+
+{% if terminados %}
+<h2>Terminados</h2>
+<ul>
+  {% for x in terminados %}
+  <li>{{ x.linha.ferramenta | escondidos }} pelo aplicativo {{ x.linha.aplicativo }}: {{ x.situacao }}{% if x.linha.motivo %} ({{ x.linha.motivo }}){% endif %}.</li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

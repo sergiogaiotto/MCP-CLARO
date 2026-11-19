@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.ronda.casos import Caso, Resumo, Situacao, Tentativa, fazer_tentativas
+from mcp_claro.ronda.casos import ESPERADO, Caso, Resumo, Situacao, Tentativa, fazer_tentativas
 from mcp_claro.ronda.cracha import ChavesProprias, FonteCrachas
 from mcp_claro.ronda.rodada import SQL_RODADAS_VIGIA, rodadas_seguidas
 from mcp_claro.vigia.alarmes import alarmar
@@ -62,7 +62,7 @@ class RondaDeFora:
             tentativas = [
                 Tentativa(
                     Caso.CONTROLE,
-                    "cracha aceito (resposta JSON-RPC)",
+                    ESPERADO[Caso.CONTROLE],
                     "sem identidade do vigia (WATCH_KEY_FILE)",
                     Situacao.INCONCLUSIVO,
                     {"por_que": "sem identidade do vigia"},
@@ -109,4 +109,8 @@ class RondaDeFora:
         CONTADORES.somar("vigia_rondas", desfecho=desfecho)
         if resumo.falhou:
             log.warning("vigia_ronda_passagem_indevida", casos=[t.caso for t in resumo.passagens], seguidas=seguidas)
+        elif not resumo.controle_ok:
+            # Sem controle em dia: a entrada nao devolveu a vitrine do vigia (programa dele pausado ou sem cadastro,
+            # limite por minuto, entrada fechada, bloqueio ou pausa geral). A vitrine nao foi testada.
+            log.warning("vigia_ronda_inconclusiva")
         return RondaVigia(rodada, tentativas, seguidas, alarmou)

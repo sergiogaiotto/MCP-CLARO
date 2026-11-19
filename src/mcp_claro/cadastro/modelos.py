@@ -94,7 +94,8 @@ class FerramentaVitrine:
         }
         if self.titulo:
             tool["title"] = self.titulo
-        if self.esquema_saida and not self.campos_pessoais:
+        if self.esquema_saida and not self.campos_pessoais and self.classe == "le":
             # Com campos mascarados, o resultado deixa de seguir o esquema do fornecedor: nao o anunciamos.
+            # Acao tambem nao: a resposta pode ser so o numero de protocolo (ficha pendente ou espera).
             tool["outputSchema"] = self.esquema_saida
         return tool

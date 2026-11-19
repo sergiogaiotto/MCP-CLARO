@@ -207,18 +207,12 @@ async def pessoa_por_id(c: AsyncConnection, pessoa_id: uuid.UUID) -> Pessoa | No
     return Pessoa(linha.id, linha.emissor, linha.sujeito, linha.nome, linha.papel, linha.situacao, linha.teste)
 
 
-async def pessoas(c: AsyncConnection, *, so_ativas_com_nome: bool = False) -> Sequence[Row[Any]]:
-    """Pessoas para escolher numa lista. Com ``so_ativas_com_nome``, so quem pode ser responsavel."""
-    if so_ativas_com_nome:
-        sql = (
-            "SELECT id, nome, sujeito, papel, situacao, teste, criado_em FROM pessoas"
-            " WHERE situacao = 'ativa' AND coalesce(btrim(nome), '') <> '' ORDER BY nome, criado_em LIMIT 2000"
-        )
-    else:
-        sql = (
-            "SELECT id, nome, sujeito, papel, situacao, teste, criado_em FROM pessoas"
-            " ORDER BY nome NULLS LAST, criado_em LIMIT 2000"
-        )
+async def pessoas(c: AsyncConnection) -> Sequence[Row[Any]]:
+    """Pessoas para escolher numa lista (pessoas do ADMIN, extrato de outra pessoa)."""
+    sql = (
+        "SELECT id, nome, sujeito, papel, situacao, teste, criado_em FROM pessoas"
+        " ORDER BY nome NULLS LAST, criado_em LIMIT 2000"
+    )
     return (await c.execute(text(sql))).all()
 
 
@@ -239,6 +233,65 @@ async def todos_aplicativos(c: AsyncConnection) -> Sequence[Row[Any]]:
 async def aplicativo_existe(c: AsyncConnection, client_id: str) -> bool:
     linha = (await c.execute(text("SELECT 1 FROM aplicativos WHERE client_id = :c"), {"c": client_id})).first()
     return linha is not None
+
+
+async def aplicativos_pausados(c: AsyncConnection) -> Sequence[Row[Any]]:
+    """Aplicativos pausados que ainda podem voltar (``aplicativos.situacao``; hoje so a conferencia do banco na
+    partida pausa assim). O de um programa encerrado fica de fora: nao ha o que reativar (se o programa for
+    cadastrado de novo, ele volta a aparecer)."""
+    return (
+        await c.execute(
+            text(
+                "SELECT a.id, a.nome, a.client_id, a.tipo FROM aplicativos a WHERE a.situacao = 'pausado'"
+                " AND NOT EXISTS (SELECT 1 FROM programas pr WHERE pr.aplicativo_id = a.id"
+                " AND pr.situacao = 'encerrado') ORDER BY a.tipo, a.nome"
+            )
+        )
+    ).all()
+
+
+async def intervalo_que_pode_faltar(c: AsyncConnection) -> Row[Any] | None:
+    """Entre quando e quando pode faltar algo no extrato, para os aplicativos ainda pausados (menos o de programa
+    encerrado): junta as linhas ``intervalo_perdido`` da conferencia do banco desde a pausa mais antiga que ainda
+    vale (a linha ``aplicativo_pausado_continuidade`` mais nova de cada um; a do intervalo e da mesma transacao) e
+    as das partidas seguintes que tambem nao conferiram. ``None``: sem a linha.
+
+    As duas buscas passam pelo indice parcial ``extrato_saida_cofre_idx`` (migracao 0005), que cobre esses tipos:
+    sao linhas raras, e a tela nao percorre o resto do extrato."""
+    linha = (
+        await c.execute(
+            text(
+                "WITH pausa AS ("
+                " SELECT e.criado_em, e.xid FROM aplicativos a"
+                " CROSS JOIN LATERAL (SELECT criado_em, xid FROM extrato"
+                "   WHERE tipo = 'aplicativo_pausado_continuidade' AND aplicativo_id = a.id"
+                "   ORDER BY criado_em DESC, id DESC LIMIT 1) e"
+                " WHERE a.situacao = 'pausado' AND NOT EXISTS (SELECT 1 FROM programas pr"
+                "   WHERE pr.aplicativo_id = a.id AND pr.situacao = 'encerrado')"
+                " ORDER BY e.criado_em LIMIT 1)"
+                " SELECT min((x.dados->>'desde')::timestamptz) AS desde, max((x.dados->>'ate')::timestamptz) AS ate"
+                " FROM extrato x, pausa"
+                " WHERE x.tipo = 'intervalo_perdido' AND x.pessoa_id IS NULL"
+                " AND (x.criado_em >= pausa.criado_em OR x.xid = pausa.xid)"
+                " AND x.criado_em >= pausa.criado_em - interval '1 hour'"
+            )
+        )
+    ).first()
+    return linha if linha is not None and linha.desde is not None else None
+
+
+async def reativar_assistente(c: AsyncConnection, aplicativo_id: uuid.UUID) -> Row[Any] | None:
+    """Volta a 'ativo' um aplicativo assistente pausado. So vale se ele ainda estiver pausado e for assistente:
+    dois cliques ao mesmo tempo mudam uma vez so, e um programa volta pela tela do programa."""
+    return (
+        await c.execute(
+            text(
+                "UPDATE aplicativos SET situacao = 'ativo', atualizado_em = now()"
+                " WHERE id = :a AND tipo = 'assistente' AND situacao = 'pausado' RETURNING id, nome, client_id"
+            ),
+            {"a": aplicativo_id},
+        )
+    ).first()
 
 
 async def todos_sistemas(c: AsyncConnection) -> Sequence[Row[Any]]:
@@ -295,8 +348,9 @@ async def revisao_ativa(c: AsyncConnection, sistema_id: uuid.UUID, nome: str) ->
     return (
         await c.execute(
             text(
-                "SELECT id, nome_vitrine, titulo, descricao, classe, risco, campos_pessoais, versao, impressao"
-                " FROM ferramentas_revisadas WHERE sistema_id = :s AND nome_original = :n AND situacao = 'ativa'"
+                "SELECT id, nome_vitrine, titulo, descricao, classe, risco, campos_pessoais, campos_destinatario,"
+                " versao, impressao FROM ferramentas_revisadas"
+                " WHERE sistema_id = :s AND nome_original = :n AND situacao = 'ativa'"
             ),
             {"s": sistema_id, "n": nome},
         )
@@ -330,35 +384,18 @@ async def modelo_existe(c: AsyncConnection, nome: str) -> bool:
     return (await c.execute(text("SELECT 1 FROM modelos_ordem WHERE nome = :n"), {"n": nome})).first() is not None
 
 
-async def todos_programas(c: AsyncConnection) -> Sequence[Row[Any]]:
-    return (
+async def cuida_de_programa(c: AsyncConnection, pessoa_id: uuid.UUID) -> bool:
+    """A pessoa e responsavel ou substituta de algum programa que nao foi encerrado (o inicio mostra o link)."""
+    linha = (
         await c.execute(
             text(
-                "SELECT a.client_id, a.nome, a.situacao AS situacao_aplicativo, pr.finalidade, pr.fim, pr.situacao,"
-                " r.nome AS responsavel, s.nome AS substituto FROM programas pr"
-                " JOIN aplicativos a ON a.id = pr.aplicativo_id JOIN pessoas r ON r.id = pr.responsavel_id"
-                " JOIN pessoas s ON s.id = pr.substituto_id ORDER BY a.nome"
-            )
+                "SELECT 1 FROM programas WHERE (responsavel_id = :p OR substituto_id = :p)"
+                " AND situacao <> 'encerrado' LIMIT 1"
+            ),
+            {"p": pessoa_id},
         )
-    ).all()
-
-
-async def cadastrar_programa(
-    c: AsyncConnection,
-    *,
-    aplicativo_id: uuid.UUID,
-    responsavel_id: uuid.UUID,
-    substituto_id: uuid.UUID,
-    finalidade: str,
-    fim: Any,
-) -> None:
-    await c.execute(
-        text(
-            "INSERT INTO programas (aplicativo_id, responsavel_id, substituto_id, finalidade, fim)"
-            " VALUES (:a, :r, :s, :f, :d)"
-        ),
-        {"a": aplicativo_id, "r": responsavel_id, "s": substituto_id, "f": finalidade, "d": fim},
-    )
+    ).first()
+    return linha is not None
 
 
 async def destinos_webhook(c: AsyncConnection) -> Sequence[Row[Any]]:
@@ -568,3 +605,280 @@ async def alvos_do_bloqueio(
         )
     ).one()
     return {"pessoa_id": linha.pessoa_id, "aplicativo_id": linha.aplicativo_id, "sistema_id": linha.sistema_id}
+
+
+# --- Acoes, fichas e limites da pessoa (Fase 2) ---
+
+
+async def operacao_da_ficha(c: AsyncConnection, ficha_id: uuid.UUID) -> uuid.UUID | None:
+    valor = (
+        await c.execute(text("SELECT operacao_id FROM fichas WHERE id = :f"), {"f": ficha_id})
+    ).scalar_one_or_none()
+    return uuid.UUID(str(valor)) if valor is not None else None
+
+
+async def operacao_do_protocolo(c: AsyncConnection, pessoa_id: uuid.UUID, protocolo: str) -> uuid.UUID | None:
+    """So as operacoes da propria pessoa: para os outros, o protocolo nao existe."""
+    valor = (
+        await c.execute(
+            text("SELECT id FROM operacoes WHERE protocolo = :p AND pessoa_id = :pe"),
+            {"p": protocolo, "pe": pessoa_id},
+        )
+    ).scalar_one_or_none()
+    return uuid.UUID(str(valor)) if valor is not None else None
+
+
+async def detalhes_da_operacao(c: AsyncConnection, operacao_id: uuid.UUID) -> Row[Any] | None:
+    """O que a ficha mostra alem da operacao: o aplicativo e a ferramenta como o ADMIN revisou."""
+    return (
+        await c.execute(
+            text(
+                "SELECT a.nome AS aplicativo, r.titulo, r.descricao, r.classe, r.risco"
+                " FROM operacoes o JOIN aplicativos a ON a.id = o.aplicativo_id"
+                " JOIN ferramentas_revisadas r ON r.id = o.ferramenta_id WHERE o.id = :o"
+            ),
+            {"o": operacao_id},
+        )
+    ).first()
+
+
+async def ferramentas_de_acao(c: AsyncConnection, pessoa_id: uuid.UUID, versao: str) -> Sequence[Row[Any]]:
+    """Ferramentas de acao (classe diferente de "le") das ordens de servico que valem agora para a pessoa,
+    em sistemas de chave por pessoa: as unicas que podem entrar num limite por aproximacao."""
+    return (
+        await c.execute(
+            text(
+                "SELECT DISTINCT ON (o.aplicativo_id, f.id) o.aplicativo_id, a.nome AS aplicativo,"
+                " f.id AS ferramenta_id, f.sistema_id, s.nome AS sistema, f.nome_original, f.nome_vitrine,"
+                " f.titulo, f.descricao, f.campos_destinatario, f.classe, f.risco"
+                " FROM ordens_servico o JOIN aplicativos a ON a.id = o.aplicativo_id AND a.situacao = 'ativo'"
+                " JOIN modelos_ordem m ON m.id = o.modelo_id AND m.ativo"
+                " JOIN modelos_ordem_ferramentas mf ON mf.modelo_id = m.id"
+                " JOIN ferramentas_revisadas f ON f.sistema_id = mf.sistema_id AND f.nome_original = mf.nome_original"
+                " AND f.situacao = 'ativa' AND f.classe <> 'le'"
+                " JOIN sistemas s ON s.id = f.sistema_id AND s.situacao = 'ativo' AND s.versao_mcp = :v"
+                " AND s.tipo_chave = 'por_pessoa'"
+                " WHERE o.pessoa_id = :p AND o.situacao = 'ativa' AND o.inicio <= now() AND o.fim > now()"
+                " ORDER BY o.aplicativo_id, f.id"
+            ),
+            {"p": pessoa_id, "v": versao},
+        )
+    ).all()
+
+
+_SQL_LIMITES = (
+    "SELECT l.id, l.pessoa_id, l.aplicativo_id, l.sistema_id, l.nome_original, l.destinatarios, l.por_dia,"
+    " CASE WHEN l.dia = (now() AT TIME ZONE :fuso)::date THEN l.usados_hoje ELSE 0 END AS usados_hoje,"
+    " l.valido_ate, l.com_passkey, l.motivo, l.criado_em,"
+    " CASE WHEN l.situacao = 'ativo' AND l.valido_ate <= now() THEN 'vencido' ELSE l.situacao END AS situacao,"
+    " a.nome AS aplicativo, s.nome AS sistema, coalesce(f.nome_vitrine, l.nome_original) AS ferramenta"
+    " FROM limites l JOIN aplicativos a ON a.id = l.aplicativo_id JOIN sistemas s ON s.id = l.sistema_id"
+    " LEFT JOIN ferramentas_revisadas f ON f.sistema_id = l.sistema_id AND f.nome_original = l.nome_original"
+    " AND f.situacao = 'ativa'"
+)
+
+
+async def limites_da_pessoa(c: AsyncConnection, pessoa_id: uuid.UUID, fuso: str) -> Sequence[Row[Any]]:
+    return (
+        await c.execute(
+            text(_SQL_LIMITES + " WHERE l.pessoa_id = :p ORDER BY l.criado_em DESC LIMIT 200"),
+            {"p": pessoa_id, "fuso": fuso},
+        )
+    ).all()
+
+
+async def limite_da_pessoa(
+    c: AsyncConnection, pessoa_id: uuid.UUID, limite_id: uuid.UUID, fuso: str
+) -> Row[Any] | None:
+    return (
+        await c.execute(
+            text(_SQL_LIMITES + " WHERE l.id = :i AND l.pessoa_id = :p"), {"i": limite_id, "p": pessoa_id, "fuso": fuso}
+        )
+    ).first()
+
+
+async def limite_igual_ativo(
+    c: AsyncConnection,
+    *,
+    pessoa_id: uuid.UUID,
+    aplicativo_id: uuid.UUID,
+    sistema_id: uuid.UUID,
+    nome_original: str,
+    destinatarios: str,
+    ligada: bool,
+) -> bool:
+    """Ha um limite igual que vale agora? ``ligada``: a passkey esta ligada. Com ela ligada, um limite criado ou
+    ampliado sem a passkey nao vale (o nucleo nao o gasta) e nao conta como igual: a pessoa pode criar este."""
+    linha = (
+        await c.execute(
+            text(
+                "SELECT 1 FROM limites WHERE pessoa_id = :p AND aplicativo_id = :a AND sistema_id = :s"
+                " AND nome_original = :n AND situacao = 'ativo' AND valido_ate > now()"
+                " AND (com_passkey OR NOT :pk) AND destinatarios = CAST(:d AS jsonb) LIMIT 1"
+            ),
+            {
+                "p": pessoa_id,
+                "a": aplicativo_id,
+                "s": sistema_id,
+                "n": nome_original,
+                "d": destinatarios,
+                "pk": ligada,
+            },
+        )
+    ).first()
+    return linha is not None
+
+
+async def travar_revisao(c: AsyncConnection, ferramenta_id: uuid.UUID) -> None:
+    """Trava (FOR SHARE) a versao revisada da ferramenta ate o fim da transacao que cria o limite.
+
+    O ADMIN, ao gravar uma revisao nova, muda esta linha para 'substituida' e, na mesma transacao, encerra os
+    limites que nao conferem os campos de destinatario marcados agora. Com a trava, as duas transacoes nao se
+    cruzam: ou o limite e gravado antes (e a revisao do ADMIN o ve e o encerra, se for o caso), ou a revisao
+    termina antes (e a pessoa le os campos novos, ou a acao ja nao esta na lista)."""
+    await c.execute(text("SELECT 1 FROM ferramentas_revisadas WHERE id = :f FOR SHARE"), {"f": ferramenta_id})
+
+
+async def revisao_por_id(c: AsyncConnection, ferramenta_id: uuid.UUID) -> Row[Any] | None:
+    """Sistema e nome original de uma versao revisada, em qualquer situacao (ativa, suspensa ou substituida)."""
+    return (
+        await c.execute(
+            text("SELECT id, sistema_id, nome_original, situacao FROM ferramentas_revisadas WHERE id = :f"),
+            {"f": ferramenta_id},
+        )
+    ).first()
+
+
+async def criar_limite(
+    c: AsyncConnection,
+    *,
+    pessoa_id: uuid.UUID,
+    aplicativo_id: uuid.UUID,
+    sistema_id: uuid.UUID,
+    nome_original: str,
+    destinatarios: str,
+    por_dia: int,
+    dias: int,
+    com_passkey: bool,
+    fuso: str,
+) -> uuid.UUID:
+    return uuid.UUID(
+        str(
+            (
+                await c.execute(
+                    text(
+                        "INSERT INTO limites (pessoa_id, aplicativo_id, sistema_id, nome_original, destinatarios,"
+                        " por_dia, dia, valido_ate, com_passkey) VALUES (:p, :a, :s, :n, CAST(:d AS jsonb), :q,"
+                        " (now() AT TIME ZONE :fuso)::date, now() + make_interval(days => :dias), :pk) RETURNING id"
+                    ),
+                    {
+                        "p": pessoa_id,
+                        "a": aplicativo_id,
+                        "s": sistema_id,
+                        "n": nome_original,
+                        "d": destinatarios,
+                        "q": por_dia,
+                        "fuso": fuso,
+                        "dias": dias,
+                        "pk": com_passkey,
+                    },
+                )
+            ).scalar_one()
+        )
+    )
+
+
+async def ampliar_limite(
+    c: AsyncConnection,
+    *,
+    pessoa_id: uuid.UUID,
+    limite_id: uuid.UUID,
+    por_dia: int,
+    dias: int,
+    teto_dia: int,
+    teto_dias: int,
+    com_passkey: bool,
+) -> Row[Any] | None:
+    """Amplia so um limite ativo da propria pessoa, dentro do teto vigente.
+
+    Abaixo do teto, nada diminui: a quantidade e o prazo so crescem. Um limite que ficou acima do teto (a
+    politica baixou) renova no maximo ate ``teto_dia`` por dia, e o prazo nunca passa de ``teto_dias`` dias a
+    contar de agora.
+
+    ``com_passkey`` diz como foi ampliado agora (com a passkey ou, com ela desligada, com o login refeito), e e o
+    que fica gravado. Com a passkey ligada, um limite criado sem ela nao vale e nao e ampliado (``None``): a
+    pessoa encerra e cria outro, com a passkey."""
+    return (
+        await c.execute(
+            text(
+                "UPDATE limites SET por_dia = least(greatest(por_dia, :q), :td),"
+                " valido_ate = least(greatest(valido_ate, now() + make_interval(days => :dias)),"
+                " now() + make_interval(days => :tdias)),"
+                " com_passkey = :pk"
+                " WHERE id = :i AND pessoa_id = :p AND situacao = 'ativo' AND valido_ate > now()"
+                " AND (com_passkey OR NOT :pk)"
+                " RETURNING id, aplicativo_id, sistema_id, nome_original, por_dia, valido_ate, com_passkey"
+            ),
+            {
+                "i": limite_id,
+                "p": pessoa_id,
+                "q": por_dia,
+                "td": teto_dia,
+                "dias": dias,
+                "tdias": teto_dias,
+                "pk": com_passkey,
+            },
+        )
+    ).first()
+
+
+async def liberadas_pelo_limite(c: AsyncConnection, limite_id: uuid.UUID) -> list[int]:
+    """Linhas da fila que o limite liberou e que ainda esperam a hora de sair (as mais antigas primeiro)."""
+    return [
+        int(i)
+        for i in (
+            await c.execute(
+                text("SELECT id FROM fila_saida WHERE limite_id = :l AND estado = 'liberada' ORDER BY id"),
+                {"l": limite_id},
+            )
+        ).scalars()
+    ]
+
+
+async def encerrar_limites_sem_os_campos(
+    c: AsyncConnection, *, sistema_id: uuid.UUID, nome_original: str, campos: list[str], motivo: str
+) -> Sequence[Row[Any]]:
+    """Encerra os limites "so estes destinatarios" desta acao que nao conferem algum campo marcado agora.
+
+    O ADMIN marcou um campo de destinatario novo (por exemplo, a copia): um limite criado antes nao o fecha, e
+    um pedido com copia para fora sairia sem ficha. Ele termina aqui; a pessoa cria outro, ja com o campo novo.
+    Limite "qualquer destinatario" (lista vazia) nao muda. Desmarcar um campo tambem nao: o limite segue mais
+    fechado do que precisa."""
+    return (
+        await c.execute(
+            text(
+                "UPDATE limites SET situacao = 'encerrado', motivo = :m"
+                " WHERE sistema_id = :s AND nome_original = :n AND situacao IN ('ativo', 'suspenso')"
+                " AND jsonb_array_length(destinatarios) > 0"
+                " AND NOT (CAST(:campos AS text[]) <@ ARRAY(SELECT item ->> 'campo'"
+                " FROM jsonb_array_elements(destinatarios) AS item))"
+                " RETURNING id, pessoa_id, aplicativo_id, sistema_id"
+            ),
+            {"s": sistema_id, "n": nome_original, "campos": campos, "m": motivo},
+        )
+    ).all()
+
+
+async def encerrar_limite(
+    c: AsyncConnection, *, pessoa_id: uuid.UUID, limite_id: uuid.UUID, motivo: str
+) -> Row[Any] | None:
+    return (
+        await c.execute(
+            text(
+                "UPDATE limites SET situacao = 'encerrado', motivo = :m"
+                " WHERE id = :i AND pessoa_id = :p AND situacao IN ('ativo', 'suspenso')"
+                " RETURNING id, aplicativo_id, sistema_id, nome_original"
+            ),
+            {"i": limite_id, "p": pessoa_id, "m": motivo},
+        )
+    ).first()
