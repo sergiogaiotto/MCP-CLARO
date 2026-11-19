@@ -165,7 +165,7 @@ class Pedidos:
             raise AcaoRecusada(
                 "teto_confirmacoes",
                 f"Este aplicativo pediu mais de {teto} confirmacoes na ultima hora e foi pausado. "
-                "Nada foi enviado. O ADMIN ou a pessoa reativa depois de conferir.",
+                "Nada foi enviado. O ADMIN reativa depois de conferir.",
             )
         CONTADORES.somar("acoes_pedidas", rota=rota.motivo)
         return op, False
