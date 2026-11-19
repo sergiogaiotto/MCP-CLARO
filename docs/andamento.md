@@ -61,3 +61,24 @@ no CI, no job "suite oficial atraves do gateway".
 Provas que dependem de pessoas e do ambiente real, ainda a fazer: dois aplicativos-piloto conectando de verdade;
 um sistema do dono com chave por pessoa (decisão 5); telas entendidas por pessoas sem formação técnica; ensaio de
 restauração com o pgBackRest de verdade (o teste longo roda na rodada diária do CI).
+
+## Fase 2: agir
+
+| Entrega | Situação |
+| --- | --- |
+| Número de protocolo e código de conferência em toda ação | Feito (`saida/protocolo.py`): `CLR-AAAA-NNNNNNNN` e um código de 12 letras e números do que vai seguir |
+| Consulta pelo número de protocolo na vitrine | Feito: `mcp_claro_consultar_protocolo`, só a mesma pessoa pelo mesmo aplicativo |
+| Ficha no gateway, caixa "o aplicativo diz" à parte e caixa de pendências | em andamento |
+| Passkey para risco alto e para criar ou ampliar limites | Em andamento |
+| Aviso de ficha pendente por e-mail e webhook | Em andamento |
+| Porta única de saída: fila, despachante único, espera visível, cancelar antes de sair e "seguir agora" | Feito (`saida/fila.py`, `saida/despachante.py`): trava de sessão, LISTEN/NOTIFY e varredura, "enviando" gravado na conexão da trava |
+| "Estamos confirmando": não confirmada, decisão da pessoa e pedido igual que devolve a original | Feito no banco e na entrada; tela de decisão em andamento |
+| Limite por aproximação: ferramenta, destinatários, quantidade e prazo | Feito no banco e na entrada (gasto atômico, conferido de novo no despachante); telas em andamento |
+| Teto de confirmações e período de experiência | Feito: acima do teto o aplicativo pausa e a fila dele para |
+| Comprovante de bloqueio em três partes | Feito: o bloqueio para a fila na mesma transação e grava o que parou, o que já saiu e o que o sistema informou |
+| Fechamento várias vezes ao dia, guardado no vigia | Feito desde a Fase 1 (`CLOSING_INTERVAL_HOURS`, 6 horas) |
+| Programas que rodam sozinhos, só lendo (decisão 9) | Em andamento |
+| Restauração com ações na fila: a porta de saída volta fechada | Feito: "enviando" vira não confirmada; o que esperava fica parado por restauração |
+| Medições da Fase 2 no Grafana | Feito: fila agora, fim dos envios, caminhos e paradas |
+
+Roteiro para quem cuida do dia a dia: [Porta de saída](saida.md).
