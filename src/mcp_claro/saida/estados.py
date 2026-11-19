@@ -64,7 +64,7 @@ FRASE: Final[dict[Estado, str]] = {
     Estado.LIBERADA: "Confirmada. A acao espera a hora de sair; ainda da para cancelar.",
     Estado.ENVIANDO: "Estamos enviando ao sistema. Nao repita o pedido.",
     Estado.ENVIADA: "Enviada uma vez ao sistema.",
-    Estado.NAO_SAIU: "Nao saiu: o sistema nao recebeu o pedido. Nada aconteceu.",
+    Estado.NAO_SAIU: "Nao saiu: o sistema nao executou o pedido (nao recebeu ou recusou na porta). Nada aconteceu.",
     Estado.SISTEMA_PEDIU_DADOS: "O sistema pediu mais dados no meio da acao; o MCP-CLARO nao repassa esses pedidos.",
     Estado.NAO_CONFIRMADA: "Resultado nao confirmado: o pedido pode ter chegado ao sistema. Nada sera reenviado; "
     "a pessoa decide na tela do gateway.",

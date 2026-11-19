@@ -5,8 +5,9 @@
 - A pessoa so liga no proprio alcance: um aplicativo so para ela (``pessoa_aplicativo``) ou todos os
   aplicativos dela (``pessoa``). A linha do extrato sai da propria regra (``bloquear`` e ``encerrar``).
 - Tocar de novo no mesmo botao nao abre outro igual: mostra o comprovante do que ja vale.
-- O comprovante mostra tambem as tres partes da porta de saida (Fase 2): o que parou antes de sair, o que
-  ja tinha saido e o que o sistema informou.
+- O comprovante mostra tambem as tres partes da porta de saida (Fase 2), como na proposta: o que paramos a
+  tempo, o que ja tinha seguido (nos sistemas de nivel 1 e 2, seguido quer dizer entregue ao sistema, nao
+  concluido por ele) e o que ainda esta em conferencia.
 """
 
 from __future__ import annotations
@@ -116,19 +117,26 @@ ESTAVA: Final[dict[str, str]] = {
 }
 SAIDA: Final[dict[str, str]] = {
     "enviando": "estava saindo",
-    "enviada": "enviada",
+    "enviada": "entregue ao sistema",
     "nao_confirmada": "resultado não confirmado",
     "sistema_pediu_dados": "o sistema pediu mais dados",
 }
+EM_CONFERENCIA: Final[dict[str, str]] = {
+    "enviando": "estava saindo na hora do bloqueio",
+    "nao_confirmada": "saiu, mas a resposta do sistema não chegou inteira",
+}
+# Sem a parte "em conferencia" (comprovante de antes dela), estas ficam nela, e nao em "ja tinha seguido".
+ESTADOS_EM_CONFERENCIA: Final = frozenset(EM_CONFERENCIA)
 
 
 @dataclass(frozen=True, slots=True)
 class TresPartes:
-    """Comprovante do bloqueio em tres partes (``fila.comprovante_do_bloqueio``), como a tela mostra."""
+    """Comprovante do bloqueio em tres partes (``fila.comprovante_do_bloqueio``), como a tela mostra:
+    o que paramos a tempo, o que ja tinha seguido e o que ainda esta em conferencia."""
 
     paradas: list[tuple[str, str]]
     ja_saidas: list[tuple[str, str, str]]
-    informado: list[tuple[str, str]]
+    em_conferencia: list[tuple[str, str, str]]
 
 
 def _momento(valor: Any) -> datetime | None:
@@ -140,22 +148,38 @@ def _momento(valor: Any) -> datetime | None:
         return None
 
 
+def _quando(valor: Any) -> str:
+    momento = _momento(valor)
+    return momento.astimezone(ZoneInfo(FUSO)).strftime("%d/%m/%Y %H:%M") if momento else ""
+
+
 def tres_partes(c: fila.Comprovante | None) -> TresPartes | None:
     if c is None:
         return None
     paradas = [(str(p.get("protocolo", "")), ESTAVA.get(str(p.get("estava")), str(p.get("estava")))) for p in c.paradas]
-    ja_saidas = []
-    for s in c.ja_saidas:
-        quando = _momento(s.get("enviada_em"))
-        ja_saidas.append(
-            (
-                str(s.get("protocolo", "")),
-                SAIDA.get(str(s.get("estado")), str(s.get("estado"))),
-                quando.astimezone(ZoneInfo(FUSO)).strftime("%d/%m/%Y %H:%M") if quando else "",
-            )
+    seguiram = list(c.ja_saidas)
+    conferindo: list[dict[str, Any]] | None = getattr(c, "em_conferencia", None)
+    if conferindo is None:
+        # Comprovante sem a parte "em conferencia": o que estava saindo ou ficou nao confirmado vai para ela.
+        conferindo = [s for s in seguiram if str(s.get("estado")) in ESTADOS_EM_CONFERENCIA]
+        seguiram = [s for s in seguiram if str(s.get("estado")) not in ESTADOS_EM_CONFERENCIA]
+    ja_saidas = [
+        (
+            str(s.get("protocolo", "")),
+            SAIDA.get(str(s.get("estado")), str(s.get("estado"))),
+            _quando(s.get("enviada_em")),
         )
-    informado = [(str(i.get("protocolo", "")), str(i.get("o_sistema_informou", ""))) for i in c.informado]
-    return TresPartes(paradas, ja_saidas, informado)
+        for s in seguiram
+    ]
+    em_conferencia = [
+        (
+            str(s.get("protocolo", "")),
+            EM_CONFERENCIA.get(str(s.get("estado")), SAIDA.get(str(s.get("estado")), str(s.get("estado")))),
+            _quando(s.get("desde") or s.get("enviada_em")),
+        )
+        for s in conferindo
+    ]
+    return TresPartes(paradas, ja_saidas, em_conferencia)
 
 
 class TelasDeBloqueio:

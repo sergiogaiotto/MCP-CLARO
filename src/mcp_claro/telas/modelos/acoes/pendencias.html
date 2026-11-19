@@ -15,7 +15,7 @@
   <h3>{{ a.op.nome_vitrine }} <span class="dica">no sistema {{ a.op.sistema_nome }}</span></h3>
   <p>Protocolo <code>{{ a.op.protocolo }}</code>. Código de conferência <strong>{{ a.op.codigo_conferencia }}</strong>.</p>
   <p>{% if a.prazo > 0 %}Faltam {{ a.prazo_texto }} para decidir.{% else %}O prazo para decidir acabou.{% endif %}
-    {% if a.op.ficha_exige_passkey %}<span class="etiqueta ruim">Risco alto: pede a passkey</span>{% endif %}</p>
+    {% if a.op.ficha_exige_passkey and passkey_ligada %}<span class="etiqueta ruim">Risco alto: pede a passkey</span>{% elif a.de_risco_alto %}<span class="etiqueta ruim">Risco alto: pede login refeito</span>{% endif %}</p>
   <p><a class="botao" href="/telas/fichas/{{ a.op.ficha_id }}" hx-boost="false">Abrir a ficha</a></p>
 </section>
 {% endfor %}

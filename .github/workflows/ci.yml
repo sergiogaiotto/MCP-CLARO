@@ -59,6 +59,17 @@ jobs:
       - name: testes longos (so na rodada diaria)
         if: github.event_name == 'schedule'
         run: uv run pytest -m lento -q
+      - name: passeios longos da porta de saida (so na rodada diaria)
+        # Os passeios sorteados (hypothesis) rodam curtos a cada mudanca; aqui, com muitos mais exemplos e passos.
+        # A resposta perdida ao aplicativo roda 20 vezes, como no teste publico da discussao sobre repeticao.
+        if: github.event_name == 'schedule'
+        env:
+          MCP_CLARO_TESTE_LONGO: "1"
+        run: >
+          uv run pytest -q
+          tests/integracao/test_saida_estados.py
+          tests/integracao/test_saida_sequencias.py
+          tests/integracao/test_saida_resposta_perdida_aplicativo.py
 
   conformidade:
     name: suite oficial de conformidade (2026-07-28)

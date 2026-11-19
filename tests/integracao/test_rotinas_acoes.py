@@ -345,10 +345,44 @@ async def test_pessoa_sem_email_nem_webhook_fica_marcada_sem_extrato(
     assert {av.canal for av in avisos} <= {"webhook"}
     assert len(avisos) == len(assinam)
     assert (await um(engine_rotinas, "SELECT avisada_em FROM fichas WHERE id = :f", f=f.ficha_id)).avisada_em
+    # A pessoa nao recebeu nada: o extrato nunca diz "a pessoa foi avisada". O aviso so aos webhooks da
+    # instalacao tem frase propria.
     n = await contar(
         engine_rotinas, "SELECT count(*) FROM extrato WHERE tipo = 'ficha_avisada' AND protocolo = :p", p=f.protocolo
     )
-    assert n == (1 if assinam else 0)
+    assert n == 0
+    so_webhooks = await contar(
+        engine_rotinas,
+        "SELECT count(*) FROM extrato WHERE tipo = 'ficha_avisada_webhooks' AND protocolo = :p",
+        p=f.protocolo,
+    )
+    assert so_webhooks == (1 if assinam else 0)
+
+
+async def test_pessoa_sem_email_com_webhook_tem_a_frase_dos_webhooks(
+    engine_rotinas: AsyncEngine, engine_dono: AsyncEngine
+) -> None:
+    a = await arranjo(engine_dono)
+    f = await nova_ficha(engine_dono, a, montada="-10 minutes")
+    destino = await webhook_de_teste(engine_dono)
+    try:
+        await acoes.avisar_fichas_pendentes(engine_rotinas, apos_minutos=5, base_url=BASE)
+    finally:
+        await desligar_webhook(engine_dono, destino)
+    assert {av.canal for av in await avisos_da_ficha(engine_rotinas, f.ficha_id)} == {"webhook"}
+    n = await contar(
+        engine_rotinas, "SELECT count(*) FROM extrato WHERE tipo = 'ficha_avisada' AND protocolo = :p", p=f.protocolo
+    )
+    assert n == 0
+    linha = await um(
+        engine_rotinas,
+        "SELECT frase FROM extrato WHERE tipo = 'ficha_avisada_webhooks' AND protocolo = :p",
+        p=f.protocolo,
+    )
+    assert linha.frase == (
+        f"O aviso da ficha pendente do protocolo {f.protocolo} foi so aos webhooks da instalacao; nao houve aviso"
+        " por e-mail a pessoa."
+    )
 
 
 # --- Limites que vencem ----------------------------------------------------------------------
@@ -410,6 +444,7 @@ async def test_tarefas_de_acoes_rodam_no_agendador(engine_rotinas: AsyncEngine, 
         ("vencer_fichas", acoes.INTERVALO_FICHAS),
         ("avisar_fichas_pendentes", acoes.INTERVALO_AVISO_FICHAS),
         ("vencer_limites", acoes.INTERVALO_LIMITES),
+        ("limpar_desafios_passkey", acoes.INTERVALO_DESAFIOS),
     ]
     agendador = Agendador(engine_rotinas, tarefas, primeira_espera=0)
     for t in tarefas:

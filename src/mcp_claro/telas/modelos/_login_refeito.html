@@ -1,0 +1,10 @@
+{# Pede o login refeito na hora. Contexto: "refazer" (Telas.login_refeito) e "pede" (o que pede o login, numa frase). #}
+{% if refazer and not refazer.recente %}
+<div class="atencao" id="login-refeito">
+  <p>{{ pede }} Para isso, entre de novo agora: o provedor de login pede a sua senha outra vez. Depois, você volta para esta página e tem {{ refazer.minutos }} minutos para concluir.</p>
+  {% if refazer.falhou %}
+  <p><strong>O provedor de login não pediu a sua senha de novo.</strong> Tente outra vez. Se continuar assim, fale com o ADMIN.</p>
+  {% endif %}
+  <p><a class="botao" href="{{ refazer.url }}" hx-boost="false">Entrar de novo agora</a></p>
+</div>
+{% endif %}

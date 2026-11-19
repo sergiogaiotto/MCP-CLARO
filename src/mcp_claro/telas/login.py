@@ -73,7 +73,9 @@ class ProvedorLogin:
             self._descoberto_em = time.monotonic()
         return autorizacao or self._enderecos[0], troca or self._enderecos[1]
 
-    async def url_login(self, login: LoginPendente) -> str:
+    async def url_login(self, login: LoginPendente, *, refazer: bool = False) -> str:
+        """Endereco do login no provedor. ``refazer``: o provedor pede a senha de novo, mesmo com sessao aberta
+        la (``prompt=login`` e ``max_age=0``, OIDC Core 3.1.2.1); o ``auth_time`` novo vem no id_token."""
         autorizacao, _ = await self.enderecos()
         parametros = {
             "response_type": "code",
@@ -85,6 +87,8 @@ class ProvedorLogin:
             "code_challenge": desafio_pkce(login.verificador),
             "code_challenge_method": "S256",
         }
+        if refazer:
+            parametros |= {"prompt": "login", "max_age": "0"}
         separador = "&" if "?" in autorizacao else "?"
         return autorizacao + separador + urlencode(parametros)
 

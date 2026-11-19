@@ -5,7 +5,8 @@ que roda à noite. No MCP-CLARO, cada programa é um aplicativo próprio, com um
 nome. Plano: decisão 9, "Programas que rodam sozinhos: nossa sugestão", e a tabela de parâmetros
 "Programas que rodam sozinhos".
 
-**Na Fase 2, o programa só lê.** Ações de programas ficam desligadas (`PROGRAM_ACTIONS_ENABLED=falso`).
+**Na Fase 2, o programa só lê.** Ações de programas ficam desligadas (`PROGRAM_ACTIONS_ENABLED=falso`). Com o
+parâmetro ligado, a partida é recusada (veja o fim desta página).
 
 ## O que o programa pode fazer na Fase 2
 
@@ -27,7 +28,7 @@ vai ao extrato:
 | --- | --- |
 | `programa_sem_cadastro` | O aplicativo é do tipo programa, mas não tem cadastro com responsável |
 | `programa_pausado` | O ADMIN pausou, ou uma rotina pausou (veja abaixo) |
-| `programa_encerrado` | O programa foi encerrado. Não tem volta |
+| `programa_encerrado` | O programa foi encerrado. Só volta se o ADMIN cadastrar o programa de novo |
 | `programa_vencido` | A data de fim já passou |
 | `programa_sem_responsavel` | O responsável ou o substituto não está mais ativo |
 | `programa_limite_minuto` | Passou do limite de pedidos neste minuto |
@@ -82,13 +83,23 @@ Tudo nas telas do ADMIN, e cada passo vai ao extrato com o nome de quem fez.
    identificador da conta de serviço (passo 4 do Keycloak). Só aparecem os modelos que leem em sistemas com chave
    de programa.
 
-Na mesma tela do programa, o ADMIN pausa (com motivo), retoma, encerra (com motivo, sem volta), confirma que o
-programa segue valendo, registra a troca da chave e troca o responsável e o substituto.
+Na mesma tela do programa, o ADMIN pausa (com motivo), retoma, encerra (com motivo), confirma que o programa
+segue valendo, registra a troca da chave, troca o responsável e o substituto e **estende a data de fim**. A nova
+data precisa ser depois da data atual e em até um ano a partir de hoje. Só vale para programa que não foi
+encerrado, e vai ao extrato com a data antiga e a nova.
+
+Encerrar para o programa de vez. Para voltar a usar um programa encerrado, o ADMIN o cadastra de novo em
+**Programas, Cadastrar um programa**, com o **mesmo** `client_id`, responsável, substituto e uma nova data de fim.
+A linha do programa volta a valer com os dados novos, a revisão conta a partir de hoje e o passo vai ao extrato.
+A data da troca da chave não muda: se a chave passou do prazo, registre a troca antes. Confira também a ordem de
+serviço dele. Um programa que ainda vale (ativo ou pausado) não é cadastrado de novo.
 
 ## Prazos e rotinas
 
 A rotina `programas` roda a cada `ROUTINES_INTERVAL_SECONDS`. Cada mudança vai ao extrato e vira aviso por
-e-mail ao responsável e ao substituto (e ao ADMIN, nas pausas e no encerramento):
+e-mail ao responsável e ao substituto (e ao ADMIN, nas pausas e no encerramento). O aviso do responsável leva o
+link de `/telas/programas`; o do ADMIN, o link da tela do programa na área do ADMIN
+(`/telas/admin/programas/<id>`), onde fica o botão de retomar:
 
 | O que acontece | Quando | O que fazer |
 | --- | --- | --- |
@@ -97,25 +108,32 @@ e-mail ao responsável e ao substituto (e ao ADMIN, nas pausas e no encerramento
 | Chave vencida | A chave fez `PROGRAM_KEY_MAX_AGE_DAYS` dias sem troca registrada | O programa pausa. Registre a troca e retome |
 | Falta de uso | `PROGRAM_IDLE_PAUSE_DAYS` (30) dias sem pedido, contados do último pedido ou da última revisão | O programa pausa. Se ainda for preciso, o ADMIN retoma |
 | Responsável inativo | O responsável ou o substituto foi desativado | O programa pausa. Troque-os e retome |
-| Fim | A data de fim passou | O programa é encerrado |
+| Fim | A data de fim passou | O programa é encerrado. Antes disso, o ADMIN pode estender a data de fim na tela do programa |
 
 Retomar é decisão do ADMIN e conta como revisão dele. Só retoma o que está pausado, com a data de fim valendo,
 responsável e substituto ativos e chave dentro do prazo.
 
-## Quando `PROGRAM_ACTIONS_ENABLED` ligar
+**A ronda e o vigia são a exceção.** Os programas `PATROL_CLIENT_ID` (`mcp-claro-ronda`) e `WATCH_CLIENT_ID`
+(`mcp-claro-vigia`) testam as portas do MCP-CLARO, e a rotina nunca os pausa nem os encerra. Quando um deles
+cumpre uma das condições da tabela, a rotina avisa com destaque ("IMPORTANTE") o ADMIN, o responsável e o
+substituto, uma vez para cada situação, e registra no extrato. O ADMIN resolve na tela do programa. Enquanto o
+cadastro da ronda não vale (pausado, sem cadastro, vencido ou sem responsável ativo), a entrada recusa os pedidos
+dela e a ronda fica **inconclusiva**: ela não diz "conforme" sem ter testado a vitrine. Detalhes em
+[vigia.md](vigia.md).
 
-Ligar ações de programas é decisão do dono, registrada, depois das provas da Fase 2 (plano, "Fase 2: agir"). O
-parâmetro só liga junto com `FEATURE_PHASE2_ACT`. Com ele ligado:
+## `PROGRAM_ACTIONS_ENABLED`: por que fica desligado
 
-- as ferramentas que mudam algo, de sistemas com chave do programa, entram na vitrine do programa, e a entrada
-  deixa de recusar com `programa_so_le`;
-- cada ação passa pela mesma porta única de saída das pessoas, com número de protocolo. O programa acompanha
-  cada ação pela ferramenta `mcp_claro_consultar_protocolo`;
-- o programa não aprova nada. Ação fora de um limite aprovado pelo responsável, com passkey, vira pendência do
-  responsável, com aviso. Sem resposta em `PROGRAM_PENDING_TIMEOUT_HOURS` (24), vence e nada segue;
-- tudo o que vale para a leitura continua valendo: cadastro, chave própria, limite por minuto e extrato.
+Na Fase 2, o programa só lê. Com `PROGRAM_ACTIONS_ENABLED` ligado, a partida do MCP-CLARO é recusada: o que as
+ações de programas precisam ainda não existe. Ligar será decisão do dono, registrada, depois que existir:
 
-Antes de ligar, falta: mostrar as pendências dos programas na tela do responsável (hoje a ficha fica presa à
-conta de serviço do programa) e fazer a porta de saída reconferir o cadastro do programa antes de enviar (a
-mesma regra de `mcp_claro.regras.programas.reconferir_leitura`). A prova do plano é: "em teste, com ações
-ligadas, um programa não age fora do limite; o que passa vai às pendências do responsável e vence".
+- **as pendências do responsável:** a ação de um programa precisa aparecer para o responsável decidir, com aviso.
+  Hoje, a ficha ficaria presa à conta de serviço do programa e só venceria, sem ninguém ver;
+- **a reconferência completa:** a porta de saída precisa conferir de novo o cadastro do programa (situação, data
+  de fim, responsável e substituto) antes de enviar, como já faz na leitura
+  (`mcp_claro.regras.programas.reconferir_leitura`);
+- **a ordem de serviço com ações:** hoje a ordem de um programa só aceita modelos em que todas as ferramentas
+  leem. Nenhuma ferramenta que muda algo chega à vitrine de um programa;
+- **a prova do plano:** "em teste, com ações ligadas, um programa não age fora do limite; o que passa vai às
+  pendências do responsável e vence".
+
+Até lá, a entrada também recusa a ação de um programa com `programa_so_le`, e nada é enviado.

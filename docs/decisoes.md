@@ -45,6 +45,25 @@ O dono do produto pediu para seguir as recomendações do plano. Elas deixam de 
 | 13. Extensão Tasks | Desligada por `FEATURE_TASKS`. A consulta pelo número de protocolo é o caminho principal |
 | 14. Grafana | Usado sem alteração. Parecer sobre a AGPL só se o produto for oferecido a clientes ou distribuído |
 
+## Provas da Fase 2: resposta perdida (19/11/2026)
+
+- **Toxiproxy trocado por um intermediário de teste.** O plano fixava o Toxiproxy 2.13.0
+  (`ghcr.io/shopify/toxiproxy:2.13.0`) para cortar respostas. A imagem não baixa no ambiente de testes (o
+  `ghcr.io` fica bloqueado). No lugar dele entra `tests/cortador.py`, um intermediário TCP só de teste, com os
+  mesmos cortes: a resposta não volta, volta pela metade, ou sai inteira de quem respondeu e é engolida no
+  caminho, com a conexão fechada ou muda até quem pediu desistir. Ele corta nos dois caminhos: entre o despachante e o sistema
+  (`tests/integracao/test_saida_resposta_perdida.py`) e entre o aplicativo e a entrada
+  (`tests/integracao/test_saida_resposta_perdida_aplicativo.py`). O teste com o Toxiproxy ficou nesse segundo
+  arquivo e roda quando a imagem existe na máquina. Sem a imagem, ele é pulado e diz o motivo.
+- **Teste público da discussão sobre repetição** (issue 3394 do repositório `modelcontextprotocol`). Lemos a
+  discussão. Nela, a resposta do primeiro `tools/call` se perde depois de o efeito acontecer. O aplicativo
+  desiste pelo prazo e repete uma vez, com os mesmos argumentos e um id novo, e o efeito acontece duas vezes
+  (20 de 20 rodadas). Os scripts da discussão ficam num repositório à parte e não foram copiados. O mesmo
+  cenário foi refeito no teste do caminho do aplicativo, pelo gateway inteiro, com o sistema de exemplo
+  contando cada chamada. Na 2026-07-28 por HTTP, o aplicativo cancela fechando o próprio pedido, sem mandar
+  notificação. O teste confere que o efeito acontece uma vez e que a repetição devolve o mesmo protocolo. Roda
+  3 vezes a cada mudança e 20 vezes na rodada diária (`MCP_CLARO_TESTE_LONGO=1`).
+
 ## Ainda em aberto
 
 Estes pontos não travam o código e ficam como parâmetro ou roteiro até a resposta:

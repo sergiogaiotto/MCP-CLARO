@@ -1,5 +1,6 @@
 """Porta unica de saida (Fase 2), de ponta a ponta: acao com ficha, espera, cancelar, pedido igual,
-bloqueio no meio da fila, restauracao e "estamos confirmando".
+bloqueio no meio da fila, restauracao, "estamos confirmando", consulta pelo protocolo (so a mesma pessoa pelo
+mesmo aplicativo) e periodo de experiencia.
 
 Mesmo arranjo de ``test_autorizacao``, com o sistema de exemplo ``acoes_caixa`` (conta cada chamada).
 Entrada, despachante e rotinas conectam cada um com o proprio usuario do banco, entao as permissoes da
@@ -20,14 +21,15 @@ from mcp.shared.exceptions import MCPError
 from sqlalchemy import text
 
 from exemplos import acoes_caixa
+from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Parametros
 from mcp_claro.regras import bloqueios
 from mcp_claro.saida import fila
 from mcp_claro.saida.estados import Estado
-from mcp_claro.saida.pedidos import CONSULTA
+from mcp_claro.saida.pedidos import CONSULTA, Pedidos
 from mcp_claro.versao import PREFIXO_META
 from tests.apoio import cliente_mcp
-from tests.integracao.test_autorizacao import Ambiente, subir
+from tests.integracao.test_autorizacao import RECURSO, Ambiente, subir
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
@@ -39,9 +41,16 @@ ACOES = (
 
 
 @contextlib.asynccontextmanager
-async def ambiente_de_acoes(banco: Parametros, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Ambiente]:
+async def ambiente_de_acoes(
+    banco: Parametros, monkeypatch: pytest.MonkeyPatch, *, extra: dict[str, Any] | None = None
+) -> AsyncIterator[Ambiente]:
+    """``extra`` muda parametros da instalacao (por exemplo, ``FEATURE_PHASE2_ACT``)."""
     async with subir(
-        banco, monkeypatch, criar_sistema=acoes_caixa.criar, revisoes=ACOES, extra={"OUTBOX_SWEEP_SECONDS": 1}
+        banco,
+        monkeypatch,
+        criar_sistema=acoes_caixa.criar,
+        revisoes=ACOES,
+        extra={"OUTBOX_SWEEP_SECONDS": 1} | (extra or {}),
     ) as a:
         assert (await a.autorizar(a.ana_id, "ana")).status_code == 200
         assert (await a.autorizar(a.bia_id, "bia")).status_code == 200
@@ -251,10 +260,26 @@ async def test_restauracao_para_a_fila_e_nada_sai_sem_nova_confirmacao(amb: Ambi
             c, op.ficha_id, pessoa_id=amb.ana_id, com_passkey=False, espera_segundos=30, rapida_segundos=3
         )
     async with amb.despachante_db.begin() as c:
-        paradas, _ = await fila.parar_por_restauracao(c)
-    assert paradas >= 2
+        await fila.parar_por_restauracao(c)
+    # As duas linhas deste teste param pela restauracao (o banco de teste e um so: outras linhas tambem
+    # podem parar, por isso a conferencia e linha a linha).
     for p in (esperando, liberada):
-        assert (await operacao(amb, p)).estado == Estado.PARADA_POR_RESTAURACAO
+        parada = await operacao(amb, p)
+        assert parada.estado == Estado.PARADA_POR_RESTAURACAO
+        assert parada.desfecho == "parada por restauracao"
+    async with amb.admin.connect() as c:
+        quem = set(
+            (
+                await c.execute(
+                    text(
+                        "SELECT f.mudou_por FROM fila_saida f JOIN operacoes o ON o.id = f.operacao_id"
+                        " WHERE o.protocolo = ANY(:p)"
+                    ),
+                    {"p": [esperando, liberada]},
+                )
+            ).scalars()
+        )
+    assert quem == {"restauracao"}
     pendente = await operacao(amb, esperando)
     with pytest.raises(fila.DecisaoRecusada):
         await confirmar(amb, pendente, pessoa_id=amb.ana_id)
@@ -313,3 +338,122 @@ async def test_teto_de_fichas_pausa_o_aplicativo_e_para_a_fila(amb: Ambiente) ->
         ).one()
     assert (pausa.quem, pausa.tipo) == ("rotina:teto_confirmacoes", "pausa")
     assert chamadas(amb, "criar_chamado") == 0
+
+
+# --- Consulta pelo protocolo por outro aplicativo ---------------------------------------------
+
+
+async def outro_aplicativo_da_ana(amb: Ambiente) -> tuple[uuid.UUID, str]:
+    """Um segundo aplicativo habilitado, com a mesma ordem de servico da Ana. Devolve (id, client_id)."""
+    client_id = f"outro-app-{uuid.uuid4().hex[:8]}"
+    async with amb.entrada_db.begin() as c:
+        app_id = await repositorio.habilitar_aplicativo(c, client_id=client_id, nome="Outro app", familia="teste")
+        modelo = (
+            await c.execute(text("SELECT modelo_id FROM ordens_servico WHERE id = :o"), {"o": amb.ordens["pessoa-ana"]})
+        ).scalar_one()
+        await repositorio.conceder_ordem(
+            c, pessoa_id=amb.ana_id, aplicativo_id=app_id, modelo_id=modelo, dias=7, max_dias=30
+        )
+    return app_id, client_id
+
+
+async def test_consulta_pelo_protocolo_por_outro_aplicativo_da_mesma_pessoa_nao_acha(amb: Ambiente) -> None:
+    r = await chamar(amb, "criar_chamado", {"titulo": "So pelo Claude Code"})
+    protocolo = meta(r)[PREFIXO_META + "protocolo"]
+    outro_id, outro_client = await outro_aplicativo_da_ana(amb)
+
+    # A mesma Ana, pelo outro aplicativo: a ferramenta de consulta responde "nao encontrado", sem estado.
+    cracha = amb.idp.cracha(audiencia=RECURSO, sujeito="pessoa-ana", client_id=outro_client)
+    async with cliente_mcp(f"{amb.entrada}/mcp", cracha) as c:
+        assert amb.vitrine["criar_chamado"] in {t.name for t in (await c.list_tools()).tools}
+        pelo_outro = await c.call_tool(CONSULTA, {"protocolo": protocolo})
+    assert pelo_outro.is_error
+    assert "nao encontrado" in pelo_outro.content[0].text
+    assert PREFIXO_META + "estado" not in meta(pelo_outro)
+
+    # Pelo mesmo aplicativo, a consulta acha.
+    pelo_mesmo = await consultar(amb, protocolo)
+    assert not pelo_mesmo.is_error
+    assert meta(pelo_mesmo)[PREFIXO_META + "protocolo"] == protocolo
+
+    # Direto na entrada: o recorte e pessoa e aplicativo, os dois.
+    pedidos = Pedidos(amb.p, amb.entrada_db)
+    assert await pedidos.consultar(protocolo, pessoa_id=amb.ana_id, aplicativo_id=outro_id) is None
+    assert await pedidos.consultar(protocolo, pessoa_id=amb.bia_id, aplicativo_id=amb.aplicativo_id) is None
+    achada = await pedidos.consultar(protocolo, pessoa_id=amb.ana_id, aplicativo_id=amb.aplicativo_id)
+    assert achada is not None
+    assert achada.protocolo == protocolo
+
+
+# --- Periodo de experiencia -------------------------------------------------------------------
+
+
+async def ordem_criada_ha(amb: Ambiente, dias: int) -> None:
+    async with amb.admin.begin() as c:
+        await c.execute(
+            text(
+                "UPDATE ordens_servico SET criado_em = now() - make_interval(days => :d)"
+                " WHERE pessoa_id = :p AND aplicativo_id = :a"
+            ),
+            {"d": dias, "p": amb.ana_id, "a": amb.aplicativo_id},
+        )
+
+
+async def rota_do_pedido(amb: Ambiente, protocolo: str) -> str:
+    async with amb.admin.connect() as c:
+        return str(
+            (
+                await c.execute(
+                    text("SELECT dados ->> 'rota' FROM extrato WHERE tipo = 'acao_pedida' AND protocolo = :p"),
+                    {"p": protocolo},
+                )
+            ).scalar_one()
+        )
+
+
+async def test_periodo_de_experiencia_manda_tudo_para_a_ficha_e_depois_o_limite_vale(amb: Ambiente) -> None:
+    await politica(amb, TRIAL_PERIOD_DAYS=14, OUTBOX_HOLD_SECONDS=600)
+    async with amb.entrada_db.begin() as c:
+        limite = (
+            await c.execute(
+                text(
+                    "INSERT INTO limites (pessoa_id, aplicativo_id, sistema_id, nome_original, destinatarios, por_dia,"
+                    " valido_ate, com_passkey) VALUES (:p, :a, :s, 'enviar_mensagem',"
+                    " CAST(:d AS jsonb), 5, now() + interval '1 day', true) RETURNING id"
+                ),
+                {
+                    "p": amb.ana_id,
+                    "a": amb.aplicativo_id,
+                    "s": amb.sistema_id,
+                    "d": '[{"campo": "destinatario", "valores": ["equipe"]}]',
+                },
+            )
+        ).scalar_one()
+
+    async def usados() -> int:
+        async with amb.admin.connect() as c:
+            return int(
+                (await c.execute(text("SELECT usados_hoje FROM limites WHERE id = :i"), {"i": limite})).scalar_one()
+            )
+
+    # Ordem de 13 dias, dentro dos 14 de experiencia: o limite cobre, mas o pedido vai para a ficha.
+    await ordem_criada_ha(amb, 13)
+    dentro = meta(await chamar(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "na experiencia"}))
+    assert dentro[PREFIXO_META + "estado"] == "aguardando_ficha"
+    assert await rota_do_pedido(amb, dentro[PREFIXO_META + "protocolo"]) == "periodo_de_experiencia"
+    assert (await operacao(amb, dentro[PREFIXO_META + "protocolo"])).limite_id is None
+    assert await usados() == 0
+
+    # Ordem de 15 dias: passou a experiencia, o limite vale (liberada, com a espera visivel).
+    await ordem_criada_ha(amb, 15)
+    depois = meta(await chamar(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "depois da experiencia"}))
+    assert depois[PREFIXO_META + "estado"] == "liberada"
+    assert await rota_do_pedido(amb, depois[PREFIXO_META + "protocolo"]) == "limite"
+    assert (await operacao(amb, depois[PREFIXO_META + "protocolo"])).limite_id == limite
+    assert await usados() == 1
+    assert chamadas(amb, "enviar_mensagem") == 0
+
+    # A acao liberada nao fica para tras (sai so daqui a dez minutos).
+    async with amb.entrada_db.begin() as c:
+        op = await operacao(amb, depois[PREFIXO_META + "protocolo"])
+        await fila.cancelar(c, op.id, pessoa_id=amb.ana_id)

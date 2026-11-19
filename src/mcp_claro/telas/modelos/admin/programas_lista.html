@@ -31,6 +31,7 @@
 
 <h2>Cadastrar um programa</h2>
 <p class="dica">Antes, crie o cliente do programa no provedor de login, com conta de serviço e JWT assinado. O guia está em docs/programas.md.</p>
+<p class="dica">Um programa encerrado volta a valer se você o cadastrar de novo aqui, com o mesmo client_id. Para um programa que ainda vale, a data de fim muda na tela dele.</p>
 {% if pessoas | length < 2 %}
 <p class="cartao">Para cadastrar um programa, é preciso ter ao menos duas pessoas ativas com nome. Elas aparecem aqui depois do primeiro login.</p>
 {% else %}

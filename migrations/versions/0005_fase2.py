@@ -41,6 +41,7 @@ CREATE TABLE operacoes (
 );
 CREATE INDEX operacoes_pedido_igual ON operacoes (chave_pedido_igual, criada_em DESC);
 CREATE INDEX operacoes_pessoa ON operacoes (pessoa_id, criada_em DESC);
+CREATE INDEX operacoes_aplicativo ON operacoes (aplicativo_id, criada_em DESC);
 
 -- Fichas: montadas pelo gateway, decididas pela pessoa na tela. Valem uma vez, so para aquela operacao.
 CREATE TABLE fichas (
@@ -57,9 +58,54 @@ CREATE TABLE fichas (
   com_passkey        boolean     NOT NULL DEFAULT false,
   segundos_ate_decidir numeric,
   avisada_em         timestamptz,
-  CHECK ((decisao IS NULL) = (decidida_em IS NULL))
+  -- Como a pessoa confirmou: so na sessao, com a passkey, ou refazendo o login (passkey desligada).
+  confirmada_com     text        CHECK (confirmada_com IN ('sessao', 'passkey', 'login_refeito')),
+  CHECK ((decisao IS NULL) = (decidida_em IS NULL)),
+  CHECK ((decisao IS NOT DISTINCT FROM 'confirmada') = (confirmada_com IS NOT NULL)),
+  CHECK (confirmada_com IS DISTINCT FROM 'passkey' OR com_passkey)
 );
 CREATE INDEX fichas_pendentes ON fichas (expira_em) WHERE decisao IS NULL;
+-- Teto de fichas por hora de cada aplicativo (CONFIRM_CAP_PER_HOUR): so a ultima hora e lida.
+CREATE INDEX fichas_montada ON fichas (montada_em);
+
+-- A decisao da ficha vale uma vez: nasce vazia, muda de vazia para um valor e nao muda mais. As rotinas so
+-- vencem fichas. Ficha de risco alto (ou que pede passkey) so confirma com passkey ou com o login refeito.
+CREATE FUNCTION fichas_guarda() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.decisao IS NOT NULL OR NEW.decidida_em IS NOT NULL OR NEW.decidida_por IS NOT NULL OR NEW.com_passkey
+       OR NEW.confirmada_com IS NOT NULL OR NEW.segundos_ate_decidir IS NOT NULL THEN
+      RAISE EXCEPTION 'Uma ficha nasce sem decisao' USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+  END IF;
+  IF ROW(NEW.operacao_id, NEW.codigo_conferencia, NEW.risco, NEW.exige_passkey)
+     IS DISTINCT FROM ROW(OLD.operacao_id, OLD.codigo_conferencia, OLD.risco, OLD.exige_passkey) THEN
+    RAISE EXCEPTION 'A operacao, o codigo, o risco e a passkey de uma ficha nao mudam'
+      USING ERRCODE = 'check_violation';
+  END IF;
+  IF ROW(NEW.decisao, NEW.decidida_em, NEW.decidida_por, NEW.com_passkey, NEW.segundos_ate_decidir,
+         NEW.confirmada_com)
+     IS DISTINCT FROM ROW(OLD.decisao, OLD.decidida_em, OLD.decidida_por, OLD.com_passkey, OLD.segundos_ate_decidir,
+         OLD.confirmada_com) THEN
+    IF OLD.decisao IS NOT NULL THEN
+      RAISE EXCEPTION 'A ficha ja foi %; a decisao nao muda', OLD.decisao USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.decisao IS NULL THEN
+      RAISE EXCEPTION 'Os campos da decisao so mudam junto com a decisao' USING ERRCODE = 'check_violation';
+    END IF;
+    IF current_user = 'mcp_claro_rotinas' AND NEW.decisao <> 'vencida' THEN
+      RAISE EXCEPTION 'As rotinas so vencem fichas' USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    IF NEW.decisao = 'confirmada' AND (NEW.exige_passkey OR NEW.risco = 'alto')
+       AND coalesce(NEW.confirmada_com, '') NOT IN ('passkey', 'login_refeito') THEN
+      RAISE EXCEPTION 'Ficha de risco alto so confirma com a passkey ou com o login refeito'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER fichas_guarda BEFORE INSERT OR UPDATE ON fichas FOR EACH ROW EXECUTE FUNCTION fichas_guarda();
 
 -- Limites por aproximacao: ferramenta, destinatarios, quantidade e prazo, criados ou ampliados com passkey.
 CREATE TABLE limites (
@@ -99,6 +145,10 @@ CREATE TABLE fila_saida (
          OR ficha_id IS NOT NULL OR limite_id IS NOT NULL)
 );
 CREATE INDEX fila_liberada ON fila_saida (hora_saida) WHERE estado = 'liberada';
+-- Varreduras da fila (retomada, restauracao, bloqueio, retrato do Grafana) e a janela do comprovante.
+CREATE INDEX fila_em_aberto ON fila_saida (estado)
+  WHERE estado IN ('aguardando_ficha', 'liberada', 'enviando', 'nao_confirmada');
+CREATE INDEX fila_mudou ON fila_saida (mudou_em);
 
 -- Transicoes permitidas: a mesma tabela do modulo saida, guardada no banco como segunda barreira.
 CREATE TABLE transicoes_saida (
@@ -116,6 +166,12 @@ INSERT INTO transicoes_saida (de, para) VALUES
 
 CREATE FUNCTION fila_saida_guarda() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+  -- De um estado final nada mais muda: nem o estado, nem a hora, nem quem mudou.
+  IF OLD.estado IN ('enviada', 'nao_saiu', 'sistema_pediu_dados', 'nao_confirmada', 'vencida', 'cancelada',
+                    'parada_por_bloqueio', 'parada_por_restauracao') THEN
+    RAISE EXCEPTION 'A acao ja terminou (%); a linha da fila nao muda mais', OLD.estado
+      USING ERRCODE = 'check_violation';
+  END IF;
   IF NEW.estado IS DISTINCT FROM OLD.estado THEN
     IF NOT EXISTS (SELECT 1 FROM transicoes_saida WHERE de = OLD.estado AND para = NEW.estado) THEN
       RAISE EXCEPTION 'Mudanca de estado recusada na porta de saida: % -> %', OLD.estado, NEW.estado
@@ -132,6 +188,9 @@ BEGIN
   END IF;
   IF NEW.operacao_id IS DISTINCT FROM OLD.operacao_id THEN
     RAISE EXCEPTION 'A operacao de uma linha da fila nao muda' USING ERRCODE = 'check_violation';
+  END IF;
+  IF NEW.ficha_id IS DISTINCT FROM OLD.ficha_id OR NEW.limite_id IS DISTINCT FROM OLD.limite_id THEN
+    RAISE EXCEPTION 'A ficha e o limite de uma linha da fila nao mudam' USING ERRCODE = 'check_violation';
   END IF;
   RETURN NEW;
 END $$;
@@ -195,12 +254,14 @@ CREATE TABLE desafios_passkey (
   usado_em     timestamptz
 );
 
--- Comprovante de bloqueio em tres partes: o que parou, o que ja tinha saido, o que o sistema informa.
+-- Comprovante de bloqueio em tres partes: o que paramos a tempo, o que ja tinha seguido e o que ainda esta
+-- em conferencia. "informado" fica para o que um sistema de nivel 3 relatar (Fase 4); vazio na Fase 2.
 CREATE TABLE comprovantes (
   id              uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   bloqueio_id     uuid        NOT NULL UNIQUE REFERENCES bloqueios (id),
   paradas         jsonb       NOT NULL DEFAULT '[]'::jsonb,
   ja_saidas       jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  em_conferencia  jsonb       NOT NULL DEFAULT '[]'::jsonb,
   informado       jsonb       NOT NULL DEFAULT '[]'::jsonb,
   criado_em       timestamptz NOT NULL DEFAULT now()
 );
@@ -255,17 +316,19 @@ GRANTS = r"""
 GRANT SELECT, INSERT, UPDATE (contagem) ON programas_pedidos_minuto TO mcp_claro_entrada;
 GRANT SELECT, DELETE ON programas_pedidos_minuto TO mcp_claro_rotinas;
 GRANT USAGE ON SEQUENCE protocolo_seq TO mcp_claro_entrada;
+-- Na restauracao, o despachante adianta a sequencia: numero dado antes da copia nao se repete.
+GRANT SELECT, UPDATE ON SEQUENCE protocolo_seq TO mcp_claro_despachante;
 GRANT SELECT, INSERT ON operacoes, fichas, fila_saida TO mcp_claro_entrada;
 GRANT SELECT ON transicoes_saida TO mcp_claro_entrada, mcp_claro_despachante, mcp_claro_rotinas;
-GRANT UPDATE (decisao, decidida_em, decidida_por, com_passkey, segundos_ate_decidir) ON fichas TO mcp_claro_entrada;
-GRANT UPDATE (estado, hora_saida, ficha_id, limite_id, mudou_por) ON fila_saida TO mcp_claro_entrada;
+GRANT UPDATE (decisao, decidida_em, decidida_por, com_passkey, segundos_ate_decidir, confirmada_com)
+  ON fichas TO mcp_claro_entrada;
+GRANT UPDATE (estado, hora_saida, mudou_por) ON fila_saida TO mcp_claro_entrada;
 GRANT SELECT, UPDATE (estado, mudou_por, enviada_em) ON fila_saida TO mcp_claro_despachante;
 GRANT SELECT, UPDATE (resultado, desfecho) ON operacoes TO mcp_claro_despachante;
 GRANT SELECT ON fichas, limites TO mcp_claro_despachante;
-GRANT SELECT, INSERT, UPDATE (usados_hoje, dia, situacao, motivo, por_dia, valido_ate, destinatarios, com_passkey)
+GRANT SELECT, INSERT, UPDATE (usados_hoje, dia, situacao, motivo, por_dia, valido_ate, com_passkey)
   ON limites TO mcp_claro_entrada;
 GRANT SELECT ON operacoes, fichas, fila_saida, limites TO mcp_claro_rotinas;
-GRANT SELECT, UPDATE (estado, mudou_por) ON fila_saida TO mcp_claro_despachante;
 GRANT UPDATE (estado, mudou_por) ON fila_saida TO mcp_claro_rotinas;
 GRANT UPDATE (decisao, decidida_em) ON fichas TO mcp_claro_rotinas;
 GRANT UPDATE (situacao, motivo) ON limites TO mcp_claro_rotinas;
@@ -273,8 +336,9 @@ GRANT SELECT, INSERT ON decisoes_nao_confirmada TO mcp_claro_entrada;
 GRANT SELECT ON decisoes_nao_confirmada TO mcp_claro_despachante, mcp_claro_rotinas;
 GRANT SELECT, INSERT, UPDATE (contador, ultimo_uso, ativa, apelido) ON passkeys TO mcp_claro_entrada;
 GRANT SELECT, INSERT, UPDATE (usado_em) ON desafios_passkey TO mcp_claro_entrada;
-GRANT DELETE ON desafios_passkey TO mcp_claro_rotinas;
-GRANT SELECT, INSERT ON comprovantes TO mcp_claro_entrada, mcp_claro_despachante;
+-- Limpeza dos desafios vencidos ou usados (rotinas): o DELETE com WHERE precisa ler essas colunas.
+GRANT SELECT (desafio, expira_em, usado_em), DELETE ON desafios_passkey TO mcp_claro_rotinas;
+GRANT SELECT, INSERT ON comprovantes TO mcp_claro_entrada;
 GRANT SELECT, INSERT ON comprovantes TO mcp_claro_rotinas;
 GRANT UPDATE (avisada_em) ON fichas TO mcp_claro_rotinas;
 GRANT UPDATE (desfecho) ON operacoes TO mcp_claro_entrada, mcp_claro_rotinas;

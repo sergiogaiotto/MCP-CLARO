@@ -6,7 +6,8 @@ a recusa com o estado atual. O banco tem a mesma tabela de transicoes (``transic
 segunda barreira.
 
 Ordem das travas, para nunca haver impasse: consultivas de alcance (ver ``travas``), depois a linha da
-ficha, depois a linha da fila. Quem nao precisa de uma delas simplesmente pula.
+ficha, depois a linha da fila. Quem nao precisa de uma delas simplesmente pula. Quem trava varias linhas
+da fila de uma vez (bloqueio, restauracao, retomada, vencimento) trava em ordem de ``id``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
@@ -23,12 +24,17 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from mcp_claro.cadastro.modelos import FerramentaVitrine
 from mcp_claro.extrato import registrar
-from mcp_claro.regras.bloqueios import Bloqueio
+from mcp_claro.regras.bloqueios import Bloqueio, quem_rotina
 from mcp_claro.saida import travas
 from mcp_claro.saida.estados import ANTES_DE_SAIR, FRASE, Estado
 from mcp_claro.saida.protocolo import FUSO, chave_pedido_igual, codigo_conferencia, novo_protocolo
 
 JA_SAIRAM: Final = (Estado.ENVIANDO, Estado.ENVIADA, Estado.NAO_CONFIRMADA, Estado.SISTEMA_PEDIU_DADOS)
+QUEM_TETO: Final = quem_rotina("teto_confirmacoes")
+"""Quem liga a pausa do teto de fichas por hora (``CONFIRM_CAP_PER_HOUR``)."""
+SALTO_NA_RESTAURACAO: Final = 1_000_000
+"""Quanto a sequencia do protocolo anda para frente quando o banco volta de uma copia."""
+COMO_CONFIRMOU: Final = {"sessao": "sem passkey", "passkey": "com passkey", "login_refeito": "com o login refeito"}
 DECISOES_NAO_CONFIRMADA: Final = {
     "aconteceu": "aconteceu no sistema",
     "nao_aconteceu": "nao aconteceu no sistema",
@@ -205,10 +211,14 @@ async def travar_pedido_igual(c: AsyncConnection, chave: str) -> None:
 
 
 async def pedido_igual(c: AsyncConnection, chave: str, janela_minutos: int) -> Operacao | None:
+    """A operacao igual que ainda pode sair (esperando a ficha, liberada ou enviando) conta em qualquer idade.
+    A que ja saiu ou ficou nao confirmada conta por ``janela_minutos``, desde a ultima mudanca da linha."""
     linhas = (
         await c.execute(
             text(
-                _SQL_OPERACAO + " WHERE o.chave_pedido_igual = :k AND o.criada_em > now() - make_interval(mins => :j)"
+                _SQL_OPERACAO + " WHERE o.chave_pedido_igual = :k"
+                " AND (f.estado IN ('aguardando_ficha', 'liberada', 'enviando')"
+                " OR greatest(o.criada_em, f.mudou_em) > now() - make_interval(mins => :j))"
                 " ORDER BY o.criada_em DESC"
             ),
             {"k": chave, "j": janela_minutos},
@@ -225,7 +235,11 @@ async def pedido_igual(c: AsyncConnection, chave: str, janela_minutos: int) -> O
 
 
 def cobre(destinatarios: Any, argumentos: dict[str, Any]) -> bool:
-    """Lista vazia: qualquer destinatario. Cada item ``{"campo", "valores"}`` exige o argumento entre os valores."""
+    """Lista vazia: qualquer destinatario. Cada item ``{"campo", "valores"}`` exige o argumento entre os valores.
+
+    Item com ``valores`` vazio quer dizer "este campo tem de vir ausente, vazio ou lista vazia": e assim que um
+    limite "so estes destinatarios" fecha os outros campos de destinatario da ferramenta (copia, copia oculta).
+    """
     itens = _json(destinatarios) or []
     if not isinstance(itens, list):
         return False
@@ -236,6 +250,10 @@ def cobre(destinatarios: Any, argumentos: dict[str, Any]) -> bool:
         if not isinstance(campo, str) or not isinstance(valores, list):
             return False
         valor = argumentos.get(campo)
+        if not valores:
+            if valor is None or (isinstance(valor, str | list) and len(valor) == 0):
+                continue
+            return False
         pedidos = valor if isinstance(valor, list) else [valor]
         if not pedidos or any(not isinstance(v, str) or v not in valores for v in pedidos):
             return False
@@ -250,16 +268,24 @@ async def gastar_limite(
     sistema_id: uuid.UUID,
     nome_original: str,
     argumentos: dict[str, Any],
+    exige_passkey: bool = True,
 ) -> uuid.UUID | None:
-    """Gasta uma vez de um limite que cobre o pedido. O UPDATE so passa com saldo: nunca passa do teto."""
+    """Gasta uma vez de um limite que cobre o pedido. O UPDATE so passa com saldo: nunca passa do teto.
+
+    ``exige_passkey`` (``FEATURE_PASSKEY``): com a passkey ligada, so vale limite criado ou ampliado com ela,
+    como o despachante confere. Sem limite que valha, o pedido vai para a ficha.
+
+    Virada do dia (Brasilia): o dia gravado nunca volta. Um pedido que comecou antes da meia-noite e grava
+    depois de outro do dia novo conta no dia novo.
+    """
     candidatos = (
         await c.execute(
             text(
                 "SELECT id, destinatarios FROM limites WHERE pessoa_id = :p AND aplicativo_id = :a"
                 " AND sistema_id = :s AND nome_original = :n AND situacao = 'ativo' AND valido_ate > now()"
-                " ORDER BY valido_ate, id"
+                " AND (com_passkey OR NOT :pk) ORDER BY valido_ate, id"
             ),
-            {"p": pessoa_id, "a": aplicativo_id, "s": sistema_id, "n": nome_original},
+            {"p": pessoa_id, "a": aplicativo_id, "s": sistema_id, "n": nome_original, "pk": exige_passkey},
         )
     ).all()
     for linha in candidatos:
@@ -269,13 +295,13 @@ async def gastar_limite(
             await c.execute(
                 text(
                     "UPDATE limites SET"
-                    " usados_hoje = CASE WHEN dia = (now() AT TIME ZONE :fuso)::date THEN usados_hoje + 1 ELSE 1 END,"
-                    " dia = (now() AT TIME ZONE :fuso)::date"
-                    " WHERE id = :i AND situacao = 'ativo' AND valido_ate > now()"
-                    " AND (CASE WHEN dia = (now() AT TIME ZONE :fuso)::date THEN usados_hoje ELSE 0 END) < por_dia"
+                    " usados_hoje = CASE WHEN dia >= (now() AT TIME ZONE :fuso)::date THEN usados_hoje + 1 ELSE 1 END,"
+                    " dia = greatest(dia, (now() AT TIME ZONE :fuso)::date)"
+                    " WHERE id = :i AND situacao = 'ativo' AND valido_ate > now() AND (com_passkey OR NOT :pk)"
+                    " AND (CASE WHEN dia >= (now() AT TIME ZONE :fuso)::date THEN usados_hoje ELSE 0 END) < por_dia"
                     " RETURNING id"
                 ),
-                {"i": linha.id, "fuso": FUSO},
+                {"i": linha.id, "fuso": FUSO, "pk": exige_passkey},
             )
         ).scalar_one_or_none()
         if gasto is not None:
@@ -384,15 +410,27 @@ async def registrar_pedido(
     return op
 
 
+async def travar_teto(c: AsyncConnection, aplicativo_id: uuid.UUID) -> None:
+    """Trava exclusiva do teto de fichas do aplicativo, ate o COMMIT: contar e montar a ficha viram um passo so.
+
+    Chave propria, que so o pedido toma (depois das compartilhadas do alcance e da do pedido igual): nao
+    disputa com bloqueio nem com o despachante."""
+    await c.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": travas.chave("teto", aplicativo_id)})
+
+
 async def fichas_na_ultima_hora(c: AsyncConnection, aplicativo_id: uuid.UUID) -> int:
+    """Fichas montadas na ultima hora, contadas so depois do fim da ultima pausa do teto deste aplicativo:
+    quando o ADMIN reativa, as fichas de antes da pausa nao pausam o aplicativo de novo."""
     return int(
         (
             await c.execute(
                 text(
                     "SELECT count(*) FROM fichas fi JOIN operacoes o ON o.id = fi.operacao_id"
-                    " WHERE o.aplicativo_id = :a AND fi.montada_em > now() - interval '1 hour'"
+                    " WHERE o.aplicativo_id = :a AND fi.montada_em > greatest(now() - interval '1 hour',"
+                    " coalesce((SELECT max(b.encerrado_em) FROM bloqueios b WHERE b.aplicativo_id = :a"
+                    " AND b.alcance = 'aplicativo' AND b.quem = :q), '-infinity'))"
                 ),
-                {"a": aplicativo_id},
+                {"a": aplicativo_id, "q": QUEM_TETO},
             )
         ).scalar_one()
     )
@@ -436,7 +474,7 @@ async def _ficha_travada(c: AsyncConnection, ficha_id: uuid.UUID, pessoa_id: uui
         await c.execute(
             text(
                 "SELECT fi.id, fi.operacao_id, fi.codigo_conferencia, fi.expira_em <= now() AS vencida,"
-                " fi.exige_passkey, fi.decisao, o.pessoa_id, o.protocolo, o.aplicativo_id, o.sistema_id,"
+                " fi.exige_passkey, fi.risco, fi.decisao, o.pessoa_id, o.protocolo, o.aplicativo_id, o.sistema_id,"
                 " o.codigo_conferencia AS codigo_operacao,"
                 " extract(epoch FROM now() - fi.montada_em) AS segundos"
                 " FROM fichas fi JOIN operacoes o ON o.id = fi.operacao_id WHERE fi.id = :f FOR UPDATE OF fi"
@@ -461,11 +499,26 @@ async def confirmar_ficha(
     com_passkey: bool,
     espera_segundos: int,
     rapida_segundos: int,
+    login_refeito: bool = False,
+    passkey_ligada: bool = True,
 ) -> Operacao:
-    """Confirma a ficha e libera a acao com a espera visivel. A ficha vale uma vez, so para esta operacao."""
+    """Confirma a ficha e libera a acao com a espera visivel. A ficha vale uma vez, so para esta operacao.
+
+    Com a passkey ligada (``passkey_ligada``, de ``FEATURE_PASSKEY``), a ficha que pede passkey so confirma com
+    ela. Com a passkey desligada (inclusive a ficha montada antes, quando pedia passkey), a acao de risco alto
+    confirma com a passkey ou com o login refeito (``login_refeito``). O banco guarda como foi
+    (``confirmada_com``) e recusa a ficha de risco alto confirmada so com a sessao.
+    """
     f = await _ficha_travada(c, ficha_id, pessoa_id)
-    if f.exige_passkey and not com_passkey:
-        raise DecisaoRecusada("falta_passkey", "Esta acao e de risco alto: confirme com a sua passkey.")
+    if f.exige_passkey and passkey_ligada:
+        if not com_passkey:
+            raise DecisaoRecusada("falta_passkey", "Esta acao e de risco alto: confirme com a sua passkey.")
+    elif (f.exige_passkey or f.risco == "alto") and not (com_passkey or login_refeito):
+        raise DecisaoRecusada(
+            "falta_login_refeito",
+            "Esta acao e de risco alto: entre de novo nas telas do MCP-CLARO para confirmar. Nada seguiu.",
+        )
+    confirmada_com = "passkey" if com_passkey else "login_refeito" if login_refeito else "sessao"
     if f.codigo_conferencia != f.codigo_operacao:
         raise DecisaoRecusada("codigo_nao_bate", "O codigo de conferencia nao bate com o pedido. Nada seguiu.")
     liberada = (
@@ -482,15 +535,15 @@ async def confirmar_ficha(
     await c.execute(
         text(
             "UPDATE fichas SET decisao = 'confirmada', decidida_em = now(), decidida_por = :p, com_passkey = :pk,"
-            " segundos_ate_decidir = :s WHERE id = :f"
+            " segundos_ate_decidir = :s, confirmada_com = :cc WHERE id = :f AND decisao IS NULL"
         ),
-        {"f": ficha_id, "p": pessoa_id, "pk": com_passkey, "s": f.segundos},
+        {"f": ficha_id, "p": pessoa_id, "pk": com_passkey, "s": f.segundos, "cc": confirmada_com},
     )
     await registrar(
         c,
         papel="entrada",
         tipo="ficha_confirmada",
-        campos={"protocolo": f.protocolo, "como": "com passkey" if com_passkey else "sem passkey"},
+        campos={"protocolo": f.protocolo, "como": COMO_CONFIRMOU[confirmada_com]},
         protocolo=f.protocolo,
         pessoa_id=pessoa_id,
         aplicativo_id=f.aplicativo_id,
@@ -513,7 +566,7 @@ async def recusar_ficha(c: AsyncConnection, ficha_id: uuid.UUID, *, pessoa_id: u
     await c.execute(
         text(
             "UPDATE fichas SET decisao = 'recusada', decidida_em = now(), decidida_por = :p,"
-            " segundos_ate_decidir = :s WHERE id = :f"
+            " segundos_ate_decidir = :s WHERE id = :f AND decisao IS NULL"
         ),
         {"f": ficha_id, "p": pessoa_id, "s": f.segundos},
     )
@@ -756,8 +809,9 @@ async def retomar_enviando(c: AsyncConnection, *, quem: str = "despachante") -> 
     linhas = (
         await c.execute(
             text(
-                "UPDATE fila_saida f SET estado = 'nao_confirmada', mudou_por = :q FROM operacoes o"
-                " WHERE f.operacao_id = o.id AND f.estado = 'enviando'"
+                "WITH alvo AS (SELECT f.id FROM fila_saida f WHERE f.estado = 'enviando' ORDER BY f.id FOR UPDATE)"
+                " UPDATE fila_saida f SET estado = 'nao_confirmada', mudou_por = :q FROM alvo, operacoes o"
+                " WHERE f.id = alvo.id AND f.operacao_id = o.id AND f.estado = 'enviando'"
                 " RETURNING o.id, o.protocolo, o.pessoa_id, o.aplicativo_id, o.sistema_id"
             ),
             {"q": quem},
@@ -800,46 +854,69 @@ def _filtro_alcance(b: Bloqueio) -> tuple[str, dict[str, Any]]:
 
 @dataclass(frozen=True, slots=True)
 class Comprovante:
-    """Comprovante de bloqueio em tres partes."""
+    """Comprovante de bloqueio em tres partes, como na proposta.
+
+    - ``paradas``: o que paramos a tempo (``{"protocolo", "estava"}``);
+    - ``ja_saidas``: o que ja tinha seguido: enviada, sistema pediu dados, e nao confirmada que a pessoa
+      registrou como acontecida (``{"protocolo", "estado", "enviada_em"}``);
+    - ``em_conferencia``: o que ainda esta em conferencia: enviando agora, e nao confirmada sem decisao ou
+      com "nao sei" (``{"protocolo", "estado", "desde"}``).
+
+    ``informado`` fica para o que um sistema de nivel 3 relatar (Fase 4): vazio na Fase 2.
+    """
 
     bloqueio_id: uuid.UUID
     paradas: list[dict[str, Any]]
     ja_saidas: list[dict[str, Any]]
     informado: list[dict[str, Any]]
+    em_conferencia: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, janela_horas: int = 24) -> Comprovante:
     """Na transacao que liga o bloqueio (com a trava exclusiva do alcance ja tomada): para o que ainda nao
-    saiu e monta o comprovante. O que ja saiu aparece como saido, com o que o sistema respondeu."""
+    saiu e monta o comprovante em tres partes. As linhas paradas sao travadas em ordem de ``id``."""
     filtro, valores = _filtro_alcance(b)
     paradas = (
         await c.execute(
             text(
-                "UPDATE fila_saida f SET estado = 'parada_por_bloqueio', mudou_por = :q FROM operacoes o"  # noqa: S608
-                f" WHERE f.operacao_id = o.id AND f.estado IN ('aguardando_ficha', 'liberada') AND {filtro}"
-                " RETURNING o.id, o.protocolo, old.estado AS antes, o.pessoa_id, o.aplicativo_id, o.sistema_id"
+                "WITH alvo AS (SELECT f.id FROM fila_saida f JOIN operacoes o ON o.id = f.operacao_id"  # noqa: S608
+                f" WHERE f.estado IN ('aguardando_ficha', 'liberada') AND {filtro} ORDER BY f.id FOR UPDATE OF f)"
+                " UPDATE fila_saida f SET estado = 'parada_por_bloqueio', mudou_por = :q FROM alvo, operacoes o"
+                " WHERE f.id = alvo.id AND f.operacao_id = o.id AND f.estado IN ('aguardando_ficha', 'liberada')"
+                " RETURNING o.id, o.protocolo, old.estado AS antes, o.pessoa_id, o.aplicativo_id, o.sistema_id,"
+                " o.criada_em"
             ),
             {"q": f"bloqueio:{b.id}", **valores},
         )
     ).all()
+    paradas = sorted(paradas, key=lambda linha: (linha.criada_em, linha.protocolo))
     for linha in paradas:
         await c.execute(
             text("UPDATE operacoes SET desfecho = :d WHERE id = :o AND desfecho IS NULL"),
             {"o": linha.id, "d": b.motivo_recusa()},
         )
+    # Ja seguiu: nas ultimas ``janela_horas``. Em conferencia: enviando agora ou nao confirmada sem decisao (ou
+    # com "nao sei"), de qualquer idade. A nao confirmada que a pessoa disse que nao aconteceu fica de fora.
     saidas = (
         await c.execute(
             text(
-                "SELECT o.protocolo, f.estado, f.enviada_em, o.desfecho FROM fila_saida f"  # noqa: S608
-                f" JOIN operacoes o ON o.id = f.operacao_id WHERE {filtro}"
-                " AND f.estado IN ('enviando', 'enviada', 'nao_confirmada', 'sistema_pediu_dados')"
-                " AND (f.estado = 'enviando'"
-                " OR coalesce(f.enviada_em, f.mudou_em) > now() - make_interval(hours => :h))"
-                " ORDER BY o.criada_em"
+                "SELECT o.protocolo, f.estado, f.enviada_em, f.mudou_em, d.decisao FROM fila_saida f"  # noqa: S608
+                " JOIN operacoes o ON o.id = f.operacao_id"
+                f" LEFT JOIN decisoes_nao_confirmada d ON d.operacao_id = o.id WHERE {filtro} AND ("
+                " f.estado = 'enviando'"
+                " OR (f.estado = 'nao_confirmada' AND (d.decisao IS NULL OR d.decisao = 'nao_sei'))"
+                " OR (f.mudou_em > now() - make_interval(hours => :h)"
+                " AND (f.estado IN ('enviada', 'sistema_pediu_dados')"
+                " OR (f.estado = 'nao_confirmada' AND d.decisao = 'aconteceu'))))"
+                " ORDER BY o.criada_em, o.protocolo"
             ),
             {"h": janela_horas, **valores},
         )
     ).all()
+    em_conferencia = [
+        s for s in saidas if s.estado == "enviando" or (s.estado == "nao_confirmada" and s.decisao != "aconteceu")
+    ]
+    conferindo = {s.protocolo for s in em_conferencia}
     comprovante = Comprovante(
         bloqueio_id=b.id,
         paradas=[{"protocolo": p.protocolo, "estava": p.antes} for p in paradas],
@@ -850,28 +927,34 @@ async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, jan
                 "enviada_em": s.enviada_em.isoformat() if s.enviada_em else None,
             }
             for s in saidas
+            if s.protocolo not in conferindo
         ],
-        informado=[
-            {"protocolo": s.protocolo, "o_sistema_informou": s.desfecho or "ainda sem resposta"} for s in saidas
+        informado=[],
+        em_conferencia=[
+            {"protocolo": s.protocolo, "estado": s.estado, "desde": s.mudou_em.isoformat()} for s in em_conferencia
         ],
     )
     await c.execute(
         text(
-            "INSERT INTO comprovantes (bloqueio_id, paradas, ja_saidas, informado)"
-            " VALUES (:b, CAST(:p AS jsonb), CAST(:j AS jsonb), CAST(:i AS jsonb))"
+            "INSERT INTO comprovantes (bloqueio_id, paradas, ja_saidas, em_conferencia, informado)"
+            " VALUES (:b, CAST(:p AS jsonb), CAST(:j AS jsonb), CAST(:e AS jsonb), '[]'::jsonb)"
         ),
         {
             "b": b.id,
             "p": json.dumps(comprovante.paradas),
             "j": json.dumps(comprovante.ja_saidas),
-            "i": json.dumps(comprovante.informado, ensure_ascii=False),
+            "e": json.dumps(comprovante.em_conferencia),
         },
     )
     await registrar(
         c,
         papel=papel,
-        tipo="comprovante_bloqueio",
-        campos={"paradas": len(comprovante.paradas), "ja_saidas": len(comprovante.ja_saidas)},
+        tipo="comprovante_bloqueio_partes",
+        campos={
+            "paradas": len(comprovante.paradas),
+            "ja_saidas": len(comprovante.ja_saidas),
+            "em_conferencia": len(comprovante.em_conferencia),
+        },
         pessoa_id=b.pessoa_id,
         aplicativo_id=b.aplicativo_id,
         sistema_id=b.sistema_id,
@@ -883,26 +966,61 @@ async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, jan
 async def comprovante_do_bloqueio(c: AsyncConnection, bloqueio_id: uuid.UUID) -> Comprovante | None:
     linha = (
         await c.execute(
-            text("SELECT bloqueio_id, paradas, ja_saidas, informado FROM comprovantes WHERE bloqueio_id = :b"),
+            text(
+                "SELECT bloqueio_id, paradas, ja_saidas, em_conferencia, informado FROM comprovantes"
+                " WHERE bloqueio_id = :b"
+            ),
             {"b": bloqueio_id},
         )
     ).first()
     if linha is None:
         return None
-    return Comprovante(linha.bloqueio_id, _json(linha.paradas), _json(linha.ja_saidas), _json(linha.informado))
+    return Comprovante(
+        linha.bloqueio_id,
+        _json(linha.paradas),
+        _json(linha.ja_saidas),
+        _json(linha.informado),
+        _json(linha.em_conferencia),
+    )
 
 
 async def parar_por_restauracao(c: AsyncConnection, *, papel: str = "despachante") -> tuple[int, int]:
     """Banco restaurado: o que estava "enviando" fica nao confirmado; o que esperava para por restauracao.
 
-    Nada sai sem nova confirmacao. Devolve (paradas, nao confirmadas)."""
-    duvida = await retomar_enviando(c, quem="restauracao")
+    Nada sai sem nova confirmacao. Devolve (paradas, nao confirmadas).
+
+    - Toma a trava exclusiva de ``tudo`` (a mesma de fechar a saida) antes de qualquer linha, e trava as
+      linhas em ordem de ``id``: sem impasse com o vencimento de fichas nem com o bloqueio.
+    - O "enviando" so vira nao confirmado se ninguem segura a trava ``DESPACHANTE_UNICO``. Se outro despachante
+      vivo a segura, aquelas linhas sao dele, no meio do envio: ele mesmo grava o fim (e, se cair, quem assumir
+      faz a retomada). Fica registrado quantas eram.
+    - A sequencia do protocolo salta ``SALTO_NA_RESTAURACAO`` para frente: numero dado depois da copia, e
+      perdido com ela, nao e dado de novo a outra acao.
+    """
+    await travas.exclusiva(c, [travas.TUDO])
+    await c.execute(
+        text("SELECT setval('protocolo_seq', (SELECT last_value FROM protocolo_seq) + :n)"),
+        {"n": SALTO_NA_RESTAURACAO},
+    )
+    livre = bool(
+        (await c.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": travas.DESPACHANTE_UNICO})).scalar_one()
+    )
+    com_dono = 0
+    if livre:
+        duvida = await retomar_enviando(c, quem="restauracao")
+    else:
+        duvida = []
+        com_dono = int(
+            (await c.execute(text("SELECT count(*) FROM fila_saida WHERE estado = 'enviando'"))).scalar_one()
+        )
     paradas = (
         await c.execute(
             text(
-                "UPDATE fila_saida f SET estado = 'parada_por_restauracao', mudou_por = 'restauracao'"
-                " FROM operacoes o WHERE f.operacao_id = o.id AND f.estado IN ('aguardando_ficha', 'liberada')"
-                " RETURNING o.id"
+                "WITH alvo AS (SELECT f.id FROM fila_saida f WHERE f.estado IN ('aguardando_ficha', 'liberada')"
+                " ORDER BY f.id FOR UPDATE)"
+                " UPDATE fila_saida f SET estado = 'parada_por_restauracao', mudou_por = 'restauracao'"
+                " FROM alvo WHERE f.id = alvo.id AND f.estado IN ('aguardando_ficha', 'liberada')"
+                " RETURNING f.operacao_id AS id"
             )
         )
     ).all()
@@ -916,35 +1034,67 @@ async def parar_por_restauracao(c: AsyncConnection, *, papel: str = "despachante
         papel=papel,
         tipo="fila_parada_restauracao",
         campos={"paradas": len(paradas), "duvida": len(duvida)},
+        dados={"enviando_com_dono": com_dono},
     )
+    if com_dono:
+        await registrar(c, papel=papel, tipo="fila_restauracao_envio_com_dono", campos={"enviando": com_dono})
     return len(paradas), len(duvida)
 
 
-async def vencer_fichas(c: AsyncConnection, *, papel: str = "rotinas") -> list[str]:
-    """Fichas sem resposta no prazo: vencem, e nada segue."""
+async def vencer_fichas(c: AsyncConnection, *, papel: str = "rotinas", lote: int = 500) -> list[str]:
+    """Fichas sem resposta no prazo: vencem, e nada segue.
+
+    Mesma ordem de travas do envio e do bloqueio: primeiro as consultivas compartilhadas do alcance de todas
+    as fichas do lote (em ordem), depois as fichas (por ``id``, pulando as que outra transacao segura), depois
+    as linhas da fila (por ``id``). Um bloqueio ou uma restauracao ao mesmo tempo espera, sem impasse.
+    """
+    candidatas = (
+        await c.execute(
+            text(
+                "SELECT fi.id, o.pessoa_id, o.aplicativo_id, o.sistema_id FROM fichas fi"
+                " JOIN operacoes o ON o.id = fi.operacao_id WHERE fi.decisao IS NULL AND fi.expira_em <= now()"
+                " ORDER BY fi.expira_em, fi.id LIMIT :n"
+            ),
+            {"n": lote},
+        )
+    ).all()
+    if not candidatas:
+        return []
+    chaves = sorted({k for x in candidatas for k in travas.chaves_do_envio(x.pessoa_id, x.aplicativo_id, x.sistema_id)})
+    for k in chaves:
+        await c.execute(text("SELECT pg_advisory_xact_lock_shared(:k)"), {"k": k})
     linhas = (
         await c.execute(
             text(
-                "SELECT fi.id, fi.operacao_id FROM fichas fi WHERE fi.decisao IS NULL AND fi.expira_em <= now()"
-                " ORDER BY fi.expira_em FOR UPDATE OF fi SKIP LOCKED"
-            )
+                "SELECT fi.id, fi.operacao_id FROM fichas fi WHERE fi.id = ANY(:i) AND fi.decisao IS NULL"
+                " AND fi.expira_em <= now() ORDER BY fi.id FOR UPDATE OF fi SKIP LOCKED"
+            ),
+            {"i": [x.id for x in candidatas]},
         )
     ).all()
-    vencidas: list[str] = []
-    for linha in linhas:
-        mudou = (
+    if not linhas:
+        return []
+    mudaram = {
+        str(o)
+        for o in (
             await c.execute(
                 text(
-                    "UPDATE fila_saida SET estado = 'vencida', mudou_por = 'rotina:vencimento'"
-                    " WHERE operacao_id = :o AND estado = 'aguardando_ficha' RETURNING id"
+                    "WITH alvo AS (SELECT f.id FROM fila_saida f WHERE f.operacao_id = ANY(:o)"
+                    " AND f.estado = 'aguardando_ficha' ORDER BY f.id FOR UPDATE)"
+                    " UPDATE fila_saida f SET estado = 'vencida', mudou_por = 'rotina:vencimento' FROM alvo"
+                    " WHERE f.id = alvo.id AND f.estado = 'aguardando_ficha' RETURNING f.operacao_id"
                 ),
-                {"o": linha.operacao_id},
+                {"o": [x.operacao_id for x in linhas]},
             )
-        ).scalar_one_or_none()
-        await c.execute(
-            text("UPDATE fichas SET decisao = 'vencida', decidida_em = now() WHERE id = :f"), {"f": linha.id}
-        )
-        if mudou is None:
+        ).scalars()
+    }
+    await c.execute(
+        text("UPDATE fichas SET decisao = 'vencida', decidida_em = now() WHERE id = ANY(:f) AND decisao IS NULL"),
+        {"f": [x.id for x in linhas]},
+    )
+    vencidas: list[str] = []
+    for linha in linhas:
+        if str(linha.operacao_id) not in mudaram:
             continue
         op = _existe(await por_id(c, linha.operacao_id))
         vencidas.append(op.protocolo)

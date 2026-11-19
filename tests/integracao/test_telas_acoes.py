@@ -14,10 +14,11 @@ import contextlib
 import functools
 import json
 import re
+import time
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx2
 import pytest
@@ -100,6 +101,38 @@ async def entrar(amb: Ambiente, http: httpx2.AsyncClient, sujeito: str = "pessoa
     r = await nav.get(f"{volta.path}?{volta.query}")
     assert r.status_code == 303, r.text
     return nav
+
+
+async def envelhecer_login(amb: Ambiente, pessoa_id: uuid.UUID, minutos: int = 10) -> None:
+    """O login das sessoes abertas da pessoa passa a ser de ``minutos`` atras (a sessao segue valendo)."""
+    async with amb.admin.begin() as c:
+        await c.execute(
+            text(
+                "UPDATE sessoes_telas SET auth_time = now() - make_interval(mins => :m)"
+                " WHERE pessoa_id = :p AND encerrada_em IS NULL"
+            ),
+            {"p": pessoa_id, "m": minutos},
+        )
+
+
+async def refazer_login(amb: Ambiente, nav: Navegador, voltar: str, sujeito: str = "pessoa-ana") -> httpx2.Response:
+    """O botao "Entrar de novo agora": vai ao provedor com prompt=login e max_age=0 e volta para ``voltar``.
+
+    Devolve a pagina de volta (GET), ja com a sessao nova."""
+    amb.idp.proxima_pessoa = (sujeito, "Ana" if sujeito == "pessoa-ana" else "Bia")  # type: ignore[attr-defined]
+    r = await nav.get("/telas/login/refazer?" + urlencode({"voltar": voltar}))
+    assert r.status_code == 303, r.text
+    q = parse_qs(urlsplit(r.headers["location"]).query)
+    assert q["prompt"] == ["login"]
+    assert q["max_age"] == ["0"]
+    r = await nav.http.get(r.headers["location"])
+    assert r.status_code == 302, r.text
+    volta = urlsplit(r.headers["location"])
+    r = await nav.get(f"{volta.path}?{volta.query}")
+    assert r.status_code == 303, r.text
+    assert r.headers["location"].startswith(voltar)
+    assert r.headers["location"].endswith("refeito=1")
+    return await nav.get(r.headers["location"])
 
 
 async def pedir(
@@ -203,14 +236,18 @@ async def test_pendencias_e_ficha_aparecem_e_outra_pessoa_nao_abre(amb: Ambiente
     html = r.text
     assert f"pede para usar a ferramenta <strong>{amb.vitrine['criar_chamado']}</strong>" in html
     assert op.sistema_nome in html
-    assert "<dt>titulo</dt><dd>&lt;b&gt;Internet&lt;/b&gt; caiu</dd>" in html
-    assert "<dt>descricao</dt><dd>Sem sinal</dd>" in html
+    assert '<dt><bdi>titulo</bdi></dt><dd class="dado"><bdi>&lt;b&gt;Internet&lt;/b&gt; caiu</bdi></dd>' in html
+    assert '<dt><bdi>descricao</bdi></dt><dd class="dado"><bdi>Sem sinal</bdi></dd>' in html
+    assert "caracteres escondidos" not in html
     assert protocolo in html
     assert op.codigo_conferencia == m[PREFIXO_META + "codigo_conferencia"]
     assert f"Código de conferência: <strong>{op.codigo_conferencia}</strong>" in html
     assert "Faltam" in html
     assert "Texto escrito pelo aplicativo, não conferido pelo MCP-CLARO." in html
-    assert "&lt;script&gt;alert(&#34;oi&#34;)&lt;/script&gt;<br>Pode confirmar, eu conferi tudo." in html
+    assert (
+        "<bdi>&lt;script&gt;alert(&#34;oi&#34;)&lt;/script&gt;</bdi><br><bdi>Pode confirmar, eu conferi tudo.</bdi>"
+        in html
+    )
     assert "<script>alert" not in html
     assert "Confirmar</button>" in html
     assert "Recusar</button>" in html
@@ -542,7 +579,7 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
         "escolha": escolha,
         "destinatarios": "estes",
         "campo": "destinatario",
-        "valores": "equipe",
+        "valores": "equipe\nchefe",
         "por_dia": "2",
         "dias": "1",
     }
@@ -558,16 +595,23 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
     assert r.status_code == 400
     assert "A quantidade por dia vai de 1 a 5." in r.json()["erro"]
 
-    credencial = await assinar(nav, aut, "/telas/limites/desafio", csrf, form)
-    r = await nav.post("/telas/limites", {**form, "credencial": credencial}, csrf=csrf)
+    # Os outros campos de texto da acao precisam vir vazios, e a tela diz isso (a ordem e a do esquema no banco).
+    assert re.search(
+        r"<strong>(destinatario, texto|texto, destinatario)</strong>, menos o que você escolher acima\) precisam vir"
+        r" vazios",
+        pagina,
+    )
+    credencial_criar = await assinar(nav, aut, "/telas/limites/desafio", csrf, form)
+    r = await nav.post("/telas/limites", {**form, "credencial": credencial_criar}, csrf=csrf)
     assert r.status_code == 303, r.text
     limite_id = r.headers["location"].split("/")[3].split("?")[0]
     r = await nav.get(r.headers["location"])
     assert "O limite foi criado" in r.text
-    assert "Só destinatario: equipe" in r.text
-    # A mesma resposta de novo: o desafio ja foi usado.
-    r = await nav.post("/telas/limites", {**form, "credencial": credencial}, csrf=csrf)
-    assert r.status_code in (403, 409)
+    assert "Só destinatario: equipe, chefe. Precisam vir vazios: texto" in r.text
+    # A mesma resposta de novo, com o limite valendo: o igual ja existe (o reaproveitamento do desafio e provado
+    # depois de encerrar, quando nada mais barra antes da passkey).
+    r = await nav.post("/telas/limites", {**form, "credencial": credencial_criar}, csrf=csrf)
+    assert r.status_code == 409
     async with amb.admin.connect() as c:
         linhas = (
             await c.execute(
@@ -582,7 +626,11 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
         True,
         "ativo",
     )
-    assert linhas[0].destinatarios == [{"campo": "destinatario", "valores": ["equipe"]}]
+    # O outro campo de texto da acao (texto) entra vazio: so passa sem ficha o pedido que o deixa vazio.
+    assert linhas[0].destinatarios == [
+        {"campo": "destinatario", "valores": ["equipe", "chefe"]},
+        {"campo": "texto", "valores": []},
+    ]
     frases = [linha.frase for linha in await extrato(amb, "limite_criado", amb.ana_id)]
     assert frases == [f"A pessoa criou um limite de 2 por dia para {mensagem}, com passkey."]
 
@@ -601,18 +649,21 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
     assert "Ações de risco alto nunca entram em limite: sempre passam pela ficha." in r.text
     r = await desafio(nav, "/telas/limites/desafio", csrf, {**form, "escolha": alta})
     assert r.status_code == 400
-    r = await nav.post("/telas/limites", {**form, "escolha": alta, "credencial": credencial}, csrf=csrf)
+    r = await nav.post("/telas/limites", {**form, "escolha": alta, "credencial": credencial_criar}, csrf=csrf)
     assert r.status_code == 400
     assert "sempre passam pela ficha" in r.text
 
-    # O pedido coberto sai sem ficha; o de fora do limite pede ficha.
-    coberto = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "oi"})
+    # O pedido coberto sai sem ficha; o de fora do limite pede ficha, e tambem o que pos algo no outro campo.
+    coberto = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": ""})
     assert coberto[PREFIXO_META + "estado"] in ("liberada", "enviando", "enviada")
     assert (await operacao(amb, protocolo_de(coberto))).ficha_id is None
     await esperar_estado(amb, protocolo_de(coberto), Estado.ENVIADA)
     assert chamadas(amb, "enviar_mensagem") == 1
-    fora = await pedir(amb, "enviar_mensagem", {"destinatario": "estranho", "texto": "oi"})
+    fora = await pedir(amb, "enviar_mensagem", {"destinatario": "estranho", "texto": ""})
     assert fora[PREFIXO_META + "estado"] == "aguardando_ficha"
+    com_outro = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "externo@fora.com"})
+    assert com_outro[PREFIXO_META + "estado"] == "aguardando_ficha"
+    assert (await operacao(amb, protocolo_de(com_outro))).ficha_id is not None
 
     # Ampliar pede passkey; encerrar nao.
     csrf = token_csrf((await nav.get(f"/telas/limites/{limite_id}")).text)
@@ -624,20 +675,40 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
     assert r.status_code == 303, r.text
     frases = [linha.frase for linha in await extrato(amb, "limite_ampliado", amb.ana_id)]
     assert frases == [f"A pessoa ampliou um limite de {mensagem} para 3 por dia, com passkey."]
+
+    # Outra pessoa nao ve, nao amplia nem encerra o limite, que segue valendo.
+    bia = await entrar(amb, http, "pessoa-bia", "Bia")
+    assert (await bia.get(f"/telas/limites/{limite_id}")).status_code == 404
+    csrf_bia = token_csrf((await bia.get("/telas/limites")).text)
+    r = await bia.post(f"/telas/limites/{limite_id}/encerrar", csrf=csrf_bia)
+    assert r.status_code == 404
+    r = await bia.post(f"/telas/limites/{limite_id}/ampliar", {"por_dia": "5", "dias": "30"}, csrf=csrf_bia)
+    assert r.status_code == 404
+    async with amb.admin.connect() as c:
+        valendo = (await c.execute(text("SELECT por_dia, situacao FROM limites WHERE id = :i"), {"i": limite_id})).one()
+    assert (valendo.por_dia, valendo.situacao) == (3, "ativo")
+
     r = await nav.post(f"/telas/limites/{limite_id}/encerrar", csrf=csrf)
     assert r.status_code == 303
-    assert r.headers["location"] == "/telas/limites?aviso=limite_encerrado"
+    assert r.headers["location"] == "/telas/limites?aviso=limite_encerrado&canceladas=0"
     async with amb.admin.connect() as c:
         final = (await c.execute(text("SELECT por_dia, situacao FROM limites WHERE id = :i"), {"i": limite_id})).one()
     assert (final.por_dia, final.situacao) == (3, "encerrado")
     assert await extrato(amb, "limite_encerrado", amb.ana_id)
-    depois = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "depois"})
+    depois = await pedir(amb, "enviar_mensagem", {"destinatario": "chefe", "texto": ""})
     assert depois[PREFIXO_META + "estado"] == "aguardando_ficha"
     assert chamadas(amb, "enviar_mensagem") == 1
 
-    # Outra pessoa nao ve nem encerra o limite.
-    bia = await entrar(amb, http, "pessoa-bia", "Bia")
-    assert (await bia.get(f"/telas/limites/{limite_id}")).status_code == 404
+    # A mesma resposta da passkey de novo, agora sem limite igual valendo: chega a conferencia da passkey, e o
+    # desafio ja foi usado. Nenhum limite novo nasce.
+    r = await nav.post("/telas/limites", {**form, "credencial": credencial_criar}, csrf=csrf)
+    assert r.status_code == 403
+    assert "Este pedido de passkey venceu, já foi usado ou era para outra coisa." in r.text
+    async with amb.admin.connect() as c:
+        quantos = (
+            await c.execute(text("SELECT count(*) FROM limites WHERE pessoa_id = :p"), {"p": amb.ana_id})
+        ).scalar_one()
+    assert quantos == 1
 
 
 # --- "Estamos confirmando" ---
@@ -707,25 +778,39 @@ async def test_comprovante_do_bloqueio_em_tres_partes(amb: Ambiente, http: httpx
     csrf = token_csrf((await nav.get(f"/telas/fichas/{op.ficha_id}")).text)
     assert (await nav.post(f"/telas/fichas/{op.ficha_id}/confirmar", csrf=csrf)).status_code == 303
     await esperar_estado(amb, saiu, Estado.ENVIADA)
+    # Outra saiu, mas a resposta se perdeu: fica "em conferencia", nao "ja seguiu".
+    await politica(amb, OUTBOX_HOLD_SECONDS=600)
+    duvida = protocolo_de(await pedir(amb, "criar_chamado", {"titulo": "Resposta perdida"}))
+    op_duvida = await ficha_de(amb, duvida)
+    assert (await nav.post(f"/telas/fichas/{op_duvida.ficha_id}/confirmar", csrf=csrf)).status_code == 303
+    async with amb.despachante_db.begin() as c:
+        assert await fila.marcar_enviando(c, await operacao(amb, duvida))
+        assert duvida in await fila.retomar_enviando(c)
     esperando = protocolo_de(await pedir(amb, "criar_chamado", {"titulo": "Esperando ficha"}))
 
     r = await nav.post("/telas/bloqueio", {"aplicativo": "todos"}, csrf=csrf)
     assert r.status_code == 303
     r = await nav.get(r.headers["location"])
-    assert "1. O que parou antes de sair" in r.text
-    assert f">{esperando}</a>: esperava a sua ficha." in r.text
-    assert "2. O que já tinha saído" in r.text
-    assert re.search(rf">{saiu}</a>: enviada, em \d\d/\d\d/\d{{4}} \d\d:\d\d\.", r.text)
-    assert "3. O que o sistema informou" in r.text
-    assert f"{saiu}: " in r.text
+    html = r.text
+    um, dois, tres = (
+        html.index("1. O que paramos a tempo"),
+        html.index("2. O que já tinha seguido"),
+        html.index("3. O que ainda está em conferência"),
+    )
+    assert f">{esperando}</a>: esperava a sua ficha." in html[um:dois]
+    assert re.search(rf">{saiu}</a>: entregue ao sistema, em \d\d/\d\d/\d{{4}} \d\d:\d\d\.", html[dois:tres])
+    assert 'Nos sistemas de nível 1 e 2, "seguiu" quer dizer que o pedido foi entregue ao sistema' in html[dois:tres]
+    assert f">{duvida}</a>: saiu, mas a resposta do sistema não chegou inteira" in html[tres:]
+    assert duvida not in html[:tres]
+    assert "O que o sistema informou" not in html
     assert (await operacao(amb, esperando)).estado == Estado.PARADA_POR_BLOQUEIO
     assert chamadas(amb, "criar_chamado") == 1
 
 
-# --- Passkey desligada nesta instalacao ---
+# --- Passkey desligada nesta instalacao: o reforco e o login refeito na hora ---
 
 
-async def test_passkey_desligada_risco_alto_confirma_sem_ela(
+async def test_passkey_desligada_risco_alto_pede_login_refeito(
     banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch, http: httpx2.AsyncClient
 ) -> None:
     async with ambiente(banco_migrado, monkeypatch, FEATURE_PASSKEY=False) as amb:
@@ -733,37 +818,269 @@ async def test_passkey_desligada_risco_alto_confirma_sem_ela(
         protocolo = protocolo_de(await pedir(amb, "cancelar_servico", {"servico": "tv"}))
         op = await ficha_de(amb, protocolo)
         assert not op.ficha_exige_passkey
+        assert op.ficha_risco == "alto"
         nav = await entrar(amb, http)
         r = await nav.get("/telas/passkeys")
         assert "A passkey está desligada nesta instalação." in r.text
         assert "Cadastrar passkey" not in r.text
-        r = await nav.get(f"/telas/fichas/{op.ficha_id}")
-        assert "A passkey está desligada nesta instalação. Esta ação de risco alto confirma sem ela" in r.text
+
+        # Login de dez minutos atras: a sessao vale, mas a ficha de risco alto nao confirma com ela.
+        await envelhecer_login(amb, amb.ana_id)
+        ficha = f"/telas/fichas/{op.ficha_id}"
+        r = await nav.get(ficha)
+        assert "no lugar dela, confirmar pede um login refeito na hora." in r.text
+        assert f'href="/telas/login/refazer?{urlencode({"voltar": ficha})}"' in r.text
+        assert "Confirmar</button>" not in r.text
         assert "Confirmar com a passkey" not in r.text
         csrf = token_csrf(r.text)
-        assert (await nav.post(f"/telas/fichas/{op.ficha_id}/confirmar", csrf=csrf)).status_code == 303
+        r = await nav.post(f"{ficha}/confirmar", csrf=csrf)
+        assert r.status_code == 403
+        assert "para confirmar sem a passkey, entre de novo agora e confirme logo depois." in r.text
+        r = await desafio(nav, f"{ficha}/desafio", csrf)
+        assert r.status_code == 409
+        await asyncio.sleep(1.5)
+        assert (await operacao(amb, protocolo)).estado == Estado.AGUARDANDO_FICHA
+        assert chamadas(amb, "cancelar_servico") == 0
+        assert await extrato(amb, "ficha_confirmada", amb.ana_id) == []
+
+        # O provedor que nao pede a senha de novo (devolve o auth_time antigo): a tela avisa e segue pedindo.
+        amb.idp.estragar = {"auth_time": int(time.time()) - 3600}  # type: ignore[attr-defined]
+        r = await refazer_login(amb, nav, ficha)
+        assert "O provedor de login não pediu a sua senha de novo." in r.text
+        assert "Confirmar</button>" not in r.text
+        amb.idp.estragar = {}  # type: ignore[attr-defined]
+
+        # Login refeito de verdade: volta para a ficha e confirma, uma vez.
+        r = await refazer_login(amb, nav, ficha)
+        assert "Você entrou de novo há pouco: já dá para confirmar." in r.text
+        assert "Confirmar</button>" in r.text
+        csrf = token_csrf(r.text)
+        r = await nav.post(f"{ficha}/confirmar", csrf=csrf)
+        assert r.status_code == 303, r.text
         await esperar_estado(amb, protocolo, Estado.ENVIADA)
         assert chamadas(amb, "cancelar_servico") == 1
+        frases = [linha.frase for linha in await extrato(amb, "ficha_confirmada", amb.ana_id)]
+        assert len(frases) == 1
+        assert "login refeito" in frases[0]
 
+        # Ficha montada quando a passkey estava ligada (pedia passkey): sem ela, vale o login refeito.
+        antiga = await ficha_de(amb, protocolo_de(await pedir(amb, "cancelar_servico", {"servico": "fixo"})))
+        async with amb.admin.begin() as c:
+            # Como se a ficha tivesse nascido com a passkey ligada (a guarda do banco nao deixa mudar depois).
+            await c.execute(text("SET LOCAL session_replication_role = replica"))
+            await c.execute(text("UPDATE fichas SET exige_passkey = true WHERE id = :f"), {"f": antiga.ficha_id})
+        await envelhecer_login(amb, amb.ana_id)
+        r = await nav.get(f"/telas/fichas/{antiga.ficha_id}")
+        assert "Esta ficha pedia a passkey, que foi desligada nesta instalação." in r.text
+        assert "Cadastre uma passkey" not in r.text
+        assert "passkey.js" not in r.text
+        r = await nav.post(f"/telas/fichas/{antiga.ficha_id}/confirmar", csrf=token_csrf(r.text))
+        assert r.status_code == 403
+        assert (await operacao(amb, antiga.protocolo)).estado == Estado.AGUARDANDO_FICHA
+        r = await refazer_login(amb, nav, f"/telas/fichas/{antiga.ficha_id}")
+        r = await nav.post(f"/telas/fichas/{antiga.ficha_id}/confirmar", csrf=token_csrf(r.text))
+        assert r.status_code == 303, r.text
+        await esperar_estado(amb, antiga.protocolo, Estado.ENVIADA)
+        assert chamadas(amb, "cancelar_servico") == 2
+
+        # Risco medio segue confirmando so pela ficha, com o login antigo.
+        await envelhecer_login(amb, amb.ana_id)
+        medio = await ficha_de(amb, protocolo_de(await pedir(amb, "criar_chamado", {"titulo": "Risco medio"})))
+        r = await nav.get(f"/telas/fichas/{medio.ficha_id}")
+        assert "login refeito" not in r.text
+        r = await nav.post(f"/telas/fichas/{medio.ficha_id}/confirmar", csrf=token_csrf(r.text))
+        assert r.status_code == 303, r.text
+
+
+async def test_passkey_desligada_limite_pede_login_refeito_e_ampliar_segue_o_teto(
+    banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch, http: httpx2.AsyncClient
+) -> None:
+    async with ambiente(banco_migrado, monkeypatch, FEATURE_PASSKEY=False) as amb:
+        await politica(amb, OUTBOX_HOLD_SECONDS=0)
+        nav = await entrar(amb, http)
         r = await nav.get("/telas/limites")
-        assert "A passkey está desligada nesta instalação. Criar e ampliar um limite não pede passkey." in r.text
+        assert "No lugar dela, criar e ampliar um limite pedem um login refeito na hora." in r.text
         escolha = ""
         for e in re.findall(r"/telas/limites/novo\?escolha=([0-9a-f-]+:[0-9a-f-]+)", r.text):
             if amb.vitrine["enviar_mensagem"] in (await nav.get(f"/telas/limites/novo?escolha={e}")).text:
                 escolha = e
         assert escolha
-        r = await nav.post(
-            "/telas/limites", {"escolha": escolha, "destinatarios": "qualquer", "por_dia": "1", "dias": "1"}, csrf=csrf
-        )
-        assert r.status_code == 303, r.text
+        form = {"escolha": escolha, "destinatarios": "qualquer", "por_dia": "5", "dias": "1"}
+
+        # Login antigo: a tela pede o login refeito, e criar e recusado.
+        await envelhecer_login(amb, amb.ana_id)
+        novo = f"/telas/limites/novo?{urlencode({'escolha': escolha})}"
+        r = await nav.get(novo)
+        assert "Criar um limite pede um login refeito na hora" in r.text
+        assert "Entrar de novo agora" in r.text
+        csrf = token_csrf(r.text)
+        r = await nav.post("/telas/limites", form, csrf=csrf)
+        assert r.status_code == 403
+        assert "criar ou ampliar um limite pede um login refeito na hora" in r.text
         async with amb.admin.connect() as c:
-            limite = (
-                await c.execute(text("SELECT com_passkey FROM limites WHERE pessoa_id = :p"), {"p": amb.ana_id})
-            ).one()
+            assert (
+                await c.execute(text("SELECT count(*) FROM limites WHERE pessoa_id = :p"), {"p": amb.ana_id})
+            ).scalar_one() == 0
+
+        # Refeito o login, cria.
+        r = await refazer_login(amb, nav, novo)
+        assert "Entrar de novo agora" not in r.text
+        csrf = token_csrf(r.text)
+        r = await nav.post("/telas/limites", form, csrf=csrf)
+        assert r.status_code == 303, r.text
+        limite_id = r.headers["location"].split("/")[3].split("?")[0]
+        async with amb.admin.connect() as c:
+            limite = (await c.execute(text("SELECT com_passkey FROM limites WHERE id = :i"), {"i": limite_id})).one()
         assert limite.com_passkey is False
         assert await extrato(amb, "limite_criado_sem_passkey", amb.ana_id)
-        assert await extrato(amb, "limite_criado", amb.ana_id) == []
-        # O despachante desta instalacao aceita o limite sem passkey.
         coberto = protocolo_de(await pedir(amb, "enviar_mensagem", {"destinatario": "qualquer um", "texto": "oi"}))
         await esperar_estado(amb, coberto, Estado.ENVIADA)
         assert chamadas(amb, "enviar_mensagem") == 1
+
+        # O ADMIN baixa o teto: o limite de 5 por dia nao renova com 5, so ate o teto novo.
+        await politica(amb, ALLOWANCE_MAX_PER_DAY=2, ALLOWANCE_MAX_DAYS=10)
+        pagina = f"/telas/limites/{limite_id}"
+        r = await nav.get(pagina)
+        assert "O teto mudou: agora um limite vai até 2 vezes por dia e até 10 dias." in r.text
+        assert 'min="2" max="2" value="2"' in r.text
+        csrf = token_csrf(r.text)
+        r = await nav.post(f"{pagina}/ampliar", {"por_dia": "5", "dias": "10"}, csrf=csrf)
+        assert r.status_code == 400
+        assert "O teto mudou: agora vai até 2 por dia." in r.text
+        r = await nav.post(f"{pagina}/ampliar", {"por_dia": "2", "dias": "30"}, csrf=csrf)
+        assert r.status_code == 400
+        # Ampliar com o login antigo: recusado, nada muda.
+        await envelhecer_login(amb, amb.ana_id)
+        r = await nav.post(f"{pagina}/ampliar", {"por_dia": "2", "dias": "10"}, csrf=csrf)
+        assert r.status_code == 403
+        async with amb.admin.connect() as c:
+            antes = (await c.execute(text("SELECT por_dia FROM limites WHERE id = :i"), {"i": limite_id})).one()
+        assert antes.por_dia == 5
+        r = await refazer_login(amb, nav, pagina)
+        r = await nav.post(f"{pagina}/ampliar", {"por_dia": "2", "dias": "10"}, csrf=token_csrf(r.text))
+        assert r.status_code == 303, r.text
+        async with amb.admin.connect() as c:
+            depois = (
+                await c.execute(
+                    text(
+                        "SELECT por_dia, valido_ate > now() + interval '9 days' AS longe,"
+                        " valido_ate <= now() + interval '10 days' AS no_teto FROM limites WHERE id = :i"
+                    ),
+                    {"i": limite_id},
+                )
+            ).one()
+        assert (depois.por_dia, depois.longe, depois.no_teto) == (2, True, True)
+
+
+async def test_encerrar_limite_cancela_o_que_ele_liberou_e_ainda_espera(
+    banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch, http: httpx2.AsyncClient
+) -> None:
+    async with ambiente(banco_migrado, monkeypatch, FEATURE_PASSKEY=False) as amb:
+        await politica(amb, OUTBOX_HOLD_SECONDS=600)
+        nav = await entrar(amb, http)
+        r = await nav.get("/telas/limites")
+        escolha = ""
+        for e in re.findall(r"/telas/limites/novo\?escolha=([0-9a-f-]+:[0-9a-f-]+)", r.text):
+            if amb.vitrine["enviar_mensagem"] in (await nav.get(f"/telas/limites/novo?escolha={e}")).text:
+                escolha = e
+        csrf = token_csrf(r.text)
+        form = {"escolha": escolha, "destinatarios": "qualquer", "por_dia": "5", "dias": "1"}
+        r = await nav.post("/telas/limites", form, csrf=csrf)
+        assert r.status_code == 303, r.text
+        limite_id = r.headers["location"].split("/")[3].split("?")[0]
+
+        # O aplicativo dispara pedidos cobertos; eles esperam a hora de sair (dez minutos).
+        protocolos = [
+            protocolo_de(await pedir(amb, "enviar_mensagem", {"destinatario": f"pessoa {i}", "texto": "oi"}))
+            for i in range(3)
+        ]
+        for p in protocolos:
+            assert (await operacao(amb, p)).estado == Estado.LIBERADA
+        # Uma ja saiu ao sistema antes (o despachante marcou "enviando"): encerrar nao mexe nela.
+        async with amb.despachante_db.begin() as c:
+            assert await fila.marcar_enviando(c, await operacao(amb, protocolos[2]))
+
+        r = await nav.post(f"/telas/limites/{limite_id}/encerrar", csrf=csrf)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/telas/limites?aviso=limite_encerrado&canceladas=2"
+        r = await nav.get(r.headers["location"])
+        assert "2 ações liberadas por ele ainda esperavam para sair e foram canceladas" in r.text
+        for p in protocolos[:2]:
+            parada = await operacao(amb, p)
+            assert parada.estado == Estado.CANCELADA
+            assert parada.desfecho == "cancelada porque a pessoa encerrou o limite que a liberou"
+            assert parada.mudou_por == "pessoa"
+        assert (await operacao(amb, protocolos[2])).estado == Estado.ENVIANDO
+        assert len(await extrato(amb, "acao_parada", amb.ana_id)) == 2
+        encerrado = await extrato(amb, "limite_encerrado", amb.ana_id)
+        assert encerrado[0].dados["canceladas"] == 2
+        await asyncio.sleep(1.5)
+        assert chamadas(amb, "enviar_mensagem") == 0
+
+
+# --- Passkey: cadastrar e desativar pedem o login refeito na hora ---
+
+
+async def test_cadastrar_e_desativar_passkey_pedem_login_refeito(amb: Ambiente, http: httpx2.AsyncClient) -> None:
+    nav = await entrar(amb, http)
+    await envelhecer_login(amb, amb.ana_id)
+    r = await nav.get("/telas/passkeys")
+    assert "Cadastrar ou desativar uma passkey pede um login refeito na hora, como cuidado a mais." in r.text
+    assert 'href="/telas/login/refazer?voltar=%2Ftelas%2Fpasskeys"' in r.text
+    csrf = token_csrf(r.text)
+    # Quem so tem o cookie de uma sessao antiga nao pede nem o desafio, nem cadastra.
+    r = await desafio(nav, "/telas/passkeys/desafio", csrf)
+    assert r.status_code == 403
+    assert "entre de novo agora" in r.json()["erro"]
+    falsa = {"type": "public-key", "id": "x", "rawId": "x", "response": {"clientDataJSON": "e30"}}
+    r = await nav.post("/telas/passkeys", {"apelido": "Do intruso", "credencial": _json(falsa)}, csrf=csrf)
+    assert r.status_code == 403
+    async with amb.admin.connect() as c:
+        assert (
+            await c.execute(text("SELECT count(*) FROM passkeys WHERE pessoa_id = :p"), {"p": amb.ana_id})
+        ).scalar_one() == 0
+        assert (
+            await c.execute(text("SELECT count(*) FROM desafios_passkey WHERE pessoa_id = :p"), {"p": amb.ana_id})
+        ).scalar_one() == 0
+
+    # Refeito o login, cadastra.
+    r = await refazer_login(amb, nav, "/telas/passkeys")
+    assert "Entrar de novo agora" not in r.text
+    aut = await cadastrar_passkey(amb, nav)
+    assert aut.contador >= 0
+
+    # Desativar com o login antigo: recusado, a passkey segue ativa.
+    await envelhecer_login(amb, amb.ana_id)
+    r = await nav.get("/telas/passkeys")
+    achado = re.search(r'action="(/telas/passkeys/[0-9a-f-]+/desativar)"', r.text)
+    assert achado
+    r = await nav.post(achado.group(1), csrf=token_csrf(r.text))
+    assert r.status_code == 403
+    assert "Para cadastrar ou desativar uma passkey, entre de novo agora" in r.text
+    async with amb.admin.connect() as c:
+        assert (
+            await c.execute(text("SELECT ativa FROM passkeys WHERE pessoa_id = :p"), {"p": amb.ana_id})
+        ).scalar_one() is True
+    assert await extrato(amb, "passkey_desativada", amb.ana_id) == []
+    r = await refazer_login(amb, nav, "/telas/passkeys")
+    r = await nav.post(achado.group(1), csrf=token_csrf(r.text))
+    assert r.status_code == 303
+    assert await extrato(amb, "passkey_desativada", amb.ana_id)
+
+
+# --- Caracteres escondidos na ficha e no resumo da acao ---
+
+
+async def test_ficha_mostra_caracteres_escondidos_marcados(amb: Ambiente, http: httpx2.AsyncClient) -> None:
+    titulo = "Conta 12345\u202e6789"
+    m = await pedir(amb, "criar_chamado", {"titulo": titulo, "descricao": "para equipe\u200b\u2066x\u2069"})
+    op = await ficha_de(amb, protocolo_de(m))
+    assert op.argumentos["titulo"] == titulo  # o que segue para o sistema e o valor verdadeiro
+    nav = await entrar(amb, http)
+    for caminho in (f"/telas/fichas/{op.ficha_id}", f"/telas/acoes/{op.id}"):
+        html = (await nav.get(caminho)).text
+        for ch in ("\u202e", "\u200b", "\u2066", "\u2069"):
+            assert ch not in html, caminho
+        assert "<bdi>Conta 12345[U+202E]6789</bdi>" in html
+        assert "<bdi>para equipe[U+200B][U+2066]x[U+2069]</bdi>" in html
+        assert "Atenção: este pedido tem caracteres escondidos." in html

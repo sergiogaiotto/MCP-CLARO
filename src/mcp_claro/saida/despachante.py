@@ -7,13 +7,18 @@ vira "nao confirmada": pode ter chegado ao sistema, e nada e reenviado.
 Para cada acao liberada e na hora:
 
 1. travas consultivas compartilhadas do alcance (tudo, sistema, aplicativo, pessoa) e a linha da fila;
-2. reconferencia: saida aberta, pessoa e aplicativo ativos, sem bloqueio, ordem e ferramenta vigentes,
-   ficha confirmada (ou limite gasto) e codigo de conferencia igual ao que vai seguir;
-3. marca "enviando" e grava, antes de qualquer byte sair;
+2. reconferencia: saida aberta, pessoa e aplicativo ativos, sem bloqueio, cadastro do programa valendo
+   (quando o aplicativo e um programa), ordem e ferramenta vigentes, ficha confirmada para esta operacao
+   (a de risco alto, com passkey ou login refeito) ou limite gasto e nao encerrado, e codigo de conferencia
+   igual ao que vai seguir;
+3. marca "enviando" e grava, antes de qualquer byte sair (o que o envio le do banco e lido antes);
 4. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema;
-5. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia.
+5. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. Se o banco falhar
+   ao gravar o fim, tenta de novo algumas vezes; se nao der, a linha fica "enviando" e a proxima retomada a
+   da como nao confirmada.
 
-O despachante acorda pelo ``LISTEN mcp_claro_saida`` e, de reserva, por varredura.
+O despachante acorda pelo ``LISTEN mcp_claro_saida`` e, de reserva, por varredura. Com a porta de saida
+fechada, so olha de novo a cada varredura.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from typing import Any
 
 import mcp_types as types
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
@@ -40,7 +46,7 @@ from mcp_claro.regras import bloqueios, estado
 from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.fila import Operacao
-from mcp_claro.saida.protocolo import codigo_conferencia
+from mcp_claro.saida.protocolo import FUSO, codigo_conferencia
 from mcp_claro.versao import VERSAO_MCP
 
 log = logger("mcp_claro.saida.despachante")
@@ -57,6 +63,11 @@ _ANTES_DE_EXECUTAR = {
 }
 
 Chamador = Callable[..., Awaitable[cliente.Resposta]]
+
+TENTATIVAS_DO_FIM = 4
+"""Vezes que o despachante tenta gravar o fim de um envio antes de deixar a retomada decidir."""
+ESPERA_DO_FIM = 0.25
+"""Espera entre as tentativas (segundos, crescendo a cada uma)."""
 
 
 class PortaDeSaida:
@@ -80,6 +91,8 @@ class PortaDeSaida:
         self.chamar: Chamador = chamar or cliente.chamar_ferramenta
         self.assumiu = asyncio.Event()
         self._acordar = asyncio.Event()
+        # A porta de saida estava fechada na ultima volta: a espera e a varredura inteira.
+        self._saida_fechada = False
         # Linhas puladas nesta volta porque outra transacao as segura (cancelar, confirmar, bloquear).
         self._puladas: set[int] = set()
 
@@ -118,15 +131,23 @@ class PortaDeSaida:
         self._acordar.set()
 
     async def _esperar(self) -> None:
-        async with self.engine.connect() as c:
-            falta = (
-                await c.execute(
-                    text("SELECT extract(epoch FROM min(hora_saida) - now()) FROM fila_saida WHERE estado = 'liberada'")
-                )
-            ).scalar_one_or_none()
-        espera = self.varredura if falta is None else max(0.0, min(self.varredura, float(falta)))
-        if espera <= 0:
-            espera = 0.05
+        if self._saida_fechada:
+            # Nada sai com a porta fechada: as liberadas na hora esperam a reabertura, sem consultar o banco
+            # a cada instante.
+            espera = self.varredura
+        else:
+            async with self.engine.connect() as c:
+                falta = (
+                    await c.execute(
+                        text(
+                            "SELECT extract(epoch FROM min(hora_saida) - now()) FROM fila_saida"
+                            " WHERE estado = 'liberada'"
+                        )
+                    )
+                ).scalar_one_or_none()
+            espera = self.varredura if falta is None else max(0.0, min(self.varredura, float(falta)))
+            if espera <= 0:
+                espera = 0.05
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._acordar.wait(), timeout=espera)
         self._acordar.clear()
@@ -159,7 +180,8 @@ class PortaDeSaida:
         trava cair no meio (ai ela so entra no extrato e na tela de decisao).
         """
         async with self.engine.connect() as c:
-            if not (await estado.ler_saida(c)).aberta:
+            self._saida_fechada = not (await estado.ler_saida(c)).aberta
+            if self._saida_fechada:
                 return False
             candidata = (
                 await c.execute(
@@ -179,6 +201,7 @@ class PortaDeSaida:
         async with self._transacao(dono) as c:
             await travas.compartilhar_envio(c, candidata.pessoa_id, candidata.aplicativo_id, candidata.sistema_id)
             if not (await estado.ler_saida(c)).aberta:
+                self._saida_fechada = True
                 return False
             travada = (
                 await c.execute(
@@ -202,12 +225,36 @@ class PortaDeSaida:
                 CONTADORES.somar("acoes_paradas", motivo=motivo)
                 return True
             ferramenta = conferida
+            # O que o envio precisa do banco e lido aqui, antes de "enviando": uma falha nesta leitura deixa a
+            # acao liberada, e nao em duvida.
+            sondagem = (
+                await c.execute(text("SELECT sondagem FROM sistemas WHERE id = :s"), {"s": ferramenta.sistema.id})
+            ).scalar_one_or_none()
+            declarado = await repositorio.esquema_declarado(c, ferramenta.sistema.id, ferramenta.nome_original)
             await fila.marcar_enviando(c, op)
-        final, resultado, desfecho = await self._enviar(op, ferramenta)
-        async with self.engine.begin() as c:
-            await fila.finalizar(c, op, final, resultado, desfecho)
+        final, resultado, desfecho = await self._enviar(op, ferramenta, sondagem, declarado)
+        await self._gravar_fim(op, final, resultado, desfecho)
         CONTADORES.somar("acoes", estado=str(final), sistema=ferramenta.sistema.nome)
         return True
+
+    async def _gravar_fim(self, op: Operacao, final: Estado, resultado: dict[str, Any] | None, desfecho: str) -> bool:
+        """Grava o fim do envio, tentando de novo algumas vezes se o banco falhar.
+
+        Sem conseguir, a linha fica "enviando": quem assumir a porta (ou a proxima partida) a da como nao
+        confirmada, e nada e reenviado. O log nao leva o resultado nem o erro do banco (que pode trazer os
+        valores do comando), so o tipo do erro."""
+        for tentativa in range(1, TENTATIVAS_DO_FIM + 1):
+            try:
+                async with self.engine.begin() as c:
+                    await fila.finalizar(c, op, final, resultado, desfecho)
+            except (SQLAlchemyError, OSError, TimeoutError) as erro:
+                log.warning("fim_do_envio_falhou", fila_id=op.fila_id, tentativa=tentativa, erro=type(erro).__name__)
+                if tentativa < TENTATIVAS_DO_FIM:
+                    await asyncio.sleep(ESPERA_DO_FIM * tentativa)
+            else:
+                return True
+        log.error("fim_do_envio_nao_gravado", fila_id=op.fila_id, estado=str(final))
+        return False
 
     async def _conferir(self, c: Any, op: Operacao) -> FerramentaVitrine | tuple[Estado, str]:
         situacoes = (
@@ -226,8 +273,20 @@ class PortaDeSaida:
         bloqueio = vigentes.para(op.sistema_id)
         if bloqueio is not None:
             return Estado.PARADA_POR_BLOQUEIO, bloqueio.motivo_recusa()
-        if situacoes.tipo_app == "programa" and not self.acoes_de_programas:
-            return Estado.CANCELADA, "programas so leem nesta instalacao"
+        if situacoes.tipo_app == "programa":
+            if not self.acoes_de_programas:
+                return Estado.CANCELADA, "programas so leem nesta instalacao"
+            cadastro = (
+                await c.execute(
+                    text(
+                        "SELECT situacao, fim >= (now() AT TIME ZONE :fuso)::date AS no_prazo FROM programas"
+                        " WHERE aplicativo_id = :a"
+                    ),
+                    {"a": op.aplicativo_id, "fuso": FUSO},
+                )
+            ).first()
+            if cadastro is None or cadastro.situacao != "ativo" or not cadastro.no_prazo:
+                return Estado.CANCELADA, "o cadastro do programa nao esta valendo (pausado, encerrado ou vencido)"
         ferramenta = await repositorio.ferramenta_da_ordem(
             c,
             pessoa_id=op.pessoa_id,
@@ -252,21 +311,38 @@ class PortaDeSaida:
         if op.ficha_id is not None:
             ficha = (
                 await c.execute(
-                    text("SELECT decisao, codigo_conferencia FROM fichas WHERE id = :f"), {"f": op.ficha_id}
+                    text(
+                        "SELECT operacao_id, decisao, codigo_conferencia, exige_passkey, risco, confirmada_com"
+                        " FROM fichas WHERE id = :f"
+                    ),
+                    {"f": op.ficha_id},
                 )
             ).one()
-            if ficha.decisao != "confirmada" or ficha.codigo_conferencia != codigo:
+            if (
+                str(ficha.operacao_id) != str(op.id)
+                or ficha.decisao != "confirmada"
+                or ficha.codigo_conferencia != codigo
+            ):
                 return Estado.CANCELADA, "a ficha nao foi confirmada para este pedido"
+            if (ficha.exige_passkey or ficha.risco == "alto") and ficha.confirmada_com not in (
+                "passkey",
+                "login_refeito",
+            ):
+                return Estado.CANCELADA, "a ficha de risco alto nao foi confirmada com passkey nem com login refeito"
         elif op.limite_id is not None:
             limite = (
                 await c.execute(
                     text(
-                        "SELECT pessoa_id, aplicativo_id, sistema_id, nome_original, destinatarios, com_passkey"
-                        " FROM limites WHERE id = :l"
+                        "SELECT pessoa_id, aplicativo_id, sistema_id, nome_original, destinatarios, com_passkey,"
+                        " situacao FROM limites WHERE id = :l"
                     ),
                     {"l": op.limite_id},
                 )
             ).first()
+            if limite is not None and limite.situacao in ("encerrado", "suspenso"):
+                # A pessoa encerrou (ou alguem suspendeu) o limite: o que ele liberou e ainda nao saiu nao sai.
+                # Vencido pelo prazo depois de liberar ainda sai: o limite valia quando foi gasto.
+                return Estado.CANCELADA, "o limite foi encerrado ou suspenso antes de a acao sair"
             if (
                 limite is None
                 or (limite.pessoa_id, limite.aplicativo_id, limite.sistema_id)
@@ -302,16 +378,14 @@ class PortaDeSaida:
             return None, None, "o cofre de chaves nao respondeu"
         return segredo, None, None
 
-    async def _enviar(self, op: Operacao, ferramenta: FerramentaVitrine) -> tuple[Estado, dict[str, Any] | None, str]:
+    async def _enviar(
+        self, op: Operacao, ferramenta: FerramentaVitrine, discover_json: Any, declarado: Any
+    ) -> tuple[Estado, dict[str, Any] | None, str]:
+        """Uma chamada so ao sistema. ``discover_json`` e ``declarado`` vem lidos antes de marcar "enviando"."""
         sistema = ferramenta.sistema
         segredo, aberta, sem_chave = await self._chave(op, ferramenta)
         if sem_chave is not None:
             return Estado.NAO_SAIU, None, sem_chave
-        async with self.engine.connect() as c:
-            discover_json = (
-                await c.execute(text("SELECT sondagem FROM sistemas WHERE id = :s"), {"s": sistema.id})
-            ).scalar_one_or_none()
-            declarado = await repositorio.esquema_declarado(c, sistema.id, ferramenta.nome_original)
 
         async def obter() -> str | None:
             return segredo
@@ -351,9 +425,13 @@ class PortaDeSaida:
             return Estado.NAO_SAIU, None, "o pedido nao chegou ao sistema"
         if resposta.tipo == "recusado_http":
             if 401 in resposta.status_http and aberta is not None:
-                await renovacao.marcar_vencida(
-                    self.engine, sistema_id=sistema.id, pessoa_id=op.pessoa_id, cifrada=aberta.cifrada
-                )
+                try:
+                    await renovacao.marcar_vencida(
+                        self.engine, sistema_id=sistema.id, pessoa_id=op.pessoa_id, cifrada=aberta.cifrada
+                    )
+                except (SQLAlchemyError, OSError, TimeoutError) as erro:
+                    # A acao nao saiu de qualquer jeito; so a proxima renovacao fica para depois.
+                    log.warning("chave_vencida_nao_marcada", erro=type(erro).__name__)
             codigos = ",".join(str(s) for s in resposta.status_http) or "?"
             return Estado.NAO_SAIU, None, f"o sistema recusou na porta (HTTP {codigos})"
         if resposta.tipo == "erro_rpc" and resposta.erro is not None and resposta.erro.code in _ANTES_DE_EXECUTAR:

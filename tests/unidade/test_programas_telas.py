@@ -13,7 +13,14 @@ import pytest
 from mcp_claro.config.settings import Parametros
 from mcp_claro.regras.programas import Programa
 from mcp_claro.rotinas.config import ConfigRotinas
-from mcp_claro.rotinas.programas import PASSOS, ProgramaMudou, tarefas_dos_programas
+from mcp_claro.rotinas.programas import (
+    PASSOS,
+    ProgramaMudou,
+    link_do_admin,
+    link_do_responsavel,
+    protegidos,
+    tarefas_dos_programas,
+)
 from mcp_claro.telas import admin_programas
 from mcp_claro.telas.admin_programas import (
     MESMA_PESSOA,
@@ -131,6 +138,62 @@ def test_passos_da_rotina_em_ordem_e_com_texto_para_quem_nao_e_tecnico() -> None
     for t in textos.values():
         for proibida in ("token", "senha", "garantido", "100%"):
             assert proibida not in t.lower()
+
+
+def _mudou(**mudancas: object) -> ProgramaMudou:
+    base = ProgramaMudou(
+        aplicativo_id=uuid.uuid4(),
+        responsavel_id=uuid.uuid4(),
+        substituto_id=uuid.uuid4(),
+        programa="mcp-claro-ronda",
+        responsavel="Rui",
+        fim=HOJE,
+        revisado_em=AGORA,
+        chave_trocada_em=AGORA,
+        visto_em=None,
+    )
+    return dataclasses.replace(base, **mudancas)  # type: ignore[arg-type]
+
+
+def test_rotina_nunca_pausa_nem_encerra_a_ronda_e_o_vigia() -> None:
+    assert protegidos(P) == ["mcp-claro-ronda", "mcp-claro-vigia"]
+    outro = Parametros(APP_ENV="teste", PATROL_CLIENT_ID="ronda-x", WATCH_CLIENT_ID="vigia-y")
+    assert protegidos(outro) == ["ronda-x", "vigia-y"]
+    for passo in PASSOS:
+        assert "a.client_id <> ALL (CAST(:protegidos AS text[]))" in passo.sql
+        assert "UPDATE" in passo.sql
+        assert "a.client_id = ANY (CAST(:protegidos AS text[]))" in passo.sql_das_portas
+        assert "UPDATE" not in passo.sql_das_portas
+
+
+def test_aviso_da_ronda_e_do_vigia_com_destaque_e_um_por_situacao() -> None:
+    m = _mudou()
+    for passo in PASSOS:
+        texto = passo.texto_das_portas(m, 90)
+        assert texto.startswith("IMPORTANTE: o programa mcp-claro-ronda testa as portas")
+        assert f"a rotina nao o {'encerrou' if passo.nova == 'encerrado' else 'pausou'}" in texto
+        for proibida in ("token", "senha", "garantido", "100%"):
+            assert proibida not in texto.lower()
+        # A mesma situacao da a mesma marca; o ADMIN resolver muda a marca (um aviso novo se voltar a vencer).
+        assert passo.situacao_das_portas(m) == passo.situacao_das_portas(dataclasses.replace(m))
+    por_nome = {p.nome: p for p in PASSOS}
+    assert por_nome["encerrados"].situacao_das_portas(m) != por_nome["encerrados"].situacao_das_portas(
+        _mudou(fim=HOJE + timedelta(days=30))
+    )
+    assert por_nome["revisao_vencida"].situacao_das_portas(m) != por_nome["revisao_vencida"].situacao_das_portas(
+        _mudou(revisado_em=AGORA + timedelta(days=1))
+    )
+    assert por_nome["chave_vencida"].situacao_das_portas(m) != por_nome["chave_vencida"].situacao_das_portas(
+        _mudou(chave_trocada_em=AGORA + timedelta(days=1))
+    )
+    assert "Estenda a data de fim" in por_nome["encerrados"].texto_das_portas(m, 0)
+
+
+def test_links_dos_avisos_levam_cada_um_a_sua_tela() -> None:
+    p = Parametros(APP_ENV="teste", PUBLIC_BASE_URL="https://mcp-claro.teste/")
+    aplicativo_id = uuid.uuid4()
+    assert link_do_responsavel(p) == "https://mcp-claro.teste/telas/programas"
+    assert link_do_admin(p, aplicativo_id) == f"https://mcp-claro.teste/telas/admin/programas/{aplicativo_id}"
 
 
 def test_tarefa_dos_programas_no_formato_do_agendador() -> None:

@@ -11,6 +11,7 @@
 {% if ligada and not tem_passkey %}
 <p class="atencao">Criar um limite pede a sua passkey, e você ainda não tem uma. <a href="/telas/passkeys" hx-boost="false">Cadastre uma passkey</a> e volte aqui.</p>
 {% endif %}
+{% if not ligada %}{% include "_login_refeito.html" %}{% endif %}
 <form method="post" action="/telas/limites" class="cartao"{% if ligada %} data-passkey="entrar" data-desafio="/telas/limites/desafio" hx-boost="false"{% endif %}>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="escolha" value="{{ e.chave }}">
@@ -25,7 +26,10 @@
     </select>
     <label for="valores">Destinatários aceitos, um por linha</label>
     <textarea id="valores" name="valores">{{ valores.get("valores", "") }}</textarea>
-    <p class="dica">Pedido para qualquer outro destinatário passa pela ficha.</p>
+    {% if e.campos | length > 1 %}
+    <p class="atencao">Os outros campos desta ação que podem dizer um destinatário (<strong>{{ e.campos | join(", ") }}</strong>, menos o que você escolher acima) precisam vir vazios. Um pedido com algo neles, como uma cópia para outra pessoa, passa pela ficha.</p>
+    {% endif %}
+    <p class="dica">Pedido para qualquer outro destinatário, no campo escolhido, passa pela ficha.</p>
     {% endif %}
     <label class="opcao"><input type="radio" name="destinatarios" value="qualquer" {% if valores.get("destinatarios") == "qualquer" or not e.campos %}checked{% endif %}> <span><strong>Qualquer destinatário.</strong> <span class="dica">Atenção: o aplicativo pode fazer esta ação para qualquer pessoa ou endereço, sem ficha, até o número de vezes por dia.</span></span></label>
   </fieldset>

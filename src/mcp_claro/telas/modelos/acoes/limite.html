@@ -16,14 +16,18 @@
 {% if l.ativo %}
 <h2>Ampliar</h2>
 <p>Ampliar só aumenta: mais vezes por dia ou mais prazo. Para mudar os destinatários, encerre e crie outro.</p>
+{% if acima_do_teto %}
+<p class="atencao">O teto mudou: agora um limite vai até {{ maximo_dia }} vezes por dia e até {{ maximo_dias }} dias. Este limite ainda vale como foi criado, mas, se você ampliar o prazo, ele passa a {{ maximo_dia }} vezes por dia.</p>
+{% endif %}
+{% if not ligada %}{% include "_login_refeito.html" %}{% endif %}
 {% if ligada and not tem_passkey %}
 <p class="atencao">Ampliar pede a sua passkey, e você ainda não tem uma. <a href="/telas/passkeys" hx-boost="false">Cadastre uma passkey</a>.</p>
 {% endif %}
 <form method="post" action="/telas/limites/{{ l.linha.id }}/ampliar" class="cartao"{% if ligada %} data-passkey="entrar" data-desafio="/telas/limites/{{ l.linha.id }}/desafio" hx-boost="false"{% endif %}>
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="credencial" value="">
-  <label for="por_dia">Vezes por dia, no máximo (de {{ l.linha.por_dia }} a {{ maximo_dia }})</label>
-  <input type="number" id="por_dia" name="por_dia" min="{{ l.linha.por_dia }}" max="{{ maximo_dia }}" value="{{ l.linha.por_dia }}" required>
+  <label for="por_dia">Vezes por dia, no máximo (de {{ minimo_dia }} a {{ maximo_dia }})</label>
+  <input type="number" id="por_dia" name="por_dia" min="{{ minimo_dia }}" max="{{ maximo_dia }}" value="{{ minimo_dia }}" required>
   <label for="dias">Vale por quantos dias, a contar de hoje? (de 1 a {{ maximo_dias }})</label>
   <input type="number" id="dias" name="dias" min="1" max="{{ maximo_dias }}" value="{{ maximo_dias }}" required>
   <p class="erros" data-passkey-aviso role="alert" hidden></p>
@@ -35,7 +39,7 @@
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit" class="secundario">Encerrar este limite</button>
 </form>
-<p class="dica">Encerrado, esta ação volta a pedir ficha. Não pede passkey.</p>
+<p class="dica">Encerrado, esta ação volta a pedir ficha. O que este limite já liberou e ainda espera a hora de sair é cancelado: nada disso chega ao sistema. Encerrar não pede passkey.</p>
 {% endif %}
 <p><a href="/telas/limites">Voltar para Meus limites</a></p>
 {% endblock %}

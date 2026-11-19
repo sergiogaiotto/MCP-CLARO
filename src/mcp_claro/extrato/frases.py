@@ -83,6 +83,37 @@ FRASES: Final[dict[str, Frase]] = {
         Frase("limite_encerrado", "O limite de {ferramenta} foi encerrado: {motivo}."),
         Frase("passkey_cadastrada", "A pessoa cadastrou uma passkey."),
         Frase("passkey_desativada", "Uma passkey da pessoa foi desativada."),
+        # Fase 2: correcoes da revisao (programas).
+        Frase(
+            "programa_das_portas_mantido",
+            "Programa {programa}, responsavel {responsavel}: a rotina nao o {acao} porque ele testa as portas do"
+            " MCP-CLARO; {motivo}. O ADMIN precisa resolver na tela do programa.",
+        ),
+        Frase(
+            "admin_programa_recadastrado",
+            "Programa {programa}, responsavel {responsavel}, cadastrado de novo por {quem} depois de encerrado;"
+            " substituto {substituto}, valido ate {fim}.",
+        ),
+        Frase(
+            "admin_programa_fim_estendido",
+            "Programa {programa}, responsavel {responsavel}: {quem} estendeu a data de fim de {antes} para {fim}.",
+        ),
+        # Fase 2: correcoes da revisao (nucleo).
+        Frase(
+            "comprovante_bloqueio_partes",
+            "Comprovante do bloqueio: {paradas} acoes paradas antes de sair; {ja_saidas} ja tinham saido;"
+            " {em_conferencia} ainda em conferencia.",
+        ),
+        Frase(
+            "ficha_avisada_webhooks",
+            "O aviso da ficha pendente do protocolo {protocolo} foi so aos webhooks da instalacao; nao houve aviso"
+            " por e-mail a pessoa.",
+        ),
+        Frase(
+            "fila_restauracao_envio_com_dono",
+            "Na conferencia do banco, {enviando} acoes estavam saindo por um despachante no ar; ele mesmo grava o"
+            " fim delas.",
+        ),
         # Fase 2: programas que rodam sozinhos (decisao 9).
         Frase(
             "programa_leitura_feita",

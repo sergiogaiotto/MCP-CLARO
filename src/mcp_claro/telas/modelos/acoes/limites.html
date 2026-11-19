@@ -3,11 +3,12 @@
 {% block conteudo %}
 <h1>Meus limites</h1>
 <p>Um limite deixa um aplicativo fazer uma ação sem ficha, até um número de vezes por dia e até uma data.</p>
+<p>Encerrar um limite cancela também o que ele já liberou e ainda espera a hora de sair.</p>
 <p>Ações de risco alto nunca entram em limite: sempre passam pela ficha.</p>
 {% if ligada %}
 <p>Criar e ampliar um limite pede a sua <a href="/telas/passkeys" hx-boost="false">passkey</a>. Encerrar não pede.</p>
 {% else %}
-<p class="atencao">A passkey está desligada nesta instalação. Criar e ampliar um limite não pede passkey.</p>
+<p class="atencao">A passkey está desligada nesta instalação. No lugar dela, criar e ampliar um limite pedem um login refeito na hora. Encerrar não pede.</p>
 {% endif %}
 
 <h2>Valendo agora</h2>

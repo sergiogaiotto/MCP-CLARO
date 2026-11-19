@@ -9,8 +9,8 @@ cracha do programa e o do ``tests/idp_falso.py``, com ``azp`` do programa e o su
 Tambem aqui: as rotinas dos programas (com o usuario das rotinas) e as telas do ADMIN e do responsavel
 (com o usuario da entrada), montadas so com as rotas de ``telas/admin_programas.py``.
 
-A tabela de contagem por minuto e as permissoes dela ainda nao estao na migracao: ``aplicar_sql_ate_a_0005``
-as cria com o dono do banco.
+A tabela de contagem por minuto (``programas_pedidos_minuto``) e as permissoes dela vem so da migracao 0005:
+nenhum passo destes testes refaz tabela ou GRANT com o dono do banco.
 """
 
 from __future__ import annotations
@@ -55,26 +55,6 @@ from tests.integracao.test_telas import Navegador
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
 LIMITE_POR_MINUTO = 5
-
-# Ate entrar na 0005: contagem de pedidos por programa por minuto (PROGRAM_MAX_REQUESTS_PER_MINUTE).
-SQL_ATE_A_0005 = (
-    """CREATE TABLE IF NOT EXISTS programas_pedidos_minuto (
-  aplicativo_id uuid        NOT NULL REFERENCES aplicativos (id),
-  minuto        timestamptz NOT NULL,
-  contagem      integer     NOT NULL DEFAULT 0 CHECK (contagem >= 0),
-  PRIMARY KEY (aplicativo_id, minuto)
-)""",
-    "GRANT SELECT, INSERT, UPDATE (contagem) ON programas_pedidos_minuto TO mcp_claro_entrada",
-    "GRANT SELECT, DELETE ON programas_pedidos_minuto TO mcp_claro_rotinas",
-)
-
-
-async def aplicar_sql_ate_a_0005(dono: AsyncEngine) -> None:
-    """Ate entrar na 0005: o dono do banco cria a tabela de contagem por minuto e as permissoes dela."""
-    async with dono.begin() as c:
-        await c.execute(text("SELECT pg_advisory_xact_lock(hashtext('teste_programas_0005'))"))
-        for comando in SQL_ATE_A_0005:
-            await c.execute(text(comando))
 
 
 def motivo(erro: MCPError) -> str:
@@ -155,7 +135,6 @@ class Programas:
 @contextlib.asynccontextmanager
 async def ambiente_de_programas(banco: Parametros, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Programas]:
     async with subir(banco, monkeypatch, extra={"PROGRAM_MAX_REQUESTS_PER_MINUTE": LIMITE_POR_MINUTO}) as a:
-        await aplicar_sql_ate_a_0005(a.admin)
         s = uuid.uuid4().hex[:8]
         client_id, conta, chave = f"robo-{s}", f"service-account-robo-{s}", f"chave-robo-{s}"
         monkeypatch.setenv(
@@ -515,7 +494,12 @@ async def test_revisao_vencida_pausa_e_avisa_o_responsavel(prog: Programas) -> N
     avisos = await _avisos(prog, "programa_revisao_vencida", so_pessoas=False)
     assert "admin@exemplo.test" in {a.destino for a in avisos}
     assert all("foi pausado" in a.corpo["texto"] for a in avisos)
-    assert all("/telas/programas" in a.corpo["texto"] for a in avisos)
+    # Cada um recebe o link da propria tela: o ADMIN, a do programa na area dele; o responsavel, a dele.
+    for a in avisos:
+        if a.destino.startswith("pessoa:"):
+            assert a.corpo["texto"].endswith("/telas/programas."), a.corpo["texto"]
+        else:
+            assert a.corpo["texto"].endswith(f"/telas/admin/programas/{prog.robo_id}."), a.corpo["texto"]
     with pytest.raises(MCPError) as erro:
         await prog.listar()
     assert motivo(erro.value) == "programa_pausado"
@@ -532,6 +516,36 @@ async def test_chave_a_vencer_avisa_uma_vez_e_chave_vencida_pausa(prog: Programa
     await cuidar_dos_programas(prog.amb.rotinas_db, prog.amb.p)
     assert await _situacao(prog) == "pausado"
     assert len(await prog.extrato("programa_pausado_chave")) == 1
+
+
+async def test_rotina_nao_pausa_o_vigia_e_avisa_o_admin_com_destaque(prog: Programas) -> None:
+    """O programa do vigia (``WATCH_CLIENT_ID``) com a chave vencida: a rotina nao pausa, avisa uma vez."""
+    p = Parametros(**(prog.amb.p.model_dump() | {"WATCH_CLIENT_ID": prog.client_id}))
+    await prog.mudar("UPDATE programas SET chave_trocada_em = now() - interval '91 days' WHERE aplicativo_id = :a")
+    primeira = await cuidar_dos_programas(prog.amb.rotinas_db, p, ["admin@exemplo.test"])
+    segunda = await cuidar_dos_programas(prog.amb.rotinas_db, p, ["admin@exemplo.test"])
+    assert primeira["das_portas"] >= 1
+    assert segunda["das_portas"] == 0
+    assert await _situacao(prog) == "ativo"
+    assert await prog.extrato("programa_pausado_chave") == []
+    avisos = await _avisos(prog, "programa_das_portas_atencao", so_pessoas=False)
+    assert sorted(a.destino for a in avisos) == sorted(
+        ["admin@exemplo.test", f"pessoa:{prog.amb.ana_id}", f"pessoa:{prog.amb.bia_id}"]
+    )
+    para_admin = next(a for a in avisos if a.destino == "admin@exemplo.test")
+    assert para_admin.corpo["texto"].startswith(f"IMPORTANTE: o programa {prog.nome} testa as portas")
+    assert "registre a troca na tela do programa" in para_admin.corpo["texto"]
+    assert para_admin.corpo["texto"].endswith(f"/telas/admin/programas/{prog.robo_id}.")
+    (linha,) = await prog.extrato("programa_das_portas_mantido")
+    assert linha.frase == (
+        f"Programa {prog.nome}, responsavel pessoa-ana: a rotina nao o pausou porque ele testa as portas do"
+        " MCP-CLARO; a chave dele passou de 90 dias sem troca. O ADMIN precisa resolver na tela do programa."
+    )
+    # O programa segue lendo: a entrada nao olha o prazo da chave.
+    assert await prog.listar()
+    # Com os parametros de sempre, o mesmo programa nao e da ronda nem do vigia: a rotina pausa.
+    await cuidar_dos_programas(prog.amb.rotinas_db, prog.amb.p)
+    assert await _situacao(prog) == "pausado"
 
 
 async def test_rotina_encerra_no_fim_e_pausa_sem_responsavel(prog: Programas) -> None:
@@ -858,3 +872,141 @@ async def test_admin_da_ordem_ao_programa_so_com_leitura_de_sistema_de_chave_pro
     linhas = await telas.extrato("admin_programa_ordem", programa.aplicativo_id)
     assert len(linhas) == 1
     assert f"deu a ordem de servico ordem-programa-{s}" in linhas[0].frase
+
+
+async def test_admin_cadastra_de_novo_o_programa_encerrado_com_o_mesmo_client_id(telas: Telinhas) -> None:
+    s = telas.sufixo
+    client_id = f"robo-tela-{s}"
+    nav, csrf = await telas.navegador(telas.admin_id)
+    r = await nav.post(
+        "/telas/admin/programas",
+        _cadastro(telas, responsavel=str(telas.rui_id), substituto=str(telas.sara_id)),
+        csrf=csrf,
+    )
+    assert r.status_code == 303
+    antes = await telas.programa(client_id)
+    base = f"/telas/admin/programas/{antes.aplicativo_id}"
+
+    # Programa que ainda vale nao e cadastrado de novo: a data de fim muda na tela dele.
+    r = await nav.post(
+        "/telas/admin/programas",
+        _cadastro(telas, responsavel=str(telas.sara_id), substituto=str(telas.rui_id)),
+        csrf=csrf,
+    )
+    assert r.status_code == 400
+    assert "não foi encerrado" in r.text
+    assert (await telas.programa(client_id)).responsavel_id == telas.rui_id
+
+    r = await nav.post(f"{base}/encerrar", {"motivo": "Contrato do robo acabou"}, csrf=csrf)
+    assert r.status_code == 303
+    pagina = await nav.get(base)
+    assert "cadastre-o outra vez" in pagina.text
+
+    novo_fim = date.today() + timedelta(days=300)
+    r = await nav.post(
+        "/telas/admin/programas",
+        _cadastro(
+            telas,
+            nome=f"Robo novo {s}",
+            finalidade="Le os chamados abertos toda noite.",
+            fim=novo_fim.isoformat(),
+            responsavel=str(telas.sara_id),
+            substituto=str(telas.rui_id),
+        ),
+        csrf=csrf,
+    )
+    assert (r.status_code, r.headers["location"]) == (303, f"{base}?feito=programa_recadastrado")
+    depois = await telas.programa(client_id)
+    assert depois.aplicativo_id == antes.aplicativo_id  # a mesma linha volta a valer
+    assert (depois.situacao, depois.responsavel_id, depois.substituto_id, depois.fim) == (
+        "ativo",
+        telas.sara_id,
+        telas.rui_id,
+        novo_fim,
+    )
+    assert (depois.nome, depois.finalidade) == (f"Robo novo {s}", "Le os chamados abertos toda noite.")
+    assert depois.revisado_em > antes.revisado_em  # conta como revisao do ADMIN
+    assert depois.chave_trocada_em == antes.chave_trocada_em  # a troca da chave nao e inventada
+    linhas = await telas.extrato("admin_programa_recadastrado", antes.aplicativo_id)
+    assert [(x.frase, x.pessoa_id) for x in linhas] == [
+        (
+            f"Programa Robo novo {s}, responsavel Sara {s}, cadastrado de novo por Carla Admin depois de encerrado;"
+            f" substituto Rui {s}, valido ate {novo_fim:%d/%m/%Y}.",
+            telas.admin_id,
+        )
+    ]
+    pagina = await nav.get(f"{base}?feito=programa_recadastrado")
+    assert "cadastrado de novo e voltou a valer" in pagina.text
+    # Quem nao e ADMIN nao cadastra de novo.
+    await nav.post(f"{base}/encerrar", {"motivo": "Encerrar outra vez"}, csrf=csrf)
+    rui, csrf_rui = await telas.navegador(telas.rui_id)
+    r = await rui.post(
+        "/telas/admin/programas",
+        _cadastro(telas, responsavel=str(telas.rui_id), substituto=str(telas.sara_id)),
+        csrf=csrf_rui,
+    )
+    assert r.status_code == 403
+    assert (await telas.programa(client_id)).situacao == "encerrado"
+
+
+async def test_admin_estende_a_data_de_fim_de_programa_que_nao_foi_encerrado(telas: Telinhas) -> None:
+    s = telas.sufixo
+    client_id = f"robo-tela-{s}"
+    nav, csrf = await telas.navegador(telas.admin_id)
+    r = await nav.post(
+        "/telas/admin/programas",
+        _cadastro(telas, responsavel=str(telas.rui_id), substituto=str(telas.sara_id)),
+        csrf=csrf,
+    )
+    assert r.status_code == 303
+    antes = await telas.programa(client_id)
+    base = f"/telas/admin/programas/{antes.aplicativo_id}"
+    assert "Estender a data de fim" in (await nav.get(base)).text
+
+    r = await nav.post(f"{base}/fim", {"fim": (antes.fim - timedelta(days=1)).isoformat()}, csrf=csrf)
+    assert r.status_code == 400
+    assert "depois da data de fim atual" in r.text
+    r = await nav.post(f"{base}/fim", {"fim": (date.today() + timedelta(days=400)).isoformat()}, csrf=csrf)
+    assert r.status_code == 400
+    assert (await telas.programa(client_id)).fim == antes.fim
+
+    novo = antes.fim + timedelta(days=100)
+    r = await nav.post(f"{base}/fim", {"fim": novo.isoformat()}, csrf=csrf)
+    assert (r.status_code, r.headers["location"]) == (303, f"{base}?feito=programa_fim_estendido")
+    assert (await telas.programa(client_id)).fim == novo
+    linhas = await telas.extrato("admin_programa_fim_estendido", antes.aplicativo_id)
+    assert [(x.frase, x.pessoa_id) for x in linhas] == [
+        (
+            f"Programa Robo da tela {s}, responsavel Rui {s}: Carla Admin estendeu a data de fim de"
+            f" {antes.fim:%d/%m/%Y} para {novo:%d/%m/%Y}.",
+            telas.admin_id,
+        )
+    ]
+
+    # Pausado e vencido (como a ronda, que a rotina nao encerra): estender a data deixa retomar.
+    async with telas.dono.begin() as c:
+        await c.execute(
+            text(
+                "UPDATE programas SET situacao = 'pausado', fim = (now() AT TIME ZONE 'America/Sao_Paulo')::date - 1"
+                " WHERE aplicativo_id = :a"
+            ),
+            {"a": antes.aplicativo_id},
+        )
+    r = await nav.post(f"{base}/retomar", {}, csrf=csrf)
+    assert r.status_code == 400
+    assert "Estenda a data de fim antes de retomar" in r.text
+    r = await nav.post(f"{base}/fim", {"fim": (date.today() + timedelta(days=30)).isoformat()}, csrf=csrf)
+    assert r.status_code == 303
+    r = await nav.post(f"{base}/retomar", {}, csrf=csrf)
+    assert r.status_code == 303
+    assert (await telas.programa(client_id)).situacao == "ativo"
+
+    # Quem nao e ADMIN nao estende; programa encerrado nao muda.
+    rui, csrf_rui = await telas.navegador(telas.rui_id)
+    r = await rui.post(f"{base}/fim", {"fim": (date.today() + timedelta(days=60)).isoformat()}, csrf=csrf_rui)
+    assert r.status_code == 403
+    await nav.post(f"{base}/encerrar", {"motivo": "Programa substituido"}, csrf=csrf)
+    r = await nav.post(f"{base}/fim", {"fim": (date.today() + timedelta(days=90)).isoformat()}, csrf=csrf)
+    assert r.status_code == 400
+    assert "encerrado" in r.text
+    assert len(await telas.extrato("admin_programa_fim_estendido", antes.aplicativo_id)) == 2

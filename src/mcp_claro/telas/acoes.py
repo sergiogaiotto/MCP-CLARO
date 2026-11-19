@@ -5,6 +5,11 @@
   a parte, marcada como texto dele, nao conferido pelo MCP-CLARO.
 - Confirmar e recusar sao POST com CSRF. Ficha de risco alto (``exige_passkey``) so confirma com passkey: a
   conferencia e no servidor, no mesmo POST e na mesma transacao que confirma (``telas/passkeys.py``).
+- Ficha de risco alto que nao confirma pela passkey (``FEATURE_PASSKEY`` desligado, inclusive a ficha que
+  nasceu pedindo passkey, ou ficha montada quando a passkey estava desligada) confirma so com o login refeito
+  na hora (``Telas.login_recente``): a tela manda refazer o login no provedor e volta para a ficha.
+- Os dados do pedido aparecem com os caracteres escondidos (invisiveis, de formato e de direcao, como U+202E)
+  trocados por marcas visiveis como ``[U+202E]``, e a ficha avisa em destaque quando ha algum.
 - Depois de confirmar, a pagina da acao mostra a hora de sair (hora de Brasilia) e quanto falta; sem
   JavaScript, a hora fica escrita; com o htmx, a parte do estado se atualiza sozinha. Da para cancelar
   antes de sair ou seguir agora.
@@ -54,7 +59,7 @@ FRASE_TELA: Final[dict[Estado, str]] = {
     Estado.LIBERADA: "Confirmada. A ação espera a hora de sair; ainda dá para cancelar.",
     Estado.ENVIANDO: "Estamos enviando ao sistema. Não repita o pedido.",
     Estado.ENVIADA: "Enviada uma vez ao sistema.",
-    Estado.NAO_SAIU: "Não saiu: o sistema não recebeu o pedido. Nada aconteceu.",
+    Estado.NAO_SAIU: "Não saiu: o sistema não executou o pedido (não recebeu ou recusou na porta). Nada aconteceu.",
     Estado.SISTEMA_PEDIU_DADOS: "O sistema pediu mais dados no meio da ação; o MCP-CLARO não repassa esses pedidos.",
     Estado.NAO_CONFIRMADA: "Resultado não confirmado: o pedido pode ter chegado ao sistema. Nada será reenviado; "
     "a pessoa decide na tela do gateway.",
@@ -78,12 +83,17 @@ ROTULOS: Final[dict[Estado, str]] = {
     Estado.PARADA_POR_RESTAURACAO: "Parada por restauração",
 }
 
+LOGIN_REFEITO_FICHA: Final = (
+    "Esta ação é de risco alto: para confirmar sem a passkey, entre de novo agora e confirme logo depois. Nada seguiu."
+)
+
 # Recusas de ``fila`` (``DecisaoRecusada.motivo``) em linguagem simples, com o status da resposta.
 RECUSAS: Final[dict[str, tuple[int, str]]] = {
     "ficha_desconhecida": (404, "Ficha não encontrada. Ela não é sua ou não existe."),
     "ficha_ja_decidida": (409, "Esta ficha já foi decidida antes. Nada mudou."),
     "ficha_vencida": (409, "O prazo desta ficha acabou. Nada seguiu para o sistema."),
     "falta_passkey": (403, "Esta ação é de risco alto: confirme com a sua passkey. Nada seguiu."),
+    "falta_login_refeito": (403, LOGIN_REFEITO_FICHA),
     "codigo_nao_bate": (409, "O código de conferência não bate com o pedido. Por segurança, nada seguiu."),
     "nao_esta_aguardando": (409, "Esta ação não espera mais confirmação. Veja o andamento dela."),
     "operacao_desconhecida": (404, "Ação não encontrada. Ela não é sua ou não existe."),
@@ -123,21 +133,76 @@ def recusa_legivel(erro: DecisaoRecusada) -> tuple[int, str]:
     return RECUSAS.get(erro.motivo, (409, erro.mensagem))
 
 
+# Caracteres escondidos: os que nao aparecem na tela ou mudam a ordem do texto. O escape do HTML nao mexe neles,
+# e o navegador os obedece (U+202E inverte o que vem depois). Na tela, viram uma marca visivel como [U+202E].
+CATEGORIAS_ESCONDIDAS: Final = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cn"})
+# Os de direcao (bidi) e de largura zero, ditos um a um (ja sao Cf, ficam aqui por clareza): U+061C, U+200B a
+# U+200F, U+202A a U+202E, U+2066 a U+2069. E os que o Unicode chama de letra ou marca, mas nao desenham nada
+# (preenchedores do hangul e seletores de variacao).
+ESCONDIDOS_DITOS: Final = frozenset(
+    {
+        0x061C,
+        *range(0x200B, 0x2010),
+        *range(0x202A, 0x202F),
+        *range(0x2066, 0x206A),
+        0x115F,
+        0x1160,
+        0x3164,
+        0xFFA0,
+        *range(0xFE00, 0xFE10),
+        *range(0xE0100, 0xE01F0),
+    }
+)
+
+
+def escondido(ch: str) -> bool:
+    """A quebra de linha fica: a tela a mostra como quebra (``white-space: pre-wrap``)."""
+    return ch != "\n" and (ord(ch) in ESCONDIDOS_DITOS or unicodedata.category(ch) in CATEGORIAS_ESCONDIDAS)
+
+
+def marcar_escondidos(texto: str) -> str:
+    """Troca cada caractere escondido por uma marca visivel, no lugar exato onde ele esta: "12[U+202E]34"."""
+    return "".join(f"[U+{ord(ch):04X}]" if escondido(ch) else ch for ch in texto)
+
+
+def _textos(valor: Any) -> list[str]:
+    """Todos os textos de um valor, com as chaves de objetos e os itens de listas."""
+    if isinstance(valor, str):
+        return [valor]
+    if isinstance(valor, dict):
+        return [t for chave, v in valor.items() for t in (*_textos(str(chave)), *_textos(v))]
+    if isinstance(valor, list | tuple):
+        return [t for v in valor for t in _textos(v)]
+    return []
+
+
+def tem_escondidos(valor: Any) -> bool:
+    return any(escondido(ch) for texto in _textos(valor) for ch in texto)
+
+
 def valor_legivel(valor: Any) -> str:
     if isinstance(valor, str):
-        return valor
+        return marcar_escondidos(valor)
     if isinstance(valor, bool):
         return "sim" if valor else "não"
     if valor is None:
         return "(vazio)"
     if isinstance(valor, int | float):
         return str(valor)
-    return json.dumps(valor, ensure_ascii=False, sort_keys=True)
+    return marcar_escondidos(json.dumps(valor, ensure_ascii=False, sort_keys=True))
 
 
 def argumentos_legiveis(argumentos: dict[str, Any]) -> list[tuple[str, str]]:
-    """Os dados do pedido em lista "chave: valor". O escape fica com o modelo (Jinja2 com escape automatico)."""
-    return [(str(chave), valor_legivel(valor)) for chave, valor in argumentos.items()]
+    """Os dados do pedido em lista "chave: valor", com os escondidos marcados nas chaves e nos valores.
+
+    O escape do HTML fica com o modelo (Jinja2 com escape automatico)."""
+    return [(marcar_escondidos(str(chave)), valor_legivel(valor)) for chave, valor in argumentos.items()]
+
+
+def linhas_do_aplicativo(diz: str | None) -> list[str]:
+    """O que o aplicativo diz, linha a linha, com os escondidos marcados (a entrada ja tira os nao imprimiveis;
+    aqui e a segunda barreira, para o que a tela mostra)."""
+    return marcar_escondidos(diz).split("\n") if diz else []
 
 
 def textos_do_resultado(resultado: dict[str, Any] | None) -> list[str]:
@@ -188,6 +253,9 @@ class Acao:
     rotulo: str
     frase: str
     argumentos: list[tuple[str, str]]
+    escondidos: bool
+    diz: list[str]
+    diz_escondidos: bool
     textos: list[str]
     hora_saida: str
     falta: int
@@ -207,6 +275,11 @@ class Acao:
     def pode_decidir_ficha(self) -> bool:
         return self.op.estado == Estado.AGUARDANDO_FICHA and self.op.ficha_decisao is None and self.prazo > 0
 
+    @property
+    def de_risco_alto(self) -> bool:
+        """Ficha de risco alto: a que nasceu pedindo passkey ou a que foi montada com risco alto."""
+        return self.op.ficha_exige_passkey or self.op.ficha_risco == "alto"
+
 
 def montar(op: Operacao, agora: datetime | None = None) -> Acao:
     agora = agora or datetime.now(UTC)
@@ -223,6 +296,9 @@ def montar(op: Operacao, agora: datetime | None = None) -> Acao:
         rotulo=ROTULOS[op.estado],
         frase=frase_do_estado(op.estado),
         argumentos=argumentos_legiveis(op.argumentos),
+        escondidos=tem_escondidos(op.argumentos),
+        diz=linhas_do_aplicativo(op.aplicativo_diz),
+        diz_escondidos=tem_escondidos(op.aplicativo_diz),
         textos=textos_do_resultado(op.resultado),
         hora_saida=hora_de_brasilia(op.hora_saida),
         falta=falta,
@@ -296,7 +372,9 @@ class TelasDeAcoes:
         sessao = await self.t.exigir_sessao(pedido)
         async with self.t.engine.connect() as c:
             caixa = separar(await fila.pendencias(c, sessao.pessoa.id))
-        return self.t.pagina(pedido, "acoes/pendencias.html", {"caixa": caixa})
+        return self.t.pagina(
+            pedido, "acoes/pendencias.html", {"caixa": caixa, "passkey_ligada": self.t.p.FEATURE_PASSKEY}
+        )
 
     # --- Ficha ---
 
@@ -319,20 +397,29 @@ class TelasDeAcoes:
             tem_passkey = await passkeys.tem_ativa(c, sessao.pessoa.id)
         if op is None or detalhes is None:
             return self.t.erro(pedido, 404, "Ficha não encontrada", "Esta ficha não é sua ou não existe.")
+        a = montar(op)
         return self.t.pagina(
             pedido,
             "acoes/ficha.html",
             {
-                "a": montar(op),
+                "a": a,
                 "d": detalhes,
                 "risco": RISCOS.get(str(detalhes.risco), str(detalhes.risco)),
                 "passkey_ligada": self.t.p.FEATURE_PASSKEY,
                 "tem_passkey": tem_passkey,
+                "pede_login": self._pede_login(op),
+                "refazer": self.t.login_refeito(pedido, sessao, f"/telas/fichas/{ficha_id}"),
+                "pede": "Confirmar esta ação de risco alto pede um login refeito na hora.",
                 "aviso": self._aviso(pedido),
                 "erros": erros or [],
             },
             status=status,
         )
+
+    def _pede_login(self, op: Operacao) -> bool:
+        """Ficha de risco alto que nao confirma pela passkey (passkey desligada nesta instalacao, ou ficha montada
+        quando ela estava desligada): o reforco e o login refeito na hora."""
+        return montar(op).de_risco_alto and not (self.t.p.FEATURE_PASSKEY and op.ficha_exige_passkey)
 
     @tela
     async def ficha(self, pedido: Request) -> Response:
@@ -344,6 +431,8 @@ class TelasDeAcoes:
         sessao = await self.t.exigir_sessao(pedido)
         await self.t.formulario(pedido, sessao)
         ficha_id: uuid.UUID = pedido.path_params["ficha_id"]
+        if not self.t.p.FEATURE_PASSKEY:
+            return passkeys.resposta_desafio(None, "A passkey está desligada nesta instalação.", status=409)
         async with self.t.engine.begin() as c:
             op = await self._ficha_da_pessoa(c, ficha_id, sessao.pessoa.id)
             if op is None:
@@ -362,6 +451,9 @@ class TelasDeAcoes:
         f = await self.t.formulario(pedido, sessao)
         ficha_id: uuid.UUID = pedido.path_params["ficha_id"]
         pessoa_id = sessao.pessoa.id
+        ligada = bool(self.t.p.FEATURE_PASSKEY)
+        recente = self.t.login_recente(sessao)
+        login_refeito = False
         recusa: tuple[int, str] | None = None
         com_passkey = False
         confirmada: Operacao | None = None
@@ -369,9 +461,15 @@ class TelasDeAcoes:
             op = await self._ficha_da_pessoa(c, ficha_id, pessoa_id)
             if op is None:
                 return self.t.erro(pedido, 404, "Ficha não encontrada", "Esta ficha não é sua ou não existe.")
+            if self._pede_login(op):
+                if not recente:
+                    # Sem a passkey, o reforco do risco alto e o login refeito na hora. Nada muda ate la.
+                    log.info("telas_ficha_pede_login_refeito")
+                    return await self._pagina_ficha(pedido, ficha_id, erros=[LOGIN_REFEITO_FICHA], status=403)
+                login_refeito = True  # o reforco usado nesta ficha; o extrato diz "com o login refeito"
             valores = await politica.varios(c, "OUTBOX_HOLD_SECONDS", "CONFIRM_TOO_FAST_SECONDS")
             credencial = f.texto("credencial")
-            if op.ficha_exige_passkey and credencial:
+            if ligada and op.ficha_exige_passkey and credencial:
                 # A passkey e conferida aqui, na mesma transacao que confirma. Recusada, o desafio fica gasto.
                 negada = await passkeys.conferir(c, self.cer, pessoa_id, "ficha", str(ficha_id), credencial)
                 if negada is not None:
@@ -385,6 +483,8 @@ class TelasDeAcoes:
                             ficha_id,
                             pessoa_id=pessoa_id,
                             com_passkey=com_passkey,
+                            login_refeito=login_refeito,
+                            passkey_ligada=ligada,
                             espera_segundos=valores["OUTBOX_HOLD_SECONDS"],
                             rapida_segundos=valores["CONFIRM_TOO_FAST_SECONDS"],
                         )
@@ -396,7 +496,7 @@ class TelasDeAcoes:
             if status == 404:
                 return self.t.erro(pedido, 404, "Ficha não encontrada", mensagem)
             return await self._pagina_ficha(pedido, ficha_id, erros=[mensagem], status=status)
-        log.info("telas_ficha_confirmada", passkey=com_passkey)
+        log.info("telas_ficha_confirmada", passkey=com_passkey, login_refeito=login_refeito)
         return ver_depois(f"/telas/acoes/{confirmada.id}", "confirmada")
 
     @tela

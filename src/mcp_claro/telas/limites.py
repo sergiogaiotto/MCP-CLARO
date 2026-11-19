@@ -8,7 +8,14 @@ para os destinatarios escolhidos (ou para qualquer destinatario, dito com clarez
 - Quantidade por dia ate ``ALLOWANCE_MAX_PER_DAY`` e prazo ate ``ALLOWANCE_MAX_DAYS`` (politica vigente).
 - Criar e ampliar pedem a passkey quando ``FEATURE_PASSKEY`` esta ligado. O desafio fica preso ao resumo
   exato do que foi pedido (finalidade "limite"): a passkey aprova este limite, nao outro. Encerrar nao pede.
+  Com a passkey desligada, criar e ampliar pedem o login refeito na hora (``Telas.login_recente``).
+- "So estes destinatarios": o campo escolhido aceita so os valores escritos, e cada outro campo do esquema que
+  pode dizer um destinatario (texto ou lista de textos) entra com a lista vazia: tem de vir vazio ou faltar.
+  Um pedido com copia para outra pessoa, por exemplo, passa pela ficha.
 - Ampliar so aumenta: mais vezes por dia ou mais prazo. Para mudar os destinatarios, encerre e crie outro.
+  Ampliar segue o teto vigente: um limite acima do teto de agora so renova ate o teto, e o prazo nunca passa
+  de ``ALLOWANCE_MAX_DAYS`` a contar de hoje.
+- Encerrar cancela, na mesma transacao, o que o limite ja tinha liberado e ainda espera a hora de sair.
 """
 
 from __future__ import annotations
@@ -19,20 +26,25 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
+from urllib.parse import urlencode
 
 from sqlalchemy import Row
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import BaseRoute, Route
 
 from mcp_claro.logs import logger
 from mcp_claro.regras import politica
+from mcp_claro.saida import fila
+from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.protocolo import FUSO, canonico
 from mcp_claro.telas import consultas, passkeys
-from mcp_claro.telas.nucleo import Telas, tela, ver_depois
+from mcp_claro.telas.acoes import marcar_escondidos
+from mcp_claro.telas.nucleo import LoginRefeito, Telas, tela, ver_depois
 from mcp_claro.telas.paginas import AVISOS
 from mcp_claro.telas.seguranca import Formulario
+from mcp_claro.telas.sessoes import Sessao
 from mcp_claro.versao import VERSAO_MCP
 
 log = logger("mcp_claro.telas.limites")
@@ -40,6 +52,12 @@ log = logger("mcp_claro.telas.limites")
 MAXIMO_VALORES: Final = 50
 MAXIMO_VALOR: Final = 200
 MOTIVO_ENCERRADO: Final = "encerrado pela pessoa nas telas"
+MOTIVO_CANCELADA: Final = "cancelada porque a pessoa encerrou o limite que a liberou"
+MAXIMO_CANCELADAS_NO_AVISO: Final = 10_000
+LOGIN_REFEITO_LIMITE: Final = (
+    "A passkey está desligada nesta instalação: criar ou ampliar um limite pede um login refeito na hora."
+    " Entre de novo e tente outra vez. Nada mudou."
+)
 SITUACOES: Final[dict[str, str]] = {
     "ativo": "Valendo",
     "suspenso": "Suspenso",
@@ -52,6 +70,19 @@ AVISOS_LIMITES: Final[dict[str, str]] = {
     "limite_ampliado": "Pronto. O limite foi ampliado.",
     "limite_encerrado": "Pronto. O limite foi encerrado. A partir de agora, essa ação volta a pedir ficha.",
 }
+
+
+def aviso_de_encerrado(canceladas: int) -> str:
+    """O aviso de encerrar, dizendo quantas acoes liberadas pelo limite foram canceladas antes de sair."""
+    base = AVISOS_LIMITES["limite_encerrado"]
+    if canceladas <= 0:
+        return base + " Nenhuma ação liberada por ele esperava para sair."
+    if canceladas == 1:
+        return base + " 1 ação liberada por ele ainda esperava para sair e foi cancelada: nada dela chegou ao sistema."
+    return (
+        base + f" {canceladas} ações liberadas por ele ainda esperavam para sair e foram canceladas:"
+        " nada delas chegou ao sistema."
+    )
 
 
 def _json(valor: Any) -> Any:
@@ -176,7 +207,11 @@ def ler_pedido(
             erros.append("Escreva pelo menos um destinatário aceito, um por linha.")
         elif len(valores) > MAXIMO_VALORES or any(len(v) > MAXIMO_VALOR for v in valores):
             erros.append(f"Use até {MAXIMO_VALORES} destinatários, cada um com até {MAXIMO_VALOR} letras.")
-        destinatarios = [{"campo": campo, "valores": valores}]
+        # Os outros campos que podem dizer um destinatario entram vazios: a pessoa consentiu com estes
+        # destinatarios, e uma copia para outra pessoa nao passa sem ficha.
+        destinatarios = [{"campo": campo, "valores": valores}] + [
+            {"campo": outro, "valores": []} for outro in escolha.campos if outro != campo
+        ]
     elif tipo != "qualquer":
         erros.append("Diga para quais destinatários o limite vale.")
     por_dia = _numero(f.texto("por_dia"))
@@ -191,15 +226,24 @@ def ler_pedido(
 
 
 def destinatarios_legiveis(destinatarios: Any) -> str:
+    """Os destinatarios do limite numa frase, com os caracteres escondidos marcados (como na ficha)."""
     itens = _json(destinatarios) or []
     if not itens:
         return "Qualquer destinatário"
-    partes = []
+    partes: list[str] = []
+    vazios: list[str] = []
     for item in itens:
         if isinstance(item, dict):
-            valores = ", ".join(str(v) for v in item.get("valores") or [])
-            partes.append(f"{item.get('campo')}: {valores}")
-    return "Só " + "; ".join(partes)
+            campo = marcar_escondidos(str(item.get("campo")))
+            valores = [marcar_escondidos(str(v)) for v in item.get("valores") or []]
+            if valores:
+                partes.append(f"{campo}: {', '.join(valores)}")
+            else:
+                vazios.append(campo)
+    texto = "Só " + "; ".join(partes) if partes else "Nenhum destinatário"
+    if vazios:
+        texto += ". Precisam vir vazios: " + ", ".join(vazios)
+    return texto
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +289,17 @@ class TelasDeLimites:
 
     def _aviso(self, pedido: Request) -> str | None:
         codigo = pedido.query_params.get("aviso", "")
+        if codigo == "limite_encerrado" and "canceladas" in pedido.query_params:
+            canceladas = _numero(pedido.query_params.get("canceladas", "")) or 0
+            return aviso_de_encerrado(min(max(canceladas, 0), MAXIMO_CANCELADAS_NO_AVISO))
         return AVISOS_LIMITES.get(codigo) or AVISOS.get(codigo)
+
+    def _refazer(self, pedido: Request, sessao: Sessao, voltar: str) -> LoginRefeito | None:
+        """Sem a passkey, criar e ampliar pedem o login refeito na hora; com ela, nao (``None``)."""
+        return None if self.ligada else self.t.login_refeito(pedido, sessao, voltar)
+
+    def _falta_login(self, sessao: Sessao) -> bool:
+        return not self.ligada and not self.t.login_recente(sessao)
 
     async def _escolhas(self, c: AsyncConnection, pessoa_id: uuid.UUID) -> list[Escolha]:
         linhas = await consultas.ferramentas_de_acao(c, pessoa_id, VERSAO_MCP)
@@ -313,6 +367,9 @@ class TelasDeLimites:
                 "maximo_dias": maximo_dias,
                 "ligada": self.ligada,
                 "tem_passkey": tem_passkey,
+                "refazer": self._refazer(pedido, sessao, "/telas/limites/novo?" + urlencode({"escolha": chave})),
+                "pede": "Criar um limite pede um login refeito na hora, porque a passkey está desligada"
+                " nesta instalação.",
                 "erros": erros or [],
                 "valores": valores or {},
             },
@@ -363,6 +420,8 @@ class TelasDeLimites:
             ):
                 erros = ["Você já tem um limite igual valendo para esta ação. Amplie o que existe."]
                 status = 409
+            if lido is not None and not erros and self._falta_login(sessao):
+                erros, status = [LOGIN_REFEITO_LIMITE], 403
             if lido is not None and not erros and self.ligada:
                 # A passkey e conferida aqui, na mesma transacao que cria. Recusada, o desafio fica gasto.
                 negada = await passkeys.conferir(c, self.cer, pessoa_id, "limite", lido.alvo(), f.texto("credencial"))
@@ -425,10 +484,15 @@ class TelasDeLimites:
             "acoes/limite.html",
             {
                 "l": _limite(linha),
-                "maximo_dia": max(maximo_dia, int(linha.por_dia)),
+                "minimo_dia": min(int(linha.por_dia), maximo_dia),
+                "maximo_dia": maximo_dia,
+                "acima_do_teto": int(linha.por_dia) > maximo_dia,
                 "maximo_dias": maximo_dias,
                 "ligada": self.ligada,
                 "tem_passkey": tem_passkey,
+                "refazer": self._refazer(pedido, sessao, f"/telas/limites/{limite_id}"),
+                "pede": "Ampliar um limite pede um login refeito na hora, porque a passkey está desligada"
+                " nesta instalação.",
                 "aviso": self._aviso(pedido),
                 "erros": erros or [],
             },
@@ -444,13 +508,20 @@ class TelasDeLimites:
     ) -> tuple[int, int, list[str]]:
         erros: list[str] = []
         atual = int(linha.por_dia)
-        teto = max(maximo_dia, atual)
+        # O teto e o de agora: um limite que ficou acima dele (a politica baixou) so renova ate o teto.
+        teto = maximo_dia
+        piso = min(atual, teto)
         por_dia = _numero(f.texto("por_dia")) or 0
         dias = _numero(f.texto("dias")) or 0
         if str(linha.situacao) != "ativo":
             return por_dia, dias, ["Só um limite que vale agora pode ser ampliado. Crie outro."]
-        if not atual <= por_dia <= teto:
-            erros.append(f"A quantidade por dia vai de {atual} a {teto}. Para diminuir, encerre e crie outro.")
+        if not piso <= por_dia <= teto:
+            if atual > teto:
+                erros.append(
+                    f"O teto mudou: agora vai até {teto} por dia. Para renovar, este limite passa a {teto} por dia."
+                )
+            else:
+                erros.append(f"A quantidade por dia vai de {atual} a {teto}. Para diminuir, encerre e crie outro.")
         if not 1 <= dias <= maximo_dias:
             erros.append(f"O prazo vai de 1 a {maximo_dias} dias, contados de hoje.")
         cresce = por_dia > atual or datetime.now(UTC) + timedelta(days=dias) > linha.valido_ate
@@ -502,9 +573,18 @@ class TelasDeLimites:
                 )
                 if negada is not None:
                     erros, status = [negada], 403
+            if not erros and self._falta_login(sessao):
+                erros, status = [LOGIN_REFEITO_LIMITE], 403
             if not erros:
                 feito = await consultas.ampliar_limite(
-                    c, pessoa_id=pessoa_id, limite_id=limite_id, por_dia=por_dia, dias=dias, com_passkey=self.ligada
+                    c,
+                    pessoa_id=pessoa_id,
+                    limite_id=limite_id,
+                    por_dia=por_dia,
+                    dias=dias,
+                    teto_dia=maximo_dia,
+                    teto_dias=maximo_dias,
+                    com_passkey=self.ligada,
                 )
                 if feito is None:
                     erros, status = ["Este limite não vale mais. Nada mudou."], 409
@@ -530,6 +610,7 @@ class TelasDeLimites:
         await self.t.formulario(pedido, sessao)
         limite_id: uuid.UUID = pedido.path_params["limite_id"]
         feito: Row[Any] | None = None
+        canceladas = 0
         async with self.t.engine.begin() as c:
             linha = await consultas.limite_da_pessoa(c, sessao.pessoa.id, limite_id, FUSO)
             if linha is not None:
@@ -537,6 +618,7 @@ class TelasDeLimites:
                     c, pessoa_id=sessao.pessoa.id, limite_id=limite_id, motivo=MOTIVO_ENCERRADO
                 )
             if feito is not None and linha is not None:
+                canceladas = await self._cancelar_liberadas(c, limite_id)
                 await self.t.extrato(
                     c,
                     "limite_encerrado",
@@ -545,11 +627,26 @@ class TelasDeLimites:
                     aplicativo_id=linha.aplicativo_id,
                     sistema_id=linha.sistema_id,
                     ferramenta=linha.ferramenta,
-                    dados={"limite_id": str(limite_id)},
+                    dados={"limite_id": str(limite_id), "canceladas": canceladas},
                 )
         if linha is None:
             return self.t.erro(pedido, 404, "Limite não encontrado", "Este limite não é seu ou não existe.")
         if feito is None:
             return ver_depois(f"/telas/limites/{limite_id}", "ja_terminou")
-        log.info("telas_limite_encerrado")
-        return ver_depois("/telas/limites", "limite_encerrado")
+        log.info("telas_limite_encerrado", canceladas=canceladas)
+        return RedirectResponse(
+            "/telas/limites?" + urlencode({"aviso": "limite_encerrado", "canceladas": canceladas}), status_code=303
+        )
+
+    async def _cancelar_liberadas(self, c: AsyncConnection, limite_id: uuid.UUID) -> int:
+        """Na transacao que encerra: cancela o que este limite liberou e ainda espera a hora de sair.
+
+        O que o despachante ja marcou "enviando" nao muda (``fila.parar`` so tira de antes de sair)."""
+        canceladas = 0
+        for fila_id in await consultas.liberadas_pelo_limite(c, limite_id):
+            op = await fila.por_fila(c, fila_id)
+            if op is not None and await fila.parar(
+                c, op, Estado.CANCELADA, MOTIVO_CANCELADA, quem="pessoa", papel="entrada"
+            ):
+                canceladas += 1
+        return canceladas

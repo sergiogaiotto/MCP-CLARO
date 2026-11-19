@@ -2,7 +2,10 @@
 
 Bloquear, cancelar e enviar a mesma acao: so um acontece. Bloqueio no meio de uma fila cheia: nada segue
 depois dele, e o comprovante bate com o historico. Duas portas no mesmo banco: so uma envia, e a que
-herda nao reenvia. Pedidos iguais ao mesmo tempo: um protocolo so.
+herda nao reenvia. Pedidos iguais ao mesmo tempo: um protocolo so. Regras da porta por dentro: a queda da
+conexao da trava impede a gravacao de "enviando", o aviso do banco (LISTEN/NOTIFY) acorda a porta sem esperar a
+varredura, e a resposta que chega depois da retomada so vai ao extrato e a tela. Restauracao pela conferencia de
+continuidade de verdade, com a fila cheia: a saida fecha, a fila para, e nada sai.
 
 O app do despachante sobe aqui sem a porta dele: cada teste usa ``PortaDeSaida`` direto (papel
 ``mcp_claro_despachante`` e ``CifraFalsa``), para escolher o momento de cada passo. As pausas forcadas
@@ -24,6 +27,7 @@ import httpx2
 import pytest
 from sqlalchemy import text
 
+from mcp_claro import continuidade
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import FerramentaVitrine
 from mcp_claro.config.settings import Parametros
@@ -36,6 +40,7 @@ from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.fila import Operacao
 from mcp_claro.saida.pedidos import AcaoRecusada, Pedido, Pedidos
 from mcp_claro.saida.protocolo import chave_pedido_igual
+from mcp_claro.telas.acoes import montar, textos_do_resultado
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 from tests.integracao.test_autorizacao import Ambiente
 from tests.integracao.test_saida import ambiente_de_acoes, chamadas, chamar, esperar_estado, meta, operacao, politica
@@ -78,9 +83,11 @@ async def limpar(amb: Ambiente) -> None:
 
 
 @contextlib.asynccontextmanager
-async def ambiente_sem_porta(banco: Parametros, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Ambiente]:
+async def ambiente_sem_porta(
+    banco: Parametros, monkeypatch: pytest.MonkeyPatch, *, extra: dict[str, Any] | None = None
+) -> AsyncIterator[Ambiente]:
     monkeypatch.setattr(despachante_app, "PortaDeSaida", PortaDesligada)
-    async with ambiente_de_acoes(banco, monkeypatch) as a:
+    async with ambiente_de_acoes(banco, monkeypatch, extra=extra) as a:
         await politica(a, CONFIRM_CAP_PER_HOUR=1000)
         await sem_sobras(a)
         try:
@@ -185,13 +192,16 @@ async def desbloquear(amb: Ambiente, b: bloqueios.Bloqueio) -> None:
 
 
 async def comprovante(amb: Ambiente, b: bloqueios.Bloqueio) -> tuple[dict[str, str], dict[str, str]]:
-    """(paradas, ja_saidas) do comprovante: protocolo -> estado que o comprovante guardou."""
+    """(paradas, saidas) do comprovante: protocolo -> estado que o comprovante guardou.
+
+    ``saidas`` junta as duas partes do que nao parou a tempo: o que ja tinha seguido e o que ainda esta em
+    conferencia (por exemplo, "enviando" na hora do bloqueio)."""
     async with amb.entrada_db.connect() as c:
         comp = await fila.comprovante_do_bloqueio(c, b.id)
     assert comp is not None
     return (
         {p["protocolo"]: p["estava"] for p in comp.paradas},
-        {s["protocolo"]: s["estado"] for s in comp.ja_saidas},
+        {s["protocolo"]: s["estado"] for s in [*comp.ja_saidas, *comp.em_conferencia]},
     )
 
 
@@ -471,7 +481,7 @@ async def test_bloqueio_no_meio_da_fila_cheia_para_o_resto_e_o_comprovante_bate(
                 frase = (
                     await c.execute(
                         text(
-                            "SELECT frase FROM extrato WHERE tipo = 'comprovante_bloqueio'"
+                            "SELECT frase FROM extrato WHERE tipo = 'comprovante_bloqueio_partes'"
                             " AND dados ->> 'bloqueio_id' = :b"
                         ),
                         {"b": str(b.id)},
@@ -479,7 +489,11 @@ async def test_bloqueio_no_meio_da_fila_cheia_para_o_resto_e_o_comprovante_bate(
                 ).scalar_one()
             assert quem == {f"bloqueio:{b.id}"}
             assert f"{len(paradas)} acoes paradas" in frase
-            assert f"{len(saidas)} ja tinham saido" in frase
+            async with amb.entrada_db.connect() as c:
+                comp = await fila.comprovante_do_bloqueio(c, b.id)
+            assert comp is not None
+            assert len(comp.ja_saidas) + len(comp.em_conferencia) == len(saidas)
+            assert f"{len(comp.ja_saidas)} ja tinham saido; {len(comp.em_conferencia)} ainda em conferencia" in frase
 
             # O historico: o sistema recebeu exatamente as que o comprovante da como saidas, uma vez cada.
             chegaram = [t for t in await caixa(amb) if t in titulos]
@@ -697,21 +711,43 @@ async def test_pedidos_ao_mesmo_tempo_no_teto_de_fichas_recusam_sem_impasse(amb:
     assert aplicativo is not None
     f = await vitrine(amb)
     await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": "Chega ao teto"}, None))
+    async with amb.admin.connect() as c:
+        # A limpeza do arranjo fecha as pausas de antes: daqui em diante, o que aparecer e desta rodada.
+        desde = (await c.execute(text("SELECT coalesce(max(id), 0) FROM extrato"))).scalar_one()
     lote = [Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Passa do teto {n}"}, None) for n in range(4)]
     resultados = await asyncio.gather(*(pedidos.pedir(p) for p in lote), return_exceptions=True)
     recusas = [r for r in resultados if isinstance(r, AcaoRecusada) and r.motivo == "teto_confirmacoes"]
     assert len(recusas) == len(lote), [type(r).__name__ for r in resultados]
     async with amb.admin.connect() as c:
-        pausas = (
-            await c.execute(
-                text(
-                    "SELECT count(*) FROM bloqueios WHERE aplicativo_id = :a AND encerrado_em IS NULL"
-                    " AND alcance = 'aplicativo' AND tipo = 'pausa'"
-                ),
-                {"a": amb.aplicativo_id},
-            )
+        pausas = list(
+            (
+                await c.execute(
+                    text(
+                        "SELECT id FROM bloqueios WHERE aplicativo_id = :a AND encerrado_em IS NULL"
+                        " AND alcance = 'aplicativo' AND tipo = 'pausa'"
+                    ),
+                    {"a": amb.aplicativo_id},
+                )
+            ).scalars()
+        )
+        comprovantes = (
+            await c.execute(text("SELECT count(*) FROM comprovantes WHERE bloqueio_id = ANY(:b)"), {"b": pausas})
         ).scalar_one()
-    assert pausas >= 1
+        tipos = Counter(
+            (
+                await c.execute(
+                    text("SELECT tipo FROM extrato WHERE id > :d AND aplicativo_id = :a"),
+                    {"d": desde, "a": amb.aplicativo_id},
+                )
+            ).scalars()
+        )
+    # Dois pedidos no teto ao mesmo tempo ligam uma pausa so: um comprovante e uma linha "pausa ligada".
+    assert len(pausas) == 1, pausas
+    assert comprovantes == 1
+    assert tipos["pausa_ligada"] == 1, tipos
+    assert tipos["comprovante_bloqueio_partes"] == 1, tipos
+    # Cada recusa fica no extrato com a frase do teto.
+    assert tipos["teto_confirmacoes"] == len(lote), tipos
 
 
 async def test_linha_travada_por_outra_transacao_nao_segura_a_fila(amb: Ambiente) -> None:
@@ -746,3 +782,271 @@ async def test_linha_travada_por_outra_transacao_nao_segura_a_fila(amb: Ambiente
         tarefa.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await tarefa
+
+
+# --- (f) Regras da porta por dentro --------------------------------------------------------------
+
+
+async def backend_da_trava(amb: Ambiente) -> int:
+    """PID da conexao que segura a trava ``DESPACHANTE_UNICO``."""
+    classe, objeto = _partes(travas.DESPACHANTE_UNICO)
+    async with amb.admin.connect() as c:
+        return int(
+            (
+                await c.execute(
+                    text(
+                        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted"
+                        " AND classid = :c AND objid = :o AND objsubid = 1"
+                    ),
+                    {"c": classe, "o": objeto},
+                )
+            ).scalar_one()
+        )
+
+
+async def sem_trava(amb: Ambiente) -> None:
+    async def livre() -> bool:
+        return await travas_do_despachante(amb) == 0
+
+    await esperar(livre, passo=0.05)
+
+
+async def test_queda_da_conexao_da_trava_antes_de_marcar_enviando_nao_envia(amb: Ambiente) -> None:
+    """Toda gravacao de "enviando" usa a conexao que segura a trava: se ela cai, a gravacao falha."""
+    op = await nova_acao(amb, "Trava cai antes de enviando")
+    # Varredura longa: depois da queda, a porta so tenta de novo daqui a 3 s.
+    p = PortaComPausa(amb.despachante_db, amb.cifra, varredura=3.0, prazo_envio=5.0)
+    tarefa = asyncio.create_task(p.rodar())
+    try:
+        await asyncio.wait_for(p.na_conferencia.wait(), 15)
+        assert (await operacao(amb, op.protocolo)).estado == Estado.LIBERADA
+        pid = await backend_da_trava(amb)
+        async with amb.admin.begin() as c:
+            assert (await c.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})).scalar_one()
+        await sem_trava(amb)
+        p.segue.set()  # a porta tenta marcar "enviando" na conexao que caiu
+        await esperar(lambda: not p.assumiu.is_set())  # o turno terminou com erro
+        assert (await operacao(amb, op.protocolo)).estado == Estado.LIBERADA
+        assert chamadas(amb, "criar_chamado") == 0, "a gravacao de enviando devia falhar com a trava"
+
+        # A porta assume de novo e envia, uma vez so.
+        await esperar_estado(amb, op.protocolo, Estado.ENVIADA, prazo=20)
+        assert chamadas(amb, "criar_chamado") == 1
+    finally:
+        p.segue.set()
+        tarefa.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tarefa
+
+
+async def test_porta_acorda_pelo_aviso_do_banco_sem_esperar_a_varredura(amb: Ambiente) -> None:
+    """LISTEN/NOTIFY: com varredura de 30 s, a acao confirmada sai em menos de 2 s."""
+    p = porta(amb)
+    p.varredura = 30.0
+    tarefa = asyncio.create_task(p.rodar())
+    try:
+        await asyncio.wait_for(p.assumiu.wait(), 15)
+        await asyncio.sleep(1.0)  # a porta ja dorme a espera longa
+        inicio = asyncio.get_running_loop().time()
+        op = await nova_acao(amb, "Acorda pelo aviso")
+        await esperar_estado(amb, op.protocolo, Estado.ENVIADA, prazo=2.0)
+        assert asyncio.get_running_loop().time() - inicio < 2.0
+        assert chamadas(amb, "criar_chamado") == 1
+
+        # Seguir agora tambem acorda a porta: a espera de 10 minutos acaba na hora.
+        espera = await nova_acao(amb, "Seguir agora acorda", espera=600)
+        await asyncio.sleep(0.5)
+        assert (await operacao(amb, espera.protocolo)).estado == Estado.LIBERADA
+        async with amb.entrada_db.begin() as c:
+            await fila.seguir_agora(c, espera.id, pessoa_id=amb.ana_id)
+        await esperar_estado(amb, espera.protocolo, Estado.ENVIADA, prazo=2.0)
+        assert chamadas(amb, "criar_chamado") == 2
+    finally:
+        tarefa.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tarefa
+
+
+async def test_resposta_que_chega_depois_da_retomada_so_vai_ao_extrato_e_a_tela(amb: Ambiente) -> None:
+    """A dona antiga perde a trava no meio do envio, mas continua viva e recebe a resposta depois de a nova
+    dona dar a acao como nao confirmada: o estado nao muda, a resposta fica guardada e vai ao extrato."""
+    solta = asyncio.Event()
+    chegou = asyncio.Event()
+
+    async def chamar_devagar(*args: Any, **kwargs: Any) -> cliente.Resposta:
+        resposta = await cliente.chamar_ferramenta(*args, **kwargs)  # o sistema executou
+        chegou.set()
+        await solta.wait()  # a resposta demora a voltar a dona antiga
+        return resposta
+
+    antiga = porta(amb, chamar=chamar_devagar)
+    nova = porta(amb)
+    tarefas = [asyncio.create_task(antiga.rodar())]
+    try:
+        await asyncio.wait_for(antiga.assumiu.wait(), 15)
+        op = await nova_acao(amb, "Resposta depois da retomada")
+        await asyncio.wait_for(chegou.wait(), 15)
+        assert (await operacao(amb, op.protocolo)).estado == Estado.ENVIANDO
+        assert chamadas(amb, "criar_chamado") == 1
+
+        # A conexao da trava da dona antiga cai; a dona antiga segue esperando a resposta, sem ser cancelada.
+        pid = await backend_da_trava(amb)
+        async with amb.admin.begin() as c:
+            assert (await c.execute(text("SELECT pg_terminate_backend(:p)"), {"p": pid})).scalar_one()
+        await sem_trava(amb)
+        tarefas.append(asyncio.create_task(nova.rodar()))
+        await asyncio.wait_for(nova.assumiu.wait(), 15)
+        nc = await esperar_estado(amb, op.protocolo, Estado.NAO_CONFIRMADA)
+        assert nc.desfecho == "interrompida no envio"
+        assert nc.resultado is None
+
+        # A resposta chega a dona antiga: so entra no extrato e na tela de decisao.
+        solta.set()
+
+        async def guardada() -> bool:
+            return (await operacao(amb, op.protocolo)).resultado is not None
+
+        await esperar(guardada)
+        depois = await operacao(amb, op.protocolo)
+        assert depois.estado == Estado.NAO_CONFIRMADA
+        assert depois.desfecho == "o sistema respondeu (resposta depois da retomada)"
+        assert depois.resultado is not None
+        assert "Feito: criar_chamado" in " ".join(textos_do_resultado(depois.resultado))
+        assert "Feito: criar_chamado" in " ".join(montar(depois).textos)  # o que a tela da acao mostra
+        async with amb.admin.connect() as c:
+            enviada = (
+                await c.execute(
+                    text("SELECT dados FROM extrato WHERE tipo = 'acao_enviada' AND protocolo = :p"),
+                    {"p": op.protocolo},
+                )
+            ).all()
+        assert len(enviada) == 1
+        assert enviada[0].dados["gravado"] is False
+        await asyncio.sleep(1.0)  # cinco varreduras da nova dona
+        assert chamadas(amb, "criar_chamado") == 1
+        assert (await operacao(amb, op.protocolo)).estado == Estado.NAO_CONFIRMADA
+    finally:
+        solta.set()
+        for t in tarefas:
+            t.cancel()
+        for t in tarefas:
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+
+
+# --- (g) Restauracao de verdade, com a fila cheia ------------------------------------------------
+
+
+async def reativar(amb: Ambiente, ids: tuple[uuid.UUID, ...]) -> None:
+    if ids:
+        async with amb.admin.begin() as c:
+            await c.execute(text("UPDATE aplicativos SET situacao = 'ativo' WHERE id = ANY(:i)"), {"i": list(ids)})
+
+
+@pytest.mark.parametrize("sinal", ["marca_restaurado", "identificador_mudou"])
+async def test_restauracao_pela_conferencia_fecha_a_saida_e_nada_sai(amb: Ambiente, sinal: str) -> None:
+    pausados: tuple[uuid.UUID, ...] = ()
+    nunca = asyncio.Event()
+
+    async def chamar_e_cair(*args: Any, **kwargs: Any) -> cliente.Resposta:
+        resposta = await cliente.chamar_ferramenta(*args, **kwargs)
+        await nunca.wait()  # o despachante cai com a resposta na mao
+        return resposta
+
+    # Partida anterior conferida: a ultima linha da continuidade e a do banco como esta.
+    base = await continuidade.conferir_continuidade(amb.despachante_db, 0, exigir_vigia=False)
+    pausados += base.aplicativos_pausados
+    await reativar(amb, pausados)
+    if not (await situacao_da_saida(amb)):
+        assert await continuidade.reabrir_saida(amb.entrada_db, f"admin:{amb.admin_id}", "Arranjo do teste")
+
+    antiga = porta(amb, chamar=chamar_e_cair)
+    nova = porta(amb)
+    tarefas = []
+    try:
+        esperando = await nova_acao(amb, "Restauracao esperando a ficha", confirmada=False)
+        liberada = await nova_acao(amb, "Restauracao liberada na espera", espera=600)
+        tarefas.append(asyncio.create_task(antiga.rodar()))
+        enviando = await nova_acao(amb, "Restauracao no meio do envio")
+        await esperar_estado(amb, enviando.protocolo, Estado.ENVIANDO)
+        await esperar(lambda: chamadas(amb, "criar_chamado") == 1)
+        tarefas[0].cancel()  # o despachante cai; a trava vai junto
+        with contextlib.suppress(asyncio.CancelledError):
+            await tarefas[0]
+        await sem_trava(amb)
+
+        # O banco volta de uma copia: marca do roteiro, ou outro identificador.
+        if sinal == "marca_restaurado":
+            await continuidade.marcar_restaurado(amb.despachante_db, "Pessoa da operacao", "Ensaio com a fila cheia")
+        else:
+            async with amb.admin.begin() as c:
+                tl = (await c.execute(text("SELECT timeline_id FROM continuidade_controle()"))).scalar_one()
+                await c.execute(
+                    text(
+                        "INSERT INTO continuidade_banco (system_identifier, timeline_id, desfecho)"
+                        " VALUES ('1', :t, 'confere')"
+                    ),
+                    {"t": tl},
+                )
+
+        # A partida do despachante: a conferencia (com o papel do despachante) e, depois, a porta.
+        r = await continuidade.conferir_continuidade(amb.despachante_db, 0, exigir_vigia=False)
+        pausados += r.aplicativos_pausados
+        assert r.desfecho == "nao_confere"
+        assert sinal in r.motivos
+        assert amb.aplicativo_id in r.aplicativos_pausados
+        assert not await situacao_da_saida(amb)
+        for o in (esperando, liberada):
+            parada = await operacao(amb, o.protocolo)
+            assert parada.estado == Estado.PARADA_POR_RESTAURACAO, o.protocolo
+            assert parada.desfecho == "parada por restauracao"
+        duvida = await operacao(amb, enviando.protocolo)
+        assert duvida.estado == Estado.NAO_CONFIRMADA
+        assert duvida.desfecho == "interrompida no envio"
+        async with amb.admin.connect() as c:
+            linha = (
+                await c.execute(
+                    text(
+                        "SELECT frase, dados FROM extrato WHERE tipo = 'fila_parada_restauracao'"
+                        " ORDER BY id DESC LIMIT 1"
+                    )
+                )
+            ).one()
+        assert linha.dados["enviando_com_dono"] == 0
+
+        tarefas.append(asyncio.create_task(nova.rodar()))
+        await asyncio.wait_for(nova.assumiu.wait(), 15)
+        await asyncio.sleep(1.5)  # varias varreduras com a saida fechada
+        assert chamadas(amb, "criar_chamado") == 1
+        assert esperando.ficha_id is not None
+        with pytest.raises(fila.DecisaoRecusada):
+            async with amb.entrada_db.begin() as c:
+                await fila.confirmar_ficha(
+                    c, esperando.ficha_id, pessoa_id=amb.ana_id, com_passkey=False, espera_segundos=0, rapida_segundos=0
+                )
+        with pytest.raises(fila.DecisaoRecusada):
+            async with amb.entrada_db.begin() as c:
+                await fila.seguir_agora(c, liberada.id, pessoa_id=amb.ana_id)
+
+        # Reaberta a saida por decisao do ADMIN, nada do que parou sai sem nova confirmacao.
+        assert await continuidade.reabrir_saida(amb.entrada_db, f"admin:{amb.admin_id}", "Conferido no ensaio")
+        await asyncio.sleep(1.5)
+        assert not await porta(amb).enviar_uma()
+        assert chamadas(amb, "criar_chamado") == 1
+        estados = [(await operacao(amb, o.protocolo)).estado for o in (esperando, liberada, enviando)]
+        assert estados == [Estado.PARADA_POR_RESTAURACAO, Estado.PARADA_POR_RESTAURACAO, Estado.NAO_CONFIRMADA]
+    finally:
+        nunca.set()
+        for t in tarefas:
+            t.cancel()
+        for t in tarefas:
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+        if not await situacao_da_saida(amb):
+            await continuidade.reabrir_saida(amb.entrada_db, f"admin:{amb.admin_id}", "Fim do teste")
+        await reativar(amb, pausados)
+
+
+async def situacao_da_saida(amb: Ambiente) -> bool:
+    async with amb.admin.connect() as c:
+        return bool((await c.execute(text("SELECT aberta FROM estado_saida WHERE id = 1"))).scalar_one())

@@ -1,12 +1,14 @@
 """Numero de protocolo, codigo de conferencia e chave do pedido igual.
 
-- Protocolo: ``CLR-AAAA-NNNNNNNN``, da sequencia ``protocolo_seq`` (unica por instalacao), com o ano de
-  Brasilia. E o que a pessoa e o aplicativo usam para consultar uma acao.
+- Protocolo: ``CLR-AAAA-NNNNNNNN`` (oito digitos ou mais), da sequencia ``protocolo_seq`` (unica por
+  instalacao), com o ano de Brasilia. E o que a pessoa e o aplicativo usam para consultar uma acao. Na
+  restauracao do banco, a sequencia salta para frente, e um numero dado antes da copia nao volta.
 - Codigo de conferencia: resumo do que vai seguir ao sistema (sistema, nome original da ferramenta e
   argumentos canonicos), em 12 letras e numeros faceis de ler. A ficha mostra o mesmo codigo, e o
   despachante recalcula antes de enviar: se nao bater, nada sai.
-- Chave do pedido igual: pessoa, aplicativo, ferramenta e argumentos canonicos. Dentro de
-  ``DUPLICATE_WINDOW_MINUTES``, um pedido igual devolve a operacao original em vez de criar outra.
+- Chave do pedido igual: pessoa, aplicativo, ferramenta e argumentos canonicos. Um pedido igual devolve a
+  operacao original em vez de criar outra: em qualquer idade, se ela ainda pode sair; por
+  ``DUPLICATE_WINDOW_MINUTES``, se ela ja saiu ou ficou nao confirmada (``fila.pedido_igual``).
 """
 
 from __future__ import annotations
@@ -21,7 +23,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 FUSO: Final = "America/Sao_Paulo"
-PADRAO_PROTOCOLO: Final = re.compile(r"^CLR-[0-9]{4}-[0-9]{8}$")
+# Oito digitos ou mais: depois de uma restauracao, a sequencia salta para frente (ver
+# ``fila.parar_por_restauracao``), e o numero pode passar de oito digitos.
+PADRAO_PROTOCOLO: Final = re.compile(r"^CLR-[0-9]{4}-[0-9]{8,}$")
 
 # Sem 0/O, 1/I/L e 5/S: o codigo e lido por pessoas, em voz alta ou de uma tela para outra.
 _ALFABETO: Final = "ABCDEFGHJKMNPQRTUVWXYZ2346789"

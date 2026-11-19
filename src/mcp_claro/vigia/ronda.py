@@ -109,4 +109,7 @@ class RondaDeFora:
         CONTADORES.somar("vigia_rondas", desfecho=desfecho)
         if resumo.falhou:
             log.warning("vigia_ronda_passagem_indevida", casos=[t.caso for t in resumo.passagens], seguidas=seguidas)
+        elif not resumo.controle_ok:
+            # Sem controle em dia (por exemplo, o programa do vigia pausado ou sem cadastro): a vitrine nao foi testada.
+            log.warning("vigia_ronda_inconclusiva")
         return RondaVigia(rodada, tentativas, seguidas, alarmou)

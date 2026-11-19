@@ -442,8 +442,11 @@ class Parametros(BaseSettings):
             erros.append("FEATURE_PHASE3_THIRD_PARTY exige FEATURE_PHASE2_ACT (decisao 10).")
         if self.FEATURE_PHASE4_BADGES and not self.FEATURE_PHASE3_THIRD_PARTY:
             erros.append("FEATURE_PHASE4_BADGES exige FEATURE_PHASE3_THIRD_PARTY (decisao 10).")
-        if self.PROGRAM_ACTIONS_ENABLED and not self.FEATURE_PHASE2_ACT:
-            erros.append("PROGRAM_ACTIONS_ENABLED exige FEATURE_PHASE2_ACT (decisao 9).")
+        if self.PROGRAM_ACTIONS_ENABLED:
+            erros.append(
+                "PROGRAM_ACTIONS_ENABLED ainda nao liga: as acoes de programas ainda nao tem as pendencias do"
+                " responsavel nem a reconferencia completa. Ligam depois, por decisao registrada (decisao 9)."
+            )
         if self.OBS_EXPORT_CONTENT:
             erros.append("OBS_EXPORT_CONTENT nao muda no comeco: rastros saem sem conteudo.")
         metodos_ok = {"private_key_jwt", "client_secret"}

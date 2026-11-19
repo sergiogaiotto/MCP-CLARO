@@ -8,6 +8,8 @@
   gasto antes da conferencia da assinatura: se ela nao bater, ele nao serve de novo.
 - O autenticador precisa verificar a pessoa (``userVerification`` exigida) e o contador tem de subir.
 - Com ``FEATURE_PASSKEY`` desligado, as telas dizem que a passkey esta desligada nesta instalacao.
+- Cadastrar e desativar uma passkey pedem sempre o login refeito na hora (``Telas.login_recente``): quem so tem
+  o cookie de uma sessao antiga nao troca a passkey da pessoa pela sua sem passar de novo pelo provedor.
 """
 
 from __future__ import annotations
@@ -53,6 +55,11 @@ PRAZO_DESAFIO_SEGUNDOS: Final = 120
 TEMPO_NAVEGADOR_MS: Final = 60_000
 MAXIMO_CREDENCIAL: Final = 16 * 1024
 MAXIMO_APELIDO: Final = 60
+
+LOGIN_REFEITO_PASSKEY: Final = (
+    "Para cadastrar ou desativar uma passkey, entre de novo agora (login refeito na hora) e tente outra vez."
+    " Nada mudou."
+)
 
 AVISOS_PASSKEY: Final[dict[str, str]] = {
     "passkey_cadastrada": "Pronto. A passkey foi cadastrada. Use-a para confirmar ações de risco alto e limites.",
@@ -318,6 +325,8 @@ class TelasDePasskeys:
             {
                 "passkeys": linhas,
                 "ligada": self.t.p.FEATURE_PASSKEY,
+                "refazer": self.t.login_refeito(pedido, sessao, "/telas/passkeys"),
+                "pede": "Cadastrar ou desativar uma passkey pede um login refeito na hora, como cuidado a mais.",
                 "aviso": AVISOS_PASSKEY.get(codigo) or AVISOS.get(codigo),
                 "erros": erros or [],
             },
@@ -334,6 +343,9 @@ class TelasDePasskeys:
         await self.t.formulario(pedido, sessao)
         if not self.t.p.FEATURE_PASSKEY:
             return resposta_desafio(None, "A passkey está desligada nesta instalação.", status=409)
+        if not self.t.login_recente(sessao):
+            log.info("passkey_pede_login_refeito")
+            return resposta_desafio(None, LOGIN_REFEITO_PASSKEY, status=403)
         async with self.t.engine.begin() as c:
             opcoes = await opcoes_cadastro(c, self.cer, sessao)
         return resposta_desafio(opcoes)
@@ -344,6 +356,9 @@ class TelasDePasskeys:
         f = await self.t.formulario(pedido, sessao)
         if not self.t.p.FEATURE_PASSKEY:
             return await self._pagina(pedido, erros=["A passkey está desligada nesta instalação."], status=409)
+        if not self.t.login_recente(sessao):
+            log.info("passkey_pede_login_refeito")
+            return await self._pagina(pedido, erros=[LOGIN_REFEITO_PASSKEY], status=403)
         async with self.t.engine.begin() as c:
             feito = await cadastrar(c, self.cer, sessao.pessoa.id, f.texto("credencial"), f.texto("apelido"))
             if isinstance(feito, uuid.UUID):
@@ -360,6 +375,9 @@ class TelasDePasskeys:
         sessao = await self.t.exigir_sessao(pedido)
         await self.t.formulario(pedido, sessao)
         passkey_id: uuid.UUID = pedido.path_params["passkey_id"]
+        if not self.t.login_recente(sessao):
+            log.info("passkey_pede_login_refeito")
+            return await self._pagina(pedido, erros=[LOGIN_REFEITO_PASSKEY], status=403)
         async with self.t.engine.begin() as c:
             mudou = (
                 await c.execute(

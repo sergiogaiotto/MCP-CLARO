@@ -17,7 +17,10 @@ Antes de cada pedido, a entrada consulta o estado da entrada (fechada recusa
 tudo; so de leitura aceita so a classe "le") e os bloqueios ativos (pessoa,
 aplicativo, par, sistema ou tudo). A vitrine esconde as ferramentas de sistema
 bloqueado ou pausado. Cada leitura passa pela catraca diaria da ordem de
-servico. Toda recusa vai ao extrato com frase legivel.
+servico. Toda recusa vai ao extrato com frase legivel: ``leitura_recusada``
+para leitura (ou ferramenta ainda desconhecida) e ``acao_recusada`` para acao.
+Com a porta de saida fechada, a acao e recusada antes de virar protocolo
+(``Pedidos.pedir``); a leitura segue a regra do despachante.
 """
 
 from __future__ import annotations
@@ -195,11 +198,12 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         CONTADORES.somar("vitrine_listada")
         return types.ListToolsResult(tools=tools, ttl_ms=0, cache_scope="private")
 
-    async def recusar(q: Quem, ferramenta: str, motivo: str, mensagem: str, trace: str | None) -> Recusa:
+    async def recusar(
+        q: Quem, ferramenta: str, motivo: str, mensagem: str, trace: str | None, tipo: str = "leitura_recusada"
+    ) -> Recusa:
+        """Recusa legivel e linha no extrato. ``tipo`` e ``acao_recusada`` quando a ferramenta e uma acao."""
         async with engine.begin() as c:
-            linha = await programas.linha(
-                c, q.aplicativo, "leitura_recusada", {"ferramenta": ferramenta[:128], "motivo": motivo}
-            )
+            linha = await programas.linha(c, q.aplicativo, tipo, {"ferramenta": ferramenta[:128], "motivo": motivo})
             await registrar(
                 c,
                 papel="entrada",
@@ -213,6 +217,12 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         CONTADORES.somar("chamadas_recusadas", motivo=motivo)
         return Recusa(mensagem, motivo)
 
+    async def tipo_da_recusa(q: Quem, nome: str) -> str:
+        """Recusa antes de olhar a ferramenta (entrada fechada, bloqueio): o extrato diz se era uma acao."""
+        async with engine.connect() as c:
+            f = await repositorio.ferramenta_na_vitrine(c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP)
+        return "acao_recusada" if f is not None and f.classe != "le" else "leitura_recusada"
+
     async def chamar(ctx: ServerRequestContext[Any], params: types.CallToolRequestParams) -> types.CallToolResult:
         if nulos := _campos_nulos(params):
             raise MCPError(code=types.INVALID_PARAMS, message=f"{', '.join(nulos)} nao pode ser null.")
@@ -220,10 +230,12 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         trace = _traceparent(ctx, p)
         entrada, vigentes = await portas(q)
         if entrada.fechada:
-            raise await recusar(q, params.name, entrada.motivo_recusa(), entrada.mensagem(), trace)
+            tipo = await tipo_da_recusa(q, params.name)
+            raise await recusar(q, params.name, entrada.motivo_recusa(), entrada.mensagem(), trace, tipo)
         if vigentes.geral is not None:
             b = vigentes.geral
-            raise await recusar(q, params.name, b.motivo_recusa(), b.mensagem(), trace)
+            tipo = await tipo_da_recusa(q, params.name)
+            raise await recusar(q, params.name, b.motivo_recusa(), b.mensagem(), trace, tipo)
         if params.name == saida_pedidos.CONSULTA and acoes_ligadas(q):
             return await consultar(q, params)
         async with engine.connect() as c:
@@ -238,8 +250,10 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 f"A ferramenta {params.name} nao esta na sua vitrine.",
                 trace,
             )
+        # Daqui em diante a ferramenta e conhecida: a recusa de uma acao vai ao extrato como acao recusada.
+        tipo = "leitura_recusada" if ferramenta.classe == "le" else "acao_recusada"
         if (recusa_chave := programas.recusa_da_chave(q.aplicativo.tipo, ferramenta.sistema.tipo_chave)) is not None:
-            raise await recusar(q, params.name, recusa_chave.motivo, recusa_chave.mensagem, trace)
+            raise await recusar(q, params.name, recusa_chave.motivo, recusa_chave.mensagem, trace, tipo)
         try:
             conferir_argumentos(ferramenta.esquema_entrada, params.arguments)
         except ArgumentosInvalidos as erro:
@@ -249,9 +263,10 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 "argumento_fora_do_esquema",
                 f"Argumentos fora do esquema revisado: {erro}",
                 trace,
+                tipo,
             ) from erro
         if not entrada.permite(ferramenta.classe):
-            raise await recusar(q, params.name, entrada.motivo_recusa(), entrada.mensagem(), trace)
+            raise await recusar(q, params.name, entrada.motivo_recusa(), entrada.mensagem(), trace, tipo)
         if not revisao.classe_permitida(ferramenta.sistema.tipo_chave, ferramenta.classe):
             raise await recusar(
                 q,
@@ -259,6 +274,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 "acao_em_sistema_compartilhado",
                 "Este sistema usa chave compartilhada e so aceita leitura. Nada foi enviado.",
                 trace,
+                tipo,
             )
         if ferramenta.classe != "le" and not acoes_ligadas(q):
             raise await recusar(
@@ -267,6 +283,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 "acoes_desligadas",
                 "Acoes ainda nao estao ligadas neste MCP-CLARO (Fase 2). Nada foi enviado.",
                 trace,
+                tipo,
             )
         if ferramenta.classe != "le" and q.aplicativo.tipo == "programa" and not p.PROGRAM_ACTIONS_ENABLED:
             raise await recusar(
@@ -275,10 +292,11 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 "programa_so_le",
                 "Programas que rodam sozinhos so leem nesta instalacao (decisao 9). Nada foi enviado.",
                 trace,
+                tipo,
             )
         bloqueio = vigentes.para(ferramenta.sistema.id)
         if bloqueio is not None:
-            raise await recusar(q, params.name, bloqueio.motivo_recusa(), bloqueio.mensagem(), trace)
+            raise await recusar(q, params.name, bloqueio.motivo_recusa(), bloqueio.mensagem(), trace, tipo)
         if ferramenta.classe != "le":
             return await agir(q, ferramenta, params, trace)
         async with engine.begin() as c:
@@ -319,7 +337,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         try:
             op, repetida = await pedidos.pedir(pedido)
         except AcaoRecusada as erro:
-            raise await recusar(q, params.name, erro.motivo, erro.mensagem, trace) from erro
+            raise await recusar(q, params.name, erro.motivo, erro.mensagem, trace, "acao_recusada") from erro
         if ferramenta.ordem_id is not None:
             async with engine.begin() as c:
                 await repositorio.marcar_uso_da_ordem(c, ferramenta.ordem_id)

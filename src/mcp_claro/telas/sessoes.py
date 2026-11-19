@@ -39,6 +39,9 @@ class Sessao:
     pessoa: Pessoa
     csrf: str
     expira_em: datetime
+    # Quando a pessoa digitou a senha no provedor (``auth_time`` do id_token). Sem ele, o login nunca conta como
+    # recente: as acoes que pedem login refeito na hora pedem de novo.
+    auth_time: datetime | None = None
 
     @property
     def admin(self) -> bool:
@@ -111,8 +114,8 @@ async def sessao_valida(c: AsyncConnection, identificador: str, *, parada_minuto
     linha = (
         await c.execute(
             text(
-                "SELECT s.hash_id, s.csrf, s.expira_em, s.ultimo_uso, p.id, p.emissor, p.sujeito, p.nome, p.papel,"
-                " p.situacao, p.teste FROM sessoes_telas s JOIN pessoas p ON p.id = s.pessoa_id"
+                "SELECT s.hash_id, s.csrf, s.expira_em, s.ultimo_uso, s.auth_time, p.id, p.emissor, p.sujeito, p.nome,"
+                " p.papel, p.situacao, p.teste FROM sessoes_telas s JOIN pessoas p ON p.id = s.pessoa_id"
                 " WHERE s.hash_id = :h AND s.encerrada_em IS NULL AND s.expira_em > now()"
                 " AND s.ultimo_uso > now() - make_interval(mins => :m)"
             ),
@@ -124,7 +127,7 @@ async def sessao_valida(c: AsyncConnection, identificador: str, *, parada_minuto
     if datetime.now(UTC) - linha.ultimo_uso > timedelta(seconds=60):
         await c.execute(text("UPDATE sessoes_telas SET ultimo_uso = now() WHERE hash_id = :h"), {"h": hash_id})
     pessoa = Pessoa(linha.id, linha.emissor, linha.sujeito, linha.nome, linha.papel, linha.situacao, linha.teste)
-    return Sessao(bytes(linha.hash_id), pessoa, linha.csrf, linha.expira_em)
+    return Sessao(bytes(linha.hash_id), pessoa, linha.csrf, linha.expira_em, linha.auth_time)
 
 
 async def encerrar_sessao(c: AsyncConnection, hash_id: bytes) -> None:

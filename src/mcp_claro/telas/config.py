@@ -14,6 +14,9 @@ la, com os mesmos nomes, ``ConfigTelas.de_parametros`` passa a le-los sozinho.
 - ``SCREENS_TIMEZONE``: fuso das datas nas telas.
 - ``SCREENS_FOREIGN_LEDGER_WINDOW_MINUTES``: por quanto tempo o motivo dado pelo ADMIN vale para
   folhear o extrato de outra pessoa sem nova linha no extrato.
+- ``SCREENS_RECENT_LOGIN_SECONDS``: idade maxima do login (``auth_time`` do provedor) para contar como "login
+  refeito na hora". Pedem login assim recente: cadastrar e desativar passkey (sempre) e, com ``FEATURE_PASSKEY``
+  desligado, confirmar ficha de risco alto e criar ou ampliar limite. Padrao 300 (5 minutos).
 """
 
 from __future__ import annotations
@@ -47,6 +50,9 @@ class ConfigTelas:
     url_troca: str | None = None
     fuso: str = "America/Sao_Paulo"
     janela_extrato_alheio_minutos: int = 30
+    # Login refeito na hora: o ``auth_time`` da sessao tem de ter no maximo esta idade (segundos). Curto de
+    # proposito: quem so tem o cookie de uma sessao antiga nao passa, porque o provedor pede a senha de novo.
+    login_recente_segundos: int = 300
     escopos: tuple[str, ...] = ("openid", "profile")
 
     @classmethod
@@ -66,6 +72,7 @@ class ConfigTelas:
             janela_extrato_alheio_minutos=int(
                 valor("SCREENS_FOREIGN_LEDGER_WINDOW_MINUTES", _PADRAO.janela_extrato_alheio_minutos)
             ),
+            login_recente_segundos=int(valor("SCREENS_RECENT_LOGIN_SECONDS", _PADRAO.login_recente_segundos)),
         )
 
     def problemas(self, p: Parametros) -> list[str]:
@@ -81,6 +88,8 @@ class ConfigTelas:
             erros.append("SCREENS_LOGIN_TTL_SECONDS aceita de 60 a 1800.")
         if not 5 <= self.janela_extrato_alheio_minutos <= 240:
             erros.append("SCREENS_FOREIGN_LEDGER_WINDOW_MINUTES aceita de 5 a 240.")
+        if not 60 <= self.login_recente_segundos <= 900:
+            erros.append("SCREENS_RECENT_LOGIN_SECONDS aceita de 60 a 900.")
         try:
             ZoneInfo(self.fuso)
         except ZoneInfoNotFoundError, ValueError:

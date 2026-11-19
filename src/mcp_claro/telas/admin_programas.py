@@ -2,8 +2,10 @@
 
 ADMIN (``/telas/admin/programas``): cadastrar um programa (client_id do provedor de login, nome, finalidade,
 responsavel e substituto obrigatorios e diferentes, data de fim), listar, ver um programa, pausar, retomar,
-encerrar, recertificar, registrar a troca da chave, trocar o responsavel e o substituto, e dar a ordem de
-servico do programa (so com ferramentas que leem, de sistemas de chave propria do programa).
+encerrar, recertificar, registrar a troca da chave, trocar o responsavel e o substituto, estender a data de
+fim de um programa que nao foi encerrado, e dar a ordem de servico do programa (so com ferramentas que leem,
+de sistemas de chave propria do programa). Programa encerrado volta so por um cadastro novo, com o mesmo
+client_id: a linha volta a valer com os dados novos e conta como revisao do ADMIN.
 
 Responsavel (``/telas/programas``): ve os programas de que e responsavel ou substituto e, na revisao
 periodica (``PROGRAM_OWNER_RECERT_DAYS``), confirma que cada um segue valendo (grava ``revisado_em``).
@@ -62,6 +64,10 @@ FEITOS: Final[dict[str, str]] = {
     "programa_chave_trocada": "Pronto. A troca da chave foi registrada. O prazo da chave conta a partir de hoje.",
     "programa_responsaveis": "Pronto. O responsável e o substituto foram trocados.",
     "programa_ordem": "Pronto. A ordem de serviço foi dada ao programa. Ela só tem ferramentas que leem.",
+    "programa_recadastrado": (
+        "Pronto. O programa foi cadastrado de novo e voltou a valer. Confira abaixo a chave e a ordem de serviço dele."
+    ),
+    "programa_fim_estendido": "Pronto. A data de fim do programa foi estendida.",
     "programa_nada_mudou": "Nada mudou: o programa não estava na situação certa para isto.",
 }
 
@@ -142,7 +148,7 @@ def recusa_para_retomar(programa: Programa, prazos: Prazos) -> list[str]:
         return ["Só um programa pausado pode ser retomado."]
     erros: list[str] = []
     if programa.vencido:
-        erros.append("A data de fim do programa já passou. Encerre e cadastre de novo, se ainda for preciso.")
+        erros.append("A data de fim do programa já passou. Estenda a data de fim antes de retomar.")
     if not programa.responsavel_ativo or not programa.substituto_ativo:
         erros.append("O responsável ou o substituto não está mais ativo. Troque-os antes de retomar.")
     if prazos.chave_vencida:
@@ -221,6 +227,7 @@ class TelasDosProgramas:
             r(um + "/pausar", self.pausar, "POST"),
             r(um + "/retomar", self.retomar, "POST"),
             r(um + "/encerrar", self.encerrar, "POST"),
+            r(um + "/fim", self.estender_fim, "POST"),
             r(um + "/recertificar", self.recertificar_admin, "POST"),
             r(um + "/chave", self.chave_trocada, "POST"),
             r(um + "/responsaveis", self.trocar_responsaveis, "POST"),
@@ -292,9 +299,21 @@ class TelasDosProgramas:
         async with self.t.engine.begin() as c:
             dupla = await self._dupla(c, responsavel_id, substituto_id, erros)
             existente = await repositorio.aplicativo_por_client_id(c, client_id) if not erros else None
-            # Um aplicativo do tipo programa ainda sem cadastro (de antes desta tela) ganha o cadastro aqui.
-            if existente is not None and (existente.tipo != "programa" or await regras.ler(c, existente.id)):
+            anterior = await regras.ler(c, existente.id) if existente is not None else None
+            # Um aplicativo do tipo programa ainda sem cadastro (de antes desta tela) ganha o cadastro aqui, e um
+            # programa encerrado volta com o cadastro novo. Programa que ainda vale nao e cadastrado de novo.
+            if existente is not None and existente.tipo != "programa":
                 erros.append("Já existe um aplicativo com este client_id.")
+            elif anterior is not None and anterior.situacao != "encerrado":
+                erros.append(
+                    "Já existe um programa com este client_id, e ele não foi encerrado. Para mudar a data de fim,"
+                    " use a tela do programa."
+                )
+            if not erros and dupla is not None and fim is not None and anterior is not None:
+                responsavel, substituto = dupla
+                return await self._cadastrar_de_novo(
+                    c, sessao, anterior, nome, finalidade, responsavel, substituto, fim
+                )
             if not erros and dupla is not None and fim is not None:
                 responsavel, substituto = dupla
                 aplicativo_id = await repositorio.habilitar_aplicativo(
@@ -328,6 +347,66 @@ class TelasDosProgramas:
                 return ver_depois(BASE_ADMIN, "programa_cadastrado")
         return await self._pagina_lista(pedido, erros, dict(f.como_dict()))
 
+    async def _cadastrar_de_novo(
+        self,
+        c: AsyncConnection,
+        sessao: Sessao,
+        anterior: Programa,
+        nome: str,
+        finalidade: str,
+        responsavel: Row[Any],
+        substituto: Row[Any],
+        fim: date,
+    ) -> Response:
+        """Programa encerrado volta a valer com os dados novos. Conta como revisao do ADMIN (``revisado_em``).
+
+        A troca da chave nao muda: se a chave passou do prazo, a rotina pausa o programa ate o ADMIN registrar a
+        troca. O UPDATE so vale se o programa ainda estiver encerrado (dois cadastros ao mesmo tempo: um so vale).
+        """
+        voltou = (
+            await c.execute(
+                text(
+                    "UPDATE programas SET responsavel_id = :r, substituto_id = :s, finalidade = :f, fim = :d,"
+                    " situacao = 'ativo', revisado_em = now() WHERE aplicativo_id = :a AND situacao = 'encerrado'"
+                    " RETURNING aplicativo_id"
+                ),
+                {
+                    "a": anterior.aplicativo_id,
+                    "r": responsavel.id,
+                    "s": substituto.id,
+                    "f": finalidade,
+                    "d": fim,
+                },
+            )
+        ).first()
+        if voltou is None:
+            return voltar(f"{BASE_ADMIN}/{anterior.aplicativo_id}", "programa_nada_mudou")
+        await repositorio.habilitar_aplicativo(  # o aplicativo ja existe: so o nome muda
+            c, client_id=anterior.client_id, nome=nome, familia="programa", tipo="programa"
+        )
+        await self.t.extrato(
+            c,
+            "admin_programa_recadastrado",
+            {
+                "programa": nome,
+                "quem": sessao.quem,
+                "responsavel": responsavel.nome,
+                "substituto": substituto.nome,
+                "fim": fim.strftime("%d/%m/%Y"),
+            },
+            pessoa_id=sessao.pessoa.id,
+            aplicativo_id=anterior.aplicativo_id,
+            dados={
+                "client_id": anterior.client_id,
+                "responsavel_id": str(responsavel.id),
+                "substituto_id": str(substituto.id),
+                "fim": fim.isoformat(),
+                "fim_anterior": anterior.fim.isoformat(),
+                "revisado": True,
+            },
+        )
+        return voltar(f"{BASE_ADMIN}/{anterior.aplicativo_id}", "programa_recadastrado")
+
     # --- Um programa ---
 
     async def _pagina_detalhe(
@@ -349,6 +428,7 @@ class TelasDosProgramas:
             modelos = await _modelos_que_servem(c)
             pessoas = await candidatos(c)
             maximo = await consultas.valor_politica(c, "WORK_ORDER_MAX_DAYS")
+        hoje = hoje_em_brasilia()
         return self.t.pagina(
             pedido,
             "admin/programas_detalhe.html",
@@ -361,7 +441,8 @@ class TelasDosProgramas:
                 "modelos": modelos,
                 "pessoas": pessoas,
                 "maximo_dias": maximo,
-                "acoes_ligadas": bool(self.t.p.PROGRAM_ACTIONS_ENABLED),
+                "fim_minimo": max(hoje, programa.fim) + timedelta(days=1),
+                "fim_maximo": hoje + timedelta(days=FIM_MAXIMO_DIAS),
                 "aviso": self._aviso(pedido),
                 "erros": erros or [],
                 "valores": valores or {},
@@ -442,6 +523,48 @@ class TelasDosProgramas:
             feito="programa_encerrado",
             pede_motivo=True,
         )
+
+    @tela
+    async def estender_fim(self, pedido: Request) -> Response:
+        """Nova data de fim, depois da atual e em ate um ano a partir de hoje, para programa nao encerrado."""
+        sessao = await self.t.exigir_admin(pedido)
+        f = await self.t.formulario(pedido, sessao)
+        aplicativo_id: uuid.UUID = pedido.path_params["aplicativo_id"]
+        fim, erros = conferir_fim(f.texto("fim"), hoje_em_brasilia())
+        async with self.t.engine.begin() as c:
+            atual = (
+                await c.execute(
+                    text("SELECT fim FROM programas WHERE aplicativo_id = :a AND situacao <> 'encerrado' FOR UPDATE"),
+                    {"a": aplicativo_id},
+                )
+            ).first()
+            if atual is None:
+                erros.append(
+                    "Programa encerrado ou não encontrado: nada mudou. Para usá-lo de novo, cadastre-o outra vez."
+                )
+            elif fim is not None and fim <= atual.fim:
+                erros.append("A nova data de fim precisa ser depois da data de fim atual.")
+            if not erros and fim is not None and atual is not None:
+                await c.execute(
+                    text("UPDATE programas SET fim = :d WHERE aplicativo_id = :a"), {"a": aplicativo_id, "d": fim}
+                )
+                programa = await regras.ler(c, aplicativo_id)
+                if programa is not None:
+                    await self.t.extrato(
+                        c,
+                        "admin_programa_fim_estendido",
+                        programa.campos()
+                        | {
+                            "quem": sessao.quem,
+                            "antes": atual.fim.strftime("%d/%m/%Y"),
+                            "fim": fim.strftime("%d/%m/%Y"),
+                        },
+                        pessoa_id=sessao.pessoa.id,
+                        aplicativo_id=aplicativo_id,
+                        dados={"fim_anterior": atual.fim.isoformat(), "fim": fim.isoformat()},
+                    )
+                return voltar(f"{BASE_ADMIN}/{aplicativo_id}", "programa_fim_estendido")
+        return await self._pagina_detalhe(pedido, aplicativo_id, erros, dict(f.como_dict()))
 
     @tela
     async def recertificar_admin(self, pedido: Request) -> Response:

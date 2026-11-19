@@ -6,8 +6,9 @@ import functools
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
-from urllib.parse import urlencode
+from datetime import UTC, datetime
+from typing import Any, Final, Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx2
 from jinja2 import Environment
@@ -16,6 +17,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
 from mcp_claro.config.settings import Parametros
+from mcp_claro.entrada.cracha import FOLGA_RELOGIO_SEGUNDOS
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.telas.config import ConfigTelas
@@ -27,6 +29,7 @@ from mcp_claro.telas.seguranca import (
     COOKIE_SESSAO,
     Formulario,
     FormularioRecusado,
+    caminho_seguro,
     iguais,
     ler_formulario,
     origem_aceita,
@@ -34,6 +37,33 @@ from mcp_claro.telas.seguranca import (
 from mcp_claro.telas.sessoes import Sessao, sessao_valida
 
 log = logger("mcp_claro.telas")
+
+CAMINHO_REFAZER: Final = "/telas/login/refazer"
+MARCA_REFEITO: Final = "refeito"
+
+
+def voltar_refeito(voltar: str) -> str:
+    """O caminho de volta do login refeito, com a marca ``refeito=1``: a tela sabe que o login acabou de ser
+    pedido de novo (e avisa se o provedor nao pediu a senha). So caminho local das telas."""
+    seguro = caminho_seguro(voltar)
+    partes = urlsplit(seguro)
+    pares = [(k, v) for k, v in parse_qsl(partes.query, keep_blank_values=True) if k != MARCA_REFEITO]
+    pares.append((MARCA_REFEITO, "1"))
+    return caminho_seguro(partes.path + "?" + urlencode(pares))
+
+
+def url_refazer(voltar: str) -> str:
+    return CAMINHO_REFAZER + "?" + urlencode({"voltar": caminho_seguro(voltar)})
+
+
+@dataclass(frozen=True, slots=True)
+class LoginRefeito:
+    """O que a pagina mostra para pedir o login refeito na hora (``modelos/_login_refeito.html``)."""
+
+    recente: bool
+    url: str
+    falhou: bool
+    minutos: int
 
 
 class PortaInterna(Protocol):
@@ -166,6 +196,26 @@ class Telas:
                 raise Interrompe(Response(status_code=200, headers={"HX-Redirect": destino}))
             raise Interrompe(RedirectResponse(destino, status_code=303))
         raise Interrompe(self.erro(pedido, 403, "Sua sessão terminou", "Entre de novo para continuar. Nada foi feito."))
+
+    def login_recente(self, sessao: Sessao) -> bool:
+        """O login desta sessao foi feito, ou refeito, ha no maximo ``login_recente_segundos``.
+
+        Vale o ``auth_time`` que o provedor assinou no id_token (a hora em que a pessoa digitou a senha), nao a
+        idade da sessao. Sem ``auth_time``, nunca e recente."""
+        if sessao.auth_time is None:
+            return False
+        idade = (datetime.now(UTC) - sessao.auth_time).total_seconds()
+        return -FOLGA_RELOGIO_SEGUNDOS <= idade <= self.cfg.login_recente_segundos
+
+    def login_refeito(self, pedido: Request, sessao: Sessao, voltar: str) -> LoginRefeito:
+        """Para a pagina: se o login vale como refeito agora e, se nao, o link que o refaz e volta a ``voltar``."""
+        recente = self.login_recente(sessao)
+        return LoginRefeito(
+            recente=recente,
+            url=url_refazer(voltar),
+            falhou=not recente and pedido.query_params.get(MARCA_REFEITO) == "1",
+            minutos=max(1, self.cfg.login_recente_segundos // 60),
+        )
 
     async def exigir_admin(self, pedido: Request) -> Sessao:
         sessao = await self.exigir_sessao(pedido)

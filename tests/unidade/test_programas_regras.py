@@ -147,6 +147,26 @@ FRASES_DOS_PROGRAMAS = {
     "programa_pausado_responsavel": {"programa": "Robo", "responsavel": "Rui"},
     "programa_chave_a_vencer": {"programa": "Robo", "responsavel": "Rui", "fim": "01/12/2026"},
     "programa_encerrado_fim": {"programa": "Robo", "responsavel": "Rui", "fim": "18/11/2026"},
+    "programa_das_portas_mantido": {
+        "programa": "Robo",
+        "responsavel": "Rui",
+        "acao": "pausou",
+        "motivo": "a revisao periodica, a cada 90 dias, venceu sem confirmacao",
+    },
+    "admin_programa_recadastrado": {
+        "programa": "Robo",
+        "responsavel": "Rui",
+        "quem": "Carla",
+        "substituto": "Sara",
+        "fim": "01/06/2027",
+    },
+    "admin_programa_fim_estendido": {
+        "programa": "Robo",
+        "responsavel": "Rui",
+        "quem": "Carla",
+        "antes": "01/12/2026",
+        "fim": "01/06/2027",
+    },
 }
 
 

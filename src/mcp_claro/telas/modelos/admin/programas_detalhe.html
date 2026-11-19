@@ -14,14 +14,12 @@
   <p><strong>Chave do programa vence em:</strong> {{ prazos.chave_vence | data }}{% if prazos.chave_vencida %} <span class="etiqueta ruim">venceu</span>{% endif %}</p>
   <p><strong>Último pedido:</strong> {% if prazos.ultimo_pedido %}{{ prazos.ultimo_pedido | data_hora }}{% else %}nenhum ainda{% endif %}.
     {% if programa.situacao == "ativo" %}Sem pedido, ele pausa em {{ prazos.pausa_sem_uso | data }}.{% endif %}</p>
-  {% if acoes_ligadas %}
-  <p class="dica">Ações de programas estão ligadas nesta instalação: ação fora do limite vai às pendências do responsável.</p>
-  {% else %}
   <p class="dica">Nesta fase, o programa só lê. Ações de programas ficam desligadas.</p>
-  {% endif %}
 </div>
 
-{% if programa.situacao != "encerrado" %}
+{% if programa.situacao == "encerrado" %}
+<p class="cartao">Este programa foi encerrado e nada passa por ele. Para usá-lo de novo, cadastre-o outra vez em <a href="/telas/admin/programas">Programas</a>, com o mesmo client_id, responsável, substituto e uma nova data de fim.</p>
+{% else %}
 <h2>Revisão e chave</h2>
 <form class="em-linha" method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/recertificar">
   <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -30,6 +28,16 @@
 <form class="em-linha" method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/chave">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit" class="secundario">Registrar que a chave foi trocada no provedor de login</button>
+</form>
+
+<h2>Data de fim</h2>
+<form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/fim" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p>O programa vale até {{ programa.fim | data }}. Depois dessa data, nada mais passa por ele.</p>
+  <label for="novo_fim">Nova data de fim</label>
+  <input type="date" id="novo_fim" name="fim" required min="{{ fim_minimo.isoformat() }}" max="{{ fim_maximo.isoformat() }}" value="{{ valores.get('fim', '') }}">
+  <p class="dica">A nova data precisa ser depois da data de fim atual e em até um ano a partir de hoje.</p>
+  <button type="submit" class="secundario">Estender a data de fim</button>
 </form>
 
 <h2>Situação</h2>
@@ -49,7 +57,7 @@
 {% endif %}
 <form method="post" action="/telas/admin/programas/{{ programa.aplicativo_id }}/encerrar" class="cartao parar">
   <input type="hidden" name="csrf" value="{{ csrf }}">
-  <p>Encerrar não tem volta. Nada mais passa por este programa.</p>
+  <p>Encerrar para o programa de vez: nada mais passa por ele. Para usá-lo de novo, é preciso cadastrá-lo outra vez, com responsável, substituto e data de fim.</p>
   <label for="motivo_fim">Motivo do encerramento</label>
   <input type="text" id="motivo_fim" name="motivo" required maxlength="300">
   <button type="submit" class="secundario">Encerrar o programa</button>

@@ -26,8 +26,11 @@
 <section class="cartao estranho" aria-labelledby="aplicativo-diz">
   <h2 id="aplicativo-diz">O aplicativo diz</h2>
   <p><strong>Texto escrito pelo aplicativo, não conferido pelo MCP-CLARO.</strong> Para decidir, confira o que está acima.</p>
-  {% if a.op.aplicativo_diz %}
-  <blockquote>{% for linha in a.op.aplicativo_diz.splitlines() %}{{ linha }}{% if not loop.last %}<br>{% endif %}{% endfor %}</blockquote>
+  {% if a.diz %}
+  {% if a.diz_escondidos %}
+  <p class="atencao"><strong>Atenção: este texto tinha caracteres escondidos.</strong> Eles aparecem marcados, como [U+202E].</p>
+  {% endif %}
+  <blockquote>{% for linha in a.diz %}<bdi>{{ linha }}</bdi>{% if not loop.last %}<br>{% endif %}{% endfor %}</blockquote>
   {% else %}
   <p>O aplicativo não disse nada.</p>
   {% endif %}
@@ -36,7 +39,7 @@
 {% if a.pode_decidir_ficha %}
 <section class="cartao">
   <h2>Sua decisão</h2>
-  {% if a.op.ficha_exige_passkey %}
+  {% if a.op.ficha_exige_passkey and passkey_ligada %}
   <p>Esta ação é de risco alto. Para confirmar, use a sua passkey.</p>
   {% if not tem_passkey %}
   <p class="atencao">Você ainda não tem passkey. <a href="/telas/passkeys" hx-boost="false">Cadastre uma passkey</a> e volte a esta ficha.</p>
@@ -48,10 +51,23 @@
     <button type="submit" class="grande">Confirmar com a passkey</button>
   </form>
   <noscript><p class="atencao">A passkey precisa do JavaScript ligado neste navegador.</p></noscript>
+  {% elif pede_login %}
+  {% if passkey_ligada %}
+  <p>Esta ação é de risco alto, e a ficha foi montada quando a passkey estava desligada. Para confirmar, entre de novo agora (login refeito na hora).</p>
+  {% elif a.op.ficha_exige_passkey %}
+  <p>Esta ficha pedia a passkey, que foi desligada nesta instalação. No lugar dela, confirmar pede um login refeito na hora.</p>
   {% else %}
-  {% if d.risco == "alto" and not passkey_ligada %}
-  <p class="atencao">A passkey está desligada nesta instalação. Esta ação de risco alto confirma sem ela, só pela ficha.</p>
+  <p>Esta ação é de risco alto. A passkey está desligada nesta instalação: no lugar dela, confirmar pede um login refeito na hora.</p>
   {% endif %}
+  {% include "_login_refeito.html" %}
+  {% if refazer.recente %}
+  <p class="dica">Você entrou de novo há pouco: já dá para confirmar.</p>
+  <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="grande">Confirmar</button>
+  </form>
+  {% endif %}
+  {% else %}
   <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <button type="submit" class="grande">Confirmar</button>
@@ -64,7 +80,7 @@
   </form>
   <p class="dica">Recusar: nada vai para o sistema.</p>
 </section>
-{% if a.op.ficha_exige_passkey %}<script src="/telas/estaticos/passkey.js" defer></script>{% endif %}
+{% if a.op.ficha_exige_passkey and passkey_ligada %}<script src="/telas/estaticos/passkey.js" defer></script>{% endif %}
 {% else %}
 <p class="cartao">{{ a.frase }} <a href="/telas/acoes/{{ a.op.id }}">Veja o andamento desta ação</a>.</p>
 {% endif %}

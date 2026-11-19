@@ -722,21 +722,55 @@ async def criar_limite(
 
 
 async def ampliar_limite(
-    c: AsyncConnection, *, pessoa_id: uuid.UUID, limite_id: uuid.UUID, por_dia: int, dias: int, com_passkey: bool
+    c: AsyncConnection,
+    *,
+    pessoa_id: uuid.UUID,
+    limite_id: uuid.UUID,
+    por_dia: int,
+    dias: int,
+    teto_dia: int,
+    teto_dias: int,
+    com_passkey: bool,
 ) -> Row[Any] | None:
-    """Amplia so um limite ativo da propria pessoa. Nunca diminui: o teto e o prazo so crescem."""
+    """Amplia so um limite ativo da propria pessoa, dentro do teto vigente.
+
+    Abaixo do teto, nada diminui: a quantidade e o prazo so crescem. Um limite que ficou acima do teto (a
+    politica baixou) renova no maximo ate ``teto_dia`` por dia, e o prazo nunca passa de ``teto_dias`` dias a
+    contar de agora."""
     return (
         await c.execute(
             text(
-                "UPDATE limites SET por_dia = greatest(por_dia, :q),"
-                " valido_ate = greatest(valido_ate, now() + make_interval(days => :dias)),"
+                "UPDATE limites SET por_dia = least(greatest(por_dia, :q), :td),"
+                " valido_ate = least(greatest(valido_ate, now() + make_interval(days => :dias)),"
+                " now() + make_interval(days => :tdias)),"
                 " com_passkey = com_passkey AND :pk"
                 " WHERE id = :i AND pessoa_id = :p AND situacao = 'ativo' AND valido_ate > now()"
                 " RETURNING id, aplicativo_id, sistema_id, nome_original, por_dia, valido_ate"
             ),
-            {"i": limite_id, "p": pessoa_id, "q": por_dia, "dias": dias, "pk": com_passkey},
+            {
+                "i": limite_id,
+                "p": pessoa_id,
+                "q": por_dia,
+                "td": teto_dia,
+                "dias": dias,
+                "tdias": teto_dias,
+                "pk": com_passkey,
+            },
         )
     ).first()
+
+
+async def liberadas_pelo_limite(c: AsyncConnection, limite_id: uuid.UUID) -> list[int]:
+    """Linhas da fila que o limite liberou e que ainda esperam a hora de sair (as mais antigas primeiro)."""
+    return [
+        int(i)
+        for i in (
+            await c.execute(
+                text("SELECT id FROM fila_saida WHERE limite_id = :l AND estado = 'liberada' ORDER BY id"),
+                {"l": limite_id},
+            )
+        ).scalars()
+    ]
 
 
 async def encerrar_limite(

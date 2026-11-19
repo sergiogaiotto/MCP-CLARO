@@ -87,3 +87,7 @@ ul.ferramentas { margin: .25rem 0; padding-left: 1.25rem; }
   td { border: 0; padding: .2rem 0; }
   tr { border-bottom: 1px solid var(--linha); padding: .5rem 0; }
 }
+/* Dados de um pedido: espacos e quebras de linha como vieram, e cada valor isolado (bdi), para a direcao de um
+   texto nao mexer no outro. Os caracteres escondidos ja chegam trocados por marcas como [U+202E]. */
+bdi { unicode-bidi: isolate; }
+.dado, .dado bdi { white-space: pre-wrap; overflow-wrap: anywhere; }

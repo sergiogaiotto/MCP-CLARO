@@ -1,11 +1,13 @@
-"""Rotinas da Fase 2: fichas que vencem, aviso de ficha pendente e limites que vencem.
+"""Rotinas da Fase 2: fichas que vencem, aviso de ficha pendente, limites que vencem e desafios de passkey.
 
 - ``vencer_fichas``: ficha sem resposta no prazo vence, e nada segue (``fila.vencer_fichas``);
 - ``avisar_fichas_pendentes``: ficha sem decisao ha mais de ``NOTIFY_PENDING_AFTER_MINUTES`` recebe um
   aviso a pessoa (e-mail, se a pessoa tiver, e os webhooks cadastrados que assinam o evento), uma vez por
   ficha. O aviso leva protocolo, ferramenta, sistema, prazo e o link da ficha; nunca argumentos nem
-  resultado;
-- ``vencer_limites``: limite ativo com prazo no passado vira ``vencido``.
+  resultado. O extrato so diz que a pessoa foi avisada quando o e-mail dela entrou na fila; aviso que foi
+  so aos webhooks da instalacao tem frase propria;
+- ``vencer_limites``: limite ativo com prazo no passado vira ``vencido``;
+- ``limpar_desafios_passkey``: apaga os desafios de passkey vencidos ou ja usados (cada um vale uma vez).
 
 "Uma vez" vale mesmo com duas copias das rotinas no ar: alem da trava do agendador, cada linha e pega com
 ``FOR UPDATE SKIP LOCKED`` e mudada com ``UPDATE ... WHERE`` o estado de antes, na mesma transacao do aviso
@@ -43,7 +45,11 @@ INTERVALO_FICHAS: Final = 30.0
 INTERVALO_AVISO_FICHAS: Final = 60.0
 """Aviso de ficha pendente: o prazo do aviso e contado em minutos."""
 INTERVALO_LIMITES: Final = 300.0
-"""Vencer limites: o envio ja recusa limite fora do prazo; esta rotina so poe a situacao em dia."""
+"""Vencer limites: o pedido (``fila.gastar_limite``) ja recusa limite fora do prazo; esta rotina so poe a
+situacao em dia. A acao ja liberada por um limite que depois venceu pelo prazo segue a espera visivel e sai,
+a menos que a pessoa cancele ou bloqueie; o despachante so a para se o limite foi encerrado ou suspenso."""
+INTERVALO_DESAFIOS: Final = 3600.0
+"""Limpar desafios de passkey: uma vez por hora basta, cada desafio vale poucos minutos."""
 
 
 # --- Fichas que vencem -----------------------------------------------------------------------
@@ -145,9 +151,10 @@ async def avisar_fichas_pendentes(engine: AsyncEngine, *, apos_minutos: int, bas
                 "ficha_id": str(ficha_id),
             }
             chave = f"{EVENTO_FICHA_PENDENTE}:{ficha_id}"
-            entraram = 0
+            pessoa_avisada = 0
             if await email_da_pessoa(c, pessoa_id) is not None:
-                entraram += await avisar_pessoa(c, pessoa_id, EVENTO_FICHA_PENDENTE, assunto, corpo, chave)
+                pessoa_avisada = await avisar_pessoa(c, pessoa_id, EVENTO_FICHA_PENDENTE, assunto, corpo, chave)
+            entraram = pessoa_avisada
             for destino_id in webhooks:
                 alvo = destino_webhook(destino_id)
                 entraram += await enfileirar(
@@ -158,10 +165,12 @@ async def avisar_fichas_pendentes(engine: AsyncEngine, *, apos_minutos: int, bas
                 continue
             novos += entraram
             fichas += 1
+            # "A pessoa foi avisada" so quando o aviso foi a ela (e-mail). Os webhooks sao da instalacao e nao
+            # dizem de quem e a ficha: ai a frase e outra.
             await registrar(
                 c,
                 papel="rotinas",
-                tipo="ficha_avisada",
+                tipo="ficha_avisada" if pessoa_avisada else "ficha_avisada_webhooks",
                 campos={"protocolo": r.protocolo},
                 protocolo=r.protocolo,
                 pessoa_id=pessoa_id,
@@ -221,6 +230,30 @@ async def vencer_limites(engine: AsyncEngine) -> int:
     return len(linhas)
 
 
+# --- Desafios de passkey vencidos ou usados --------------------------------------------------
+
+SQL_LIMPAR_DESAFIOS = """
+DELETE FROM desafios_passkey
+WHERE desafio IN (
+  SELECT desafio FROM desafios_passkey
+  WHERE expira_em < now() OR usado_em IS NOT NULL
+  LIMIT :lote
+)
+"""
+
+
+async def limpar_desafios_passkey(engine: AsyncEngine) -> int:
+    """Uma rodada: apaga desafios de passkey vencidos ou ja usados. Devolve quantos foram apagados.
+
+    Um desafio vale uma vez e por poucos minutos: depois disso nao serve para nada, e a cerimonia que o
+    usar e recusada por nao acha-lo. Nada vai ao extrato (o desafio nao e um passo da pessoa)."""
+    async with engine.begin() as c:
+        apagados = (await c.execute(text(SQL_LIMPAR_DESAFIOS), {"lote": LOTE * 10})).rowcount
+    if apagados:
+        log.info("desafios_passkey_limpos", desafios=apagados)
+    return int(apagados or 0)
+
+
 # --- Tarefas do agendador --------------------------------------------------------------------
 
 
@@ -239,4 +272,10 @@ def tarefas_de_acoes(engine: AsyncEngine, p: Parametros, config: ConfigRotinas) 
             prazo,
         ),
         Tarefa("vencer_limites", min(config.intervalo_curto, INTERVALO_LIMITES), lambda: vencer_limites(engine), prazo),
+        Tarefa(
+            "limpar_desafios_passkey",
+            min(config.intervalo_limpeza, INTERVALO_DESAFIOS),
+            lambda: limpar_desafios_passkey(engine),
+            prazo,
+        ),
     ]

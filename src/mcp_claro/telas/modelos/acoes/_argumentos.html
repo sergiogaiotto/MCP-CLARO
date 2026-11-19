@@ -1,8 +1,16 @@
-{# Os dados do pedido, em lista "chave: valor". O escape e automatico. #}
+{# Os dados do pedido, em lista "chave: valor". O escape e automatico. Os caracteres escondidos (invisiveis, de
+   formato e de direcao) ja chegam trocados por marcas como [U+202E]; cada valor fica isolado (bdi), para a direcao
+   de um texto nao mexer no outro, e com os espacos e as quebras de linha como vieram. #}
+{% if a.escondidos %}
+<div class="atencao" role="alert" id="escondidos">
+  <p><strong>Atenção: este pedido tem caracteres escondidos.</strong> São caracteres que não aparecem na tela ou que mudam a ordem do texto. Eles vão para o sistema assim mesmo.</p>
+  <p>Aqui eles aparecem marcados no lugar exato onde estão, como <strong>[U+202E]</strong>. Se você não esperava por isso, recuse.</p>
+</div>
+{% endif %}
 {% if a.argumentos %}
-<dl class="comprovante">
+<dl class="comprovante dados">
   {% for chave, valor in a.argumentos %}
-  <dt>{{ chave }}</dt><dd>{{ valor }}</dd>
+  <dt><bdi>{{ chave }}</bdi></dt><dd class="dado"><bdi>{{ valor }}</bdi></dd>
   {% endfor %}
 </dl>
 {% else %}

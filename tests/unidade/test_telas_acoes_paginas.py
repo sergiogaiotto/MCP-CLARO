@@ -12,6 +12,7 @@ from mcp_claro.extrato.frases import frase
 from mcp_claro.saida.estados import FRASE, Estado
 from mcp_claro.saida.fila import DecisaoRecusada, Operacao
 from mcp_claro.telas import acoes, limites
+from mcp_claro.telas.nucleo import LoginRefeito
 from mcp_claro.telas.paginas import criar_ambiente
 from mcp_claro.telas.seguranca import Formulario
 
@@ -128,6 +129,11 @@ def _ficha(op: Operacao, **extra: Any) -> str:
         "risco": "Risco médio",
         "passkey_ligada": True,
         "tem_passkey": True,
+        "pede_login": False,
+        "refazer": LoginRefeito(
+            recente=True, url="/telas/login/refazer?voltar=%2Ftelas%2Ffichas%2Fx", falhou=False, minutos=5
+        ),
+        "pede": "Confirmar esta ação de risco alto pede um login refeito na hora.",
     }
     contexto.update(extra)
     return ambiente.get_template("acoes/ficha.html").render(contexto)
@@ -151,18 +157,41 @@ def test_ficha_escapa_dados_e_separa_o_que_o_aplicativo_diz() -> None:
     assert "O aplicativo não disse nada." in _ficha(operacao())
 
 
-def test_ficha_de_risco_alto_pede_passkey_e_sem_passkey_ligada_confirma_sem() -> None:
-    op = operacao(ficha_exige_passkey=True)
+def test_ficha_de_risco_alto_pede_passkey_e_sem_passkey_ligada_pede_login_refeito() -> None:
+    op = operacao(ficha_exige_passkey=True, ficha_risco="alto")
     html = _ficha(op)
     assert "Confirmar com a passkey" in html
     assert 'data-passkey="entrar"' in html
     assert f'data-desafio="/telas/fichas/{op.ficha_id}/desafio"' in html
     assert "/telas/estaticos/passkey.js" in html
-    sem = _ficha(
-        operacao(), d={"aplicativo": "A", "descricao": "", "classe": "muda", "risco": "alto"}, passkey_ligada=False
+
+    # Passkey desligada, login antigo: so o link para entrar de novo; nada de confirmar.
+    velho = LoginRefeito(
+        recente=False, url="/telas/login/refazer?voltar=%2Ftelas%2Ffichas%2Fx", falhou=False, minutos=5
     )
-    assert "A passkey está desligada nesta instalação." in sem
+    alta = operacao(ficha_risco="alto")
+    sem = _ficha(alta, passkey_ligada=False, pede_login=True, refazer=velho)
+    assert "A passkey está desligada nesta instalação: no lugar dela, confirmar pede um login refeito na hora." in sem
+    assert 'href="/telas/login/refazer?voltar=%2Ftelas%2Ffichas%2Fx"' in sem
+    assert "Entrar de novo agora" in sem
+    assert "Confirmar</button>" not in sem
+    assert "Recusar</button>" in sem
     assert "Confirmar com a passkey" not in sem
+    assert "O provedor de login não pediu a sua senha de novo." not in sem
+    falhou = _ficha(alta, passkey_ligada=False, pede_login=True, refazer=velho.__class__(False, velho.url, True, 5))
+    assert "O provedor de login não pediu a sua senha de novo." in falhou
+    # Login refeito ha pouco: confirma sem passkey.
+    refeito = _ficha(alta, passkey_ligada=False, pede_login=True)
+    assert "Você entrou de novo há pouco: já dá para confirmar." in refeito
+    assert "Confirmar</button>" in refeito
+    assert "Entrar de novo agora" not in refeito
+
+    # Ficha montada pedindo a passkey, que depois foi desligada: nada de "cadastre uma passkey".
+    antiga = _ficha(op, passkey_ligada=False, tem_passkey=False, pede_login=True, refazer=velho)
+    assert "Esta ficha pedia a passkey, que foi desligada nesta instalação." in antiga
+    assert "Cadastre uma passkey" not in antiga
+    assert "passkey.js" not in antiga
+    assert "Confirmar</button>" not in antiga
 
 
 def test_ficha_vencida_nao_tem_botoes() -> None:
@@ -239,6 +268,14 @@ def test_destinatarios_legiveis_e_alvo_da_ampliacao() -> None:
     assert limites.destinatarios_legiveis('[{"campo": "destinatario", "valores": ["a", "b"]}]') == (
         "Só destinatario: a, b"
     )
+    assert limites.destinatarios_legiveis(
+        [
+            {"campo": "para", "valores": ["chefe@org"]},
+            {"campo": "copia", "valores": []},
+            {"campo": "oculta", "valores": []},
+        ]
+    ) == ("Só para: chefe@org. Precisam vir vazios: copia, oculta")
+    assert limites.destinatarios_legiveis([{"campo": "para", "valores": ["che\u202efe"]}]) == "Só para: che[U+202E]fe"
     i = uuid.uuid4()
     assert limites.alvo_ampliar(i, 2, 3) != limites.alvo_ampliar(i, 2, 4)
     assert limites.alvo_ampliar(i, 2, 3).startswith(f"ampliar:{i}:")

@@ -1,9 +1,10 @@
 """Rotas das telas, montadas em ``/telas`` no app da entrada.
 
-Telas da pessoa: inicio, entrar e sair, "Minhas ordens de servico", "Meu extrato", "Bloquear agora"
-e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema" (``telas/autorizar.py``). Fase 2: caixa de
-pendencias, ficha, "Minhas acoes" e "estamos confirmando" (``telas/acoes.py``), passkeys
-(``telas/passkeys.py``) e limites por aproximacao (``telas/limites.py``).
+Telas da pessoa: inicio, entrar e sair (e entrar de novo na hora, o login refeito com ``prompt=login`` e
+``max_age=0``, que as acoes de maior risco sem passkey e as passkeys pedem), "Minhas ordens de servico",
+"Meu extrato", "Bloquear agora" e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema"
+(``telas/autorizar.py``). Fase 2: caixa de pendencias, ficha, "Minhas acoes" e "estamos confirmando"
+(``telas/acoes.py``), passkeys (``telas/passkeys.py``) e limites por aproximacao (``telas/limites.py``).
 Telas do ADMIN: em ``telas/admin.py`` (cadastro) e ``telas/admin_portas.py`` (bloqueios, portas,
 pessoas, autorizacao e chaves dos sistemas).
 """
@@ -30,7 +31,15 @@ from mcp_claro.telas.bloqueio import TelasDeBloqueio
 from mcp_claro.telas.config import ConfigTelas
 from mcp_claro.telas.limites import TelasDeLimites
 from mcp_claro.telas.login import LoginRecusado, ProvedorLogin
-from mcp_claro.telas.nucleo import PortaInterna, Telas, numero_pagina, tela, uuid_ou_none, ver_depois
+from mcp_claro.telas.nucleo import (
+    PortaInterna,
+    Telas,
+    numero_pagina,
+    tela,
+    uuid_ou_none,
+    ver_depois,
+    voltar_refeito,
+)
 from mcp_claro.telas.paginas import PASTA_ESTATICOS, criar_ambiente
 from mcp_claro.telas.passkeys import TelasDePasskeys
 from mcp_claro.telas.seguranca import (
@@ -68,11 +77,21 @@ class TelasDaPessoa:
         return self.t.pagina(pedido, "inicio.html")
 
     async def entrar(self, pedido: Request) -> Response:
-        voltar = caminho_seguro(pedido.query_params.get("voltar"))
+        return await self._ao_provedor(pedido, caminho_seguro(pedido.query_params.get("voltar")))
+
+    async def refazer(self, pedido: Request) -> Response:
+        """Login refeito na hora: o provedor pede a senha de novo (``prompt=login``, ``max_age=0``) e a pessoa volta
+        para a tela de onde saiu (so caminho local das telas). A sessao nova guarda o ``auth_time`` novo.
+
+        Pedem isso as acoes de maior risco sem a passkey e mexer nas passkeys (``Telas.login_recente``)."""
+        voltar = voltar_refeito(pedido.query_params.get("voltar") or "/telas")
+        return await self._ao_provedor(pedido, voltar, refazer=True)
+
+    async def _ao_provedor(self, pedido: Request, voltar: str, *, refazer: bool = False) -> Response:
         try:
             async with self.t.engine.begin() as c:
                 login = await criar_login(c, voltar_para=voltar, prazo_segundos=self.t.cfg.login_segundos)
-            destino = await self.t.provedor.url_login(login)
+            destino = await self.t.provedor.url_login(login, refazer=refazer)
         except (httpx2.HTTPError, LoginRecusado) as erro:
             log.warning("telas_login_indisponivel", erro=type(erro).__name__)
             return self.t.erro(
@@ -314,6 +333,7 @@ def rotas_telas(
         g("/", acoes.inicio),
         g("/login", pessoa.entrar),
         g("/login/volta", pessoa.volta),
+        g("/login/refazer", pessoa.refazer),
         post("/sair", pessoa.sair),
         g("/ordens", pessoa.ordens),
         post("/ordens", pessoa.dar_ordem),

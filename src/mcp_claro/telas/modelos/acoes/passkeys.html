@@ -3,11 +3,13 @@
 {% block conteudo %}
 <h1>Minhas passkeys</h1>
 {% if not ligada %}
-<p class="atencao">A passkey está desligada nesta instalação. As ações de risco alto confirmam sem ela, só pela ficha. Criar e ampliar um limite também não pede passkey.</p>
+<p class="atencao">A passkey está desligada nesta instalação. No lugar dela, confirmar uma ação de risco alto e criar ou ampliar um limite pedem um login refeito na hora.</p>
 {% else %}
 <p>A passkey confirma que é você mesmo, com a digital, o rosto ou o PIN do seu aparelho.</p>
 <p>Ela é pedida para confirmar ações de risco alto e para criar ou ampliar um limite.</p>
 {% endif %}
+
+{% if ligada or passkeys %}{% include "_login_refeito.html" %}{% endif %}
 
 <h2>Cadastradas</h2>
 {% if not passkeys %}

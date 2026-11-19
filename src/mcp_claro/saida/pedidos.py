@@ -1,12 +1,17 @@
 """Lado da entrada: o pedido de acao vira protocolo, e a resposta ao aplicativo diz o estado.
 
+Antes da rota: com bloqueio que vale para o pedido, ou com a porta de saida fechada, a acao e recusada
+antes de virar protocolo (nada e gasto, nenhuma ficha e montada).
+
 Escolha da rota, nesta ordem:
 
-1. pedido igual dentro de ``DUPLICATE_WINDOW_MINUTES``: devolve a operacao original, nada novo sai;
+1. pedido igual: a original que ainda pode sair (esperando a ficha, liberada ou enviando) e devolvida em
+   qualquer idade; a que ja saiu ou ficou nao confirmada, por ``DUPLICATE_WINDOW_MINUTES``. Nada novo sai;
 2. teto de fichas por aplicativo (``CONFIRM_CAP_PER_HOUR``): acima dele, o aplicativo pausa;
 3. risco alto: ficha com passkey (``FEATURE_PASSKEY``), nunca limite;
 4. periodo de experiencia (``TRIAL_PERIOD_DAYS``): tudo passa pela pessoa, nunca limite;
-5. limite por aproximacao que cobre o pedido e tem saldo: liberada com a espera visivel;
+5. limite por aproximacao que cobre o pedido e tem saldo (com a passkey ligada, so limite feito com ela):
+   liberada com a espera visivel;
 6. senao, ficha.
 
 A entrada nunca chama o sistema: quem envia e o despachante unico. Enquanto espera, a entrada so
@@ -30,7 +35,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, politica
+from mcp_claro.regras import bloqueios, estado, politica
 from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import FINAIS, FRASE, Estado
 from mcp_claro.saida.fila import Operacao, Rota
@@ -56,7 +61,7 @@ FERRAMENTA_CONSULTA: Final[dict[str, Any]] = {
         "properties": {
             "protocolo": {
                 "type": "string",
-                "pattern": "^CLR-[0-9]{4}-[0-9]{8}$",
+                "pattern": "^CLR-[0-9]{4}-[0-9]{8,}$",
                 "description": "Numero de protocolo, como CLR-2026-00000012.",
             }
         },
@@ -117,6 +122,10 @@ class Pedidos:
             bloqueio = vigentes.para(f.sistema.id)
             if bloqueio is not None:
                 raise AcaoRecusada(bloqueio.motivo_recusa(), bloqueio.mensagem())
+            # Saida fechada (ADMIN, cofre trancado, banco restaurado): nada vira protocolo. A trava compartilhada
+            # de "tudo", tomada acima, e a mesma que fechar a saida toma exclusiva: a leitura aqui vale.
+            if not (await estado.ler_saida(c)).aberta:
+                raise AcaoRecusada("saida_fechada", estado.MENSAGEM_SAIDA_FECHADA)
             valores = await politica.varios(
                 c,
                 "DUPLICATE_WINDOW_MINUTES",
@@ -173,8 +182,11 @@ class Pedidos:
         return op, False
 
     def _prazo_da_ficha(self, pedido: Pedido, valores: dict[str, int]) -> int:
-        """Programa que roda sozinho (decisao 9): a ficha vai as pendencias do responsavel e vence no prazo
-        ``PROGRAM_PENDING_TIMEOUT_HOURS``. Para assistentes, ``CARD_TTL_MINUTES``."""
+        """Programa que roda sozinho (decisao 9): a ficha vence no prazo ``PROGRAM_PENDING_TIMEOUT_HOURS``.
+        Para assistentes, ``CARD_TTL_MINUTES``.
+
+        As pendencias do responsavel ainda nao existem: por isso ``PROGRAM_ACTIONS_ENABLED`` nao liga
+        (``Parametros.problemas``)."""
         if pedido.aplicativo.tipo == "programa":
             return int(self.p.PROGRAM_PENDING_TIMEOUT_HOURS) * 60
         return valores["CARD_TTL_MINUTES"]
@@ -193,10 +205,13 @@ class Pedidos:
                 sistema_id=f.sistema.id,
                 nome_original=f.nome_original,
                 argumentos=pedido.argumentos,
+                exige_passkey=self.p.FEATURE_PASSKEY,
             )
             if limite is not None:
                 return Rota(limite_id=limite, motivo="limite")
             rota = Rota(motivo="ficha")
+        # Contar e montar a ficha num passo so: pedidos ao mesmo tempo do mesmo aplicativo esperam aqui.
+        await fila.travar_teto(c, pedido.aplicativo.id)
         if await fila.fichas_na_ultima_hora(c, pedido.aplicativo.id) >= valores["CONFIRM_CAP_PER_HOUR"]:
             return None
         return rota
@@ -211,7 +226,7 @@ class Pedidos:
                 c,
                 "pausa",
                 "aplicativo",
-                bloqueios.quem_rotina("teto_confirmacoes"),
+                fila.QUEM_TETO,
                 f"Mais de {teto} fichas na ultima hora.",
                 aplicativo_id=pedido.aplicativo.id,
                 papel="entrada",
