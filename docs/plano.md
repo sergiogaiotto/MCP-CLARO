@@ -391,7 +391,7 @@ Vencida, enviada, não saiu, sistema pediu dados, cancelada, parada por bloqueio
 
 - não tem `elicitation_callback` nem `sampling_callback`, e assim não responde sozinho a pedidos do sistema;
 - numa ação, `InputRequiredResult` vira o estado final "sistema pediu dados", sem segunda volta, também nos sistemas próprios;
-- numa ação, não há reenvio depois de 401: o despachante renova a chave antes de enviar, e um 401 no envio vira "não confirmada".
+- numa ação, não há reenvio depois de 401: o despachante renova a chave antes de enviar, e um 401 no envio vira "não saiu" (o sistema recusou na porta, antes de executar), com a chave dada como vencida para a pessoa autorizar de novo.
 
 O `OAuthClientProvider` do kit pode reenviar um pedido depois de um 401, para renovar a chave. Isso será conferido em "Provar a base", com um sistema de teste que conta as chamadas.
 
