@@ -287,7 +287,7 @@ async def test_cofre_que_tranca_entre_conferencias_nenhuma_acao_vira_nao_saiu(am
             assert chamadas(amb, "criar_chamado") == antes
             # O cofre volta: a conferencia seguinte (antecipada aqui) reabre, e as tres saem uma vez cada.
             cofre.trancado = False
-            p._cofre_conferido_em = 0.0
+            p._cofre_conferido_em = None
             p._acordar.set()
             for op in ops:
                 assert (await esperar_estado(amb, op.protocolo, Estado.ENVIADA, prazo=15)).desfecho == (
