@@ -504,7 +504,7 @@ class TelasDosProgramas:
         mudou = (
             await c.execute(
                 text(
-                    f"UPDATE programas SET {conjunto} WHERE aplicativo_id = :a"  # noqa: S608
+                    f"UPDATE programas SET {conjunto} WHERE aplicativo_id = :a"  # noqa: S608  # nosec B608
                     " AND situacao = ANY(CAST(:de AS text[])) RETURNING aplicativo_id"
                 ),
                 {"a": aplicativo_id, "de": list(de)},

@@ -65,7 +65,7 @@ def _mudar(onde: str) -> str:
     Nunca muda a ronda nem o vigia (``:protegidos``): para eles, ``_achar_das_portas`` acha e a rotina avisa.
     """
     return (
-        "WITH alvo AS (SELECT pr.aplicativo_id FROM programas pr JOIN aplicativos a ON a.id = pr.aplicativo_id"  # noqa: S608
+        "WITH alvo AS (SELECT pr.aplicativo_id FROM programas pr JOIN aplicativos a ON a.id = pr.aplicativo_id"  # noqa: S608  # nosec B608
         f" WHERE {onde} AND a.client_id <> ALL (CAST(:protegidos AS text[]))"
         " ORDER BY pr.aplicativo_id LIMIT :lote FOR UPDATE OF pr SKIP LOCKED),"
         " mudou AS (UPDATE programas p SET situacao = :nova FROM alvo WHERE p.aplicativo_id = alvo.aplicativo_id"
@@ -77,7 +77,7 @@ def _mudar(onde: str) -> str:
 def _achar_das_portas(onde: str) -> str:
     """A ronda e o vigia (``:protegidos``) que cumprem ``onde``: so le, nao muda nada."""
     return (
-        "SELECT pr.aplicativo_id, pr.responsavel_id, pr.substituto_id, pr.fim, pr.revisado_em,"  # noqa: S608
+        "SELECT pr.aplicativo_id, pr.responsavel_id, pr.substituto_id, pr.fim, pr.revisado_em,"  # noqa: S608  # nosec B608
         " pr.chave_trocada_em, a.nome AS programa, coalesce(r.nome, r.sujeito) AS responsavel, a.visto_em"
         " FROM programas pr JOIN aplicativos a ON a.id = pr.aplicativo_id JOIN pessoas r ON r.id = pr.responsavel_id"
         f" WHERE {onde} AND a.client_id = ANY (CAST(:protegidos AS text[])) ORDER BY pr.aplicativo_id LIMIT :lote"

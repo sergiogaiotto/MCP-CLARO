@@ -981,7 +981,7 @@ async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, jan
     paradas = (
         await c.execute(
             text(
-                "WITH alvo AS (SELECT f.id FROM fila_saida f JOIN operacoes o ON o.id = f.operacao_id"  # noqa: S608
+                "WITH alvo AS (SELECT f.id FROM fila_saida f JOIN operacoes o ON o.id = f.operacao_id"  # noqa: S608  # nosec B608
                 f" WHERE f.estado IN ('aguardando_ficha', 'liberada') AND {filtro} ORDER BY f.id FOR UPDATE OF f)"
                 " UPDATE fila_saida f SET estado = 'parada_por_bloqueio', mudou_por = :q FROM alvo, operacoes o"
                 " WHERE f.id = alvo.id AND f.operacao_id = o.id AND f.estado IN ('aguardando_ficha', 'liberada')"
@@ -1002,7 +1002,7 @@ async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, jan
     saidas = (
         await c.execute(
             text(
-                "SELECT o.protocolo, f.estado, f.enviada_em, f.mudou_em, d.decisao FROM fila_saida f"  # noqa: S608
+                "SELECT o.protocolo, f.estado, f.enviada_em, f.mudou_em, d.decisao FROM fila_saida f"  # noqa: S608  # nosec B608
                 " JOIN operacoes o ON o.id = f.operacao_id"
                 f" LEFT JOIN decisoes_nao_confirmada d ON d.operacao_id = o.id WHERE {filtro} AND ("
                 " f.estado = 'enviando'"
