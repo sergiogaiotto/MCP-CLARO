@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block titulo %}Área do ADMIN{% endblock %}
+{% block conteudo %}
+<h1>Área do ADMIN</h1>
+<p>Cada mudança feita aqui vai ao extrato, com o seu nome.</p>
+<div class="cartoes">
+  <section class="cartao"><h2><a href="/telas/admin/aplicativos">Aplicativos</a></h2>
+    <p>Habilite os aplicativos de IA que podem se ligar ao MCP-CLARO.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/sistemas">Sistemas</a></h2>
+    <p>Cadastre um sistema. O MCP-CLARO confere se ele fala a versão 2026-07-28.</p>
+    <p>Depois, leia as ferramentas dele e revise cada uma.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/modelos">Modelos de ordem</a></h2>
+    <p>Monte as ordens de serviço que as pessoas podem escolher.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/programas">Programas</a></h2>
+    <p>Programas que rodam sozinhos. Cada um tem responsável e substituto com nome.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/webhooks">Avisos por webhook</a></h2>
+    <p>Para onde o MCP-CLARO manda avisos assinados.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/extrato">Extrato de outra pessoa</a></h2>
+    <p>Só com motivo. A pessoa vê no extrato dela que você abriu.</p></section>
+  <section class="cartao parar"><h2><a href="/telas/admin/bloqueios">Bloqueios e pausas</a></h2>
+    <p>Pare uma pessoa, um aplicativo, um sistema ou tudo. Veja o que está parado e solte.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/portas">Portas do MCP-CLARO</a></h2>
+    <p>Deixe a entrada aberta, só de leitura ou fechada. Abra ou feche a porta de saída.</p></section>
+  <section class="cartao"><h2><a href="/telas/admin/pessoas">Pessoas</a></h2>
+    <p>Desative uma pessoa. As autorizações dela nos sistemas caem na hora.</p></section>
+</div>
+{% endblock %}

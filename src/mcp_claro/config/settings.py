@@ -102,6 +102,13 @@ class ExportaRastros(enum.StrEnum):
     OTLP = "otlp"
 
 
+def _parece_email(valor: str) -> bool:
+    if any(c.isspace() for c in valor) or valor.count("@") != 1:
+        return False
+    local, dominio = valor.split("@")
+    return bool(local) and "." in dominio and not dominio.startswith(".") and not dominio.endswith(".")
+
+
 class ConfiguracaoInvalida(Exception):
     """A partida recusa erro: uma ou mais combinacoes de parametros sao invalidas."""
 
@@ -220,6 +227,60 @@ class Parametros(BaseSettings):
     WATCH_SILENCE_ALARM_SECONDS: int = Field(default=900, ge=60, le=86400)
     BACKUP_RESTORE_DRILL_DAYS: int = Field(default=30, ge=1, le=365)
 
+    # Telas (Fase 1): login das pessoas pelo provedor (OIDC com PKCE)
+    SCREENS_CLIENT_ID: str = "mcp-claro-telas"
+    SCREENS_CLIENT_SECRET_FILE: str | None = None
+    SCREENS_SESSION_TTL_MINUTES: int = Field(default=480, ge=15, le=1440)
+    SCREENS_SESSION_IDLE_MINUTES: int = Field(default=30, ge=5, le=1440)
+    SCREENS_LOGIN_TTL_SECONDS: int = Field(default=600, ge=60, le=1800)
+    SCREENS_IDP_AUTHORIZATION_URL: str | None = None
+    SCREENS_IDP_TOKEN_URL: str | None = None
+    SCREENS_TIMEZONE: str = "America/Sao_Paulo"
+    SCREENS_FOREIGN_LEDGER_WINDOW_MINUTES: int = Field(default=30, ge=5, le=240)
+
+    # Rotinas e avisos (Fase 1)
+    NOTIFY_ADMIN_EMAILS: ListaTexto = Field(default_factory=list)
+    GRAFANA_WEBHOOK_PASSWORD_FILE: str | None = None
+    NOTIFY_RETRY_BASE_SECONDS: int = Field(default=30, ge=1, le=3600)
+    NOTIFY_RETRY_CAP_SECONDS: int = Field(default=3600, ge=60, le=86400)
+    NOTIFY_POLL_SECONDS: int = Field(default=5, ge=1, le=300)
+    ROUTINES_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
+    TOOL_DRIFT_CHECK_SECONDS: int = Field(default=900, ge=60, le=86400)
+
+    # Ronda das portas e vigia de fora (Fase 1); regras de recusa do papel vigia em vigia/config.py
+    PATROL_CLIENT_ID: str = "mcp-claro-ronda"
+    PATROL_KEY_FILE: str | None = None
+    PATROL_KEY_ID: str | None = None
+    PATROL_TOKEN_URL: str | None = None
+    PATROL_TOKEN_SCOPE: str = "mcp-claro"  # noqa: S105 - nome de escopo OAuth, nao segredo
+    PATROL_OTHER_AUDIENCE_SCOPE: str = "outro-servico"
+    PATROL_CA_FILE: str | None = None
+    WATCH_CLIENT_ID: str = "mcp-claro-vigia"
+    WATCH_KEY_FILE: str | None = None
+    WATCH_KEY_ID: str | None = None
+    WATCH_TOKEN_URL: str | None = None
+    WATCH_TOKEN_SCOPE: str = "mcp-claro"  # noqa: S105 - nome de escopo OAuth, nao segredo
+    WATCH_OTHER_AUDIENCE_SCOPE: str = "outro-servico"
+    WATCH_FOREIGN_TOOL: str = "mcp_claro_vigia_ferramenta_alheia"
+    WATCH_CA_FILE: str | None = None
+    WATCH_PING_SECONDS: int = Field(default=60, ge=10, le=3600)
+    WATCH_ALARM_EMAILS: ListaTexto = Field(default_factory=list)
+    WATCH_SMTP_HOST: str | None = None
+    WATCH_SMTP_PORT: int = 587
+    WATCH_SMTP_FROM: str | None = None
+    WATCH_SMTP_USERNAME: str | None = None
+    WATCH_SMTP_PASSWORD_FILE: str | None = None
+    WATCH_SMTP_STARTTLS: Chave = True
+    WATCH_WEBHOOK_TARGETS: ListaTexto = Field(default_factory=list)
+    WATCH_WEBHOOK_SECRET_FILE: str | None = None
+    WATCH_INTERNAL_PORT: int = 9445
+    WATCH_CONTINUITY_TOKEN_FILE: str | None = None
+    WATCH_CONTINUITY_URL: str | None = None
+    WATCH_CONTINUITY_CA_FILE: str | None = None
+    # Conferencia de continuidade na partida do despachante exige resposta do vigia. Sem valor: ligado em
+    # piloto e producao, desligado em desenvolvimento e teste (onde nao ha segunda maquina).
+    CONTINUITY_REQUIRE_WATCH: Annotated[bool | None, BeforeValidator(_liga_desliga)] = None
+
     # Limites de pedidos e medicoes
     EDGE_RATE_PER_IP_PER_MINUTE: int = Field(default=120, ge=1)
     RATE_PER_APP_PER_MINUTE: int = Field(default=60, ge=1)
@@ -249,6 +310,8 @@ class Parametros(BaseSettings):
             object.__setattr__(self, "ALLOWED_HOSTS", [host] if host else [])
         if self.WATCH_PUBLIC_URL is None:
             object.__setattr__(self, "WATCH_PUBLIC_URL", self.PUBLIC_BASE_URL)
+        if self.CONTINUITY_REQUIRE_WATCH is None:
+            object.__setattr__(self, "CONTINUITY_REQUIRE_WATCH", self.em_producao)
         return self
 
     @property
@@ -322,6 +385,51 @@ class Parametros(BaseSettings):
                 erros.append("Em piloto ou producao, a porta interna exige INTERNAL_CERT_FILE e INTERNAL_KEY_FILE.")
             if not self.DISPATCHER_INTERNAL_URL.startswith("https://"):
                 erros.append("Em piloto ou producao, DISPATCHER_INTERNAL_URL deve usar https (mTLS).")
+        if self.SCREENS_SESSION_IDLE_MINUTES > self.SCREENS_SESSION_TTL_MINUTES:
+            erros.append("SCREENS_SESSION_IDLE_MINUTES nao pode passar de SCREENS_SESSION_TTL_MINUTES.")
+        if self.NOTIFY_RETRY_CAP_SECONDS < self.NOTIFY_RETRY_BASE_SECONDS:
+            erros.append("NOTIFY_RETRY_CAP_SECONDS deve ser maior ou igual a NOTIFY_RETRY_BASE_SECONDS.")
+        email_ruim = [e for e in self.NOTIFY_ADMIN_EMAILS if not _parece_email(e)]
+        if email_ruim:
+            erros.append("NOTIFY_ADMIN_EMAILS tem endereco invalido.")
+        if self.SMTP_USERNAME and not self.SMTP_PASSWORD_FILE:
+            erros.append("SMTP_USERNAME exige SMTP_PASSWORD_FILE.")
+        if self.SMTP_FROM and not _parece_email(self.SMTP_FROM):
+            erros.append("SMTP_FROM deve ser um endereco de e-mail.")
+        if self.em_producao:
+            if not self.SCREENS_CLIENT_SECRET_FILE:
+                erros.append("Em piloto ou producao, as telas usam cliente confidencial: SCREENS_CLIENT_SECRET_FILE.")
+            if not self.NOTIFY_ADMIN_EMAILS:
+                erros.append("Em piloto ou producao, NOTIFY_ADMIN_EMAILS precisa de pelo menos um endereco.")
+            if not self.GRAFANA_WEBHOOK_PASSWORD_FILE:
+                erros.append("Em piloto ou producao, GRAFANA_WEBHOOK_PASSWORD_FILE e obrigatorio.")
+            if self.SMTP_HOST and not self.SMTP_STARTTLS and self.SMTP_PORT != 465:
+                erros.append("Em piloto ou producao, o SMTP exige STARTTLS (ou a porta 465).")
+        if not self.PATROL_CLIENT_ID.strip() or not self.WATCH_CLIENT_ID.strip():
+            erros.append("PATROL_CLIENT_ID e WATCH_CLIENT_ID nao podem ficar vazios.")
+        if 2 * self.WATCH_PING_SECONDS > self.WATCH_SILENCE_ALARM_SECONDS:
+            erros.append("WATCH_PING_SECONDS precisa caber duas vezes em WATCH_SILENCE_ALARM_SECONDS.")
+        if any(not u.startswith("https://") for u in self.WATCH_WEBHOOK_TARGETS):
+            erros.append("WATCH_WEBHOOK_TARGETS aceita so enderecos https://.")
+        if self.WATCH_WEBHOOK_TARGETS and not self.WATCH_WEBHOOK_SECRET_FILE:
+            erros.append("WATCH_WEBHOOK_TARGETS exige WATCH_WEBHOOK_SECRET_FILE.")
+        if any(not _parece_email(e) for e in self.WATCH_ALARM_EMAILS):
+            erros.append("WATCH_ALARM_EMAILS tem endereco invalido.")
+        if self.em_producao:
+            for nome in ("PATROL_TOKEN_URL", "WATCH_TOKEN_URL", "WATCH_CONTINUITY_URL"):
+                valor = getattr(self, nome)
+                if valor and not str(valor).startswith("https://"):
+                    erros.append(f"Em piloto ou producao, {nome} deve comecar com https://.")
+            if not self.CONTINUITY_REQUIRE_WATCH:
+                erros.append(
+                    "Em piloto ou producao, a conferencia de continuidade exige o vigia (CONTINUITY_REQUIRE_WATCH)."
+                )
+            if not self.WATCH_CONTINUITY_URL or not self.WATCH_CONTINUITY_TOKEN_FILE:
+                erros.append(
+                    "Em piloto ou producao, WATCH_CONTINUITY_URL e WATCH_CONTINUITY_TOKEN_FILE sao obrigatorios."
+                )
+            if self.PATROL_CA_FILE or self.WATCH_CA_FILE:
+                erros.append("PATROL_CA_FILE e WATCH_CA_FILE so valem em desenvolvimento e teste.")
         if self.FEATURE_TASKS:
             erros.append("FEATURE_TASKS so liga com implementacao propria sobre PostgreSQL (decisao 13).")
         if self.AUTH_ENTERPRISE_ASSERTION_ENABLED:

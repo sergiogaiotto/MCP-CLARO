@@ -31,8 +31,9 @@ RUN --mount=type=secret,id=ca_corporativa,required=false \
 WORKDIR /app
 COPY --from=construcao /app/.venv /app/.venv
 COPY --from=construcao /app/src /app/src
-COPY alembic.ini ./
+COPY alembic.ini alembic_vigia.ini ./
 COPY migrations ./migrations
+COPY migrations_vigia ./migrations_vigia
 ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 SSL_CERT_FILE=
 USER mcp:mcp
 ENTRYPOINT ["mcp-claro"]

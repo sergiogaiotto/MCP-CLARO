@@ -25,9 +25,13 @@ class ChaveAusente(LookupError):
     pass
 
 
-def contexto(sistema_id: uuid.UUID, pessoa_id: uuid.UUID | None, aplicativo_id: uuid.UUID | None) -> bytes:
+def contexto(
+    sistema_id: uuid.UUID, pessoa_id: uuid.UUID | None, aplicativo_id: uuid.UUID | None, tipo: str = "acesso"
+) -> bytes:
+    """Contexto do Transit: amarra a chave cifrada ao sistema, ao dono e ao tipo (acesso, renovacao,
+    declaracoes). Uma chave de renovacao copiada para a linha de acesso nao decifra."""
     dono = f"p:{pessoa_id}" if pessoa_id else (f"a:{aplicativo_id}" if aplicativo_id else "compartilhada")
-    return f"mcp-claro|{sistema_id}|{dono}".encode()
+    return f"mcp-claro|{sistema_id}|{dono}|{tipo}".encode()
 
 
 async def guardar(
@@ -41,7 +45,7 @@ async def guardar(
     tipo: str = "acesso",
     expira_em: datetime | None = None,
 ) -> None:
-    cifrado = await cifra.cifrar(segredo.encode(), contexto(sistema_id, pessoa_id, aplicativo_id))
+    cifrado = await cifra.cifrar(segredo.encode(), contexto(sistema_id, pessoa_id, aplicativo_id, tipo))
     await c.execute(
         text(
             "INSERT INTO chaves_cifradas (sistema_id, pessoa_id, aplicativo_id, tipo, cifrada, expira_em) "
@@ -74,4 +78,4 @@ async def abrir(
     ).first()
     if linha is None:
         raise ChaveAusente("sem chave guardada para este sistema e esta pessoa")
-    return (await cifra.decifrar(linha.cifrada, contexto(sistema_id, pessoa_id, aplicativo_id))).decode()
+    return (await cifra.decifrar(linha.cifrada, contexto(sistema_id, pessoa_id, aplicativo_id, tipo))).decode()

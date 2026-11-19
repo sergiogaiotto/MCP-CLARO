@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block titulo %}Início{% endblock %}
+{% block conteudo %}
+{% if not sessao %}
+<h1>Bem-vindo ao MCP-CLARO</h1>
+<div class="cartao">
+  <p>Aqui você decide o que cada aplicativo de IA pode fazer em seu nome.</p>
+  <p>Você também vê tudo o que foi feito, linha por linha.</p>
+  <p><a class="botao" href="/telas/login" hx-boost="false">Entrar</a></p>
+  <p class="dica">Você entra com a mesma conta de sempre da empresa.</p>
+</div>
+{% else %}
+<h1>Olá, {{ sessao.pessoa.nome or "pessoa" }}.</h1>
+<p>O que você quer fazer?</p>
+<div class="cartoes">
+  <section class="cartao">
+    <h2><a href="/telas/ordens">Minhas ordens de serviço</a></h2>
+    <p>Veja o que cada aplicativo pode ler por você, e até quando.</p>
+    <p>Dê uma nova ordem ou revogue uma ordem.</p>
+  </section>
+  <section class="cartao">
+    <h2><a href="/telas/extrato">Meu extrato</a></h2>
+    <p>Veja tudo o que foi feito em seu nome. As linhas mais novas vêm primeiro.</p>
+  </section>
+  <section class="cartao parar">
+    <h2><a href="/telas/bloqueio">Bloquear agora</a></h2>
+    <p>Viu algo estranho? Pare um aplicativo, ou todos, com um toque.</p>
+    <p>Vale na hora. Só o ADMIN desfaz.</p>
+  </section>
+  <section class="cartao">
+    <h2><a href="/telas/pausa">Pausar um aplicativo</a></h2>
+    <p>Pare um aplicativo por um tempo. Você mesmo retoma quando quiser.</p>
+  </section>
+  <section class="cartao">
+    <h2><a href="/telas/autorizar">Autorizar um sistema</a></h2>
+    <p>Alguns sistemas pedem que você autorize na página deles. Comece por aqui.</p>
+  </section>
+  {% if sessao.admin %}
+  <section class="cartao">
+    <h2><a href="/telas/admin">Área do ADMIN</a></h2>
+    <p>Aplicativos, sistemas, ferramentas, modelos de ordem, programas e avisos.</p>
+  </section>
+  {% endif %}
+</div>
+{% if not fase1_ligada and not sessao.pessoa.teste %}
+<p class="atencao">A leitura para pessoas reais ainda está desligada. Suas ordens passam a valer quando ela for ligada.</p>
+{% endif %}
+{% endif %}
+{% endblock %}

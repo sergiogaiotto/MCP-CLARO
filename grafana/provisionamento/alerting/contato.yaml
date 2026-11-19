@@ -1,0 +1,29 @@
+# Ponto de contato unico: o webhook interno das rotinas do MCP-CLARO.
+# O Grafana nao sai para a internet. Ele manda os alertas as rotinas, que os enviam pela fila de avisos,
+# com assinatura e novas tentativas (src/mcp_claro/avisos/grafana.py descreve o formato aceito).
+#
+# - Endereco: MCP_CLARO_ALERTAS_URL (no Compose, https://rotinas:9444/interno/alertas-grafana).
+# - Autenticacao basica: usuario "grafana", senha do segredo grafana_webhook.
+# - TLS com certificado dos dois lados: autoridade interna e certificado de cliente do Grafana
+#   (grafana_cliente, emitido pela autoridade de clientes das rotinas).
+# Os arquivos de segredo nao podem conter o caractere "$" (o Grafana expande variaveis neles).
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: mcp-claro-rotinas
+    receivers:
+      - uid: mcp-claro-rotinas
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: ${MCP_CLARO_ALERTAS_URL}
+          httpMethod: POST
+          username: grafana
+          password: $__file{/run/secrets/grafana_webhook}
+          maxAlerts: 50
+          tlsConfig:
+            insecureSkipVerify: false
+            caCertificate: $__file{/run/secrets/ca_interna.pem}
+            clientCertificate: $__file{/run/secrets/grafana_cliente_cert.pem}
+            clientKey: $__file{/run/secrets/grafana_cliente_key.pem}

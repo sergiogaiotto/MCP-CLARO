@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block titulo %}{% if alheio %}Extrato de outra pessoa{% else %}Meu extrato{% endif %}{% endblock %}
+{% block conteudo %}
+{% if alheio %}
+<h1>Extrato de {{ alheio.nome or "pessoa sem nome" }}</h1>
+<p class="atencao">Você está vendo o extrato de outra pessoa. Este acesso, com o motivo, ficou registrado no extrato dela.</p>
+{% else %}
+<h1>Meu extrato</h1>
+<p>Tudo o que foi feito em seu nome fica aqui. Ninguém apaga nem muda estas linhas.</p>
+{% endif %}
+{% if not linhas %}
+<p class="cartao">{% if pagina > 1 %}Não há linhas mais antigas.{% else %}Ainda não há nada no extrato.{% endif %}</p>
+{% else %}
+<table>
+  <thead><tr><th>Quando</th><th>O que aconteceu</th><th>Aplicativo</th><th>Sistema</th></tr></thead>
+  <tbody>
+  {% for l in linhas %}
+    <tr>
+      <td>{{ l.criado_em | data_hora }}</td>
+      <td>{{ l.frase }}{% if l.protocolo %} <span class="dica">Protocolo {{ l.protocolo }}.</span>{% endif %}</td>
+      <td>{{ l.aplicativo or "" }}</td>
+      <td>{{ l.sistema or "" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<nav class="paginas" aria-label="Páginas do extrato">
+  <span>{% if pagina > 1 %}<a href="{{ base }}?pagina={{ pagina - 1 }}">Mais novas</a>{% endif %}</span>
+  <span>Página {{ pagina }}</span>
+  <span>{% if ha_mais %}<a href="{{ base }}?pagina={{ pagina + 1 }}">Mais antigas</a>{% endif %}</span>
+</nav>
+{% endblock %}

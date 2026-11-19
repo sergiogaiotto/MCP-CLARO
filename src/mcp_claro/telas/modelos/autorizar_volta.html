@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block titulo %}Autorizar um sistema{% endblock %}
+{% block conteudo %}
+<h1>A autorização não foi feita</h1>
+<div class="cartao recusa" role="alert"><p>{{ erro }}</p></div>
+<p><a href="/telas/autorizar">Voltar para Autorizar um sistema</a> · <a href="/telas/extrato">Meu extrato</a></p>
+{% endblock %}

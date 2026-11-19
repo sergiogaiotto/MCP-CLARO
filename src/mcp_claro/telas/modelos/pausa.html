@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block titulo %}Pausar um aplicativo{% endblock %}
+{% block conteudo %}
+<h1>Pausar um aplicativo</h1>
+<p>A pausa para um aplicativo por um tempo. Vale na hora.</p>
+<p>Você mesmo retoma quando quiser, nesta tela. Suas ordens de serviço continuam guardadas.</p>
+<p>Se for urgente e você não quer que volte sem o ADMIN, use <a href="/telas/bloqueio">Bloquear agora</a>.</p>
+
+<section class="cartao">
+  <h2>Pausar todos os meus aplicativos</h2>
+  <p>O que acontece: nenhum aplicativo lê nada por você até você retomar.</p>
+  <form method="post" action="/telas/pausa">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="aplicativo" value="todos">
+    <button type="submit">Pausar todos</button>
+  </form>
+</section>
+
+<h2>Pausar um aplicativo só</h2>
+{% if not aplicativos %}
+<p class="cartao">Ainda não há aplicativo habilitado no MCP-CLARO.</p>
+{% endif %}
+{% for a in aplicativos %}
+<section class="cartao">
+  <h3>{{ a.nome }}{% if a.com_ordem %} <span class="etiqueta">tem ordem sua valendo</span>{% endif %}</h3>
+  <p>O que acontece: {{ a.nome }} para de ler por você até você retomar. Os outros continuam.</p>
+  <form method="post" action="/telas/pausa">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="aplicativo" value="{{ a.id }}">
+    <button type="submit">Pausar {{ a.nome }}</button>
+  </form>
+</section>
+{% endfor %}
+
+{% include "_paradas.html" %}
+{% endblock %}

@@ -1,0 +1,153 @@
+# MCP-CLARO, Fase 1: o vigia de fora, na SEGUNDA MAQUINA (outro provedor ou outra rede, decisao 12).
+# Arquivo proprio, que nao se junta ao docker/compose.yml da maquina principal. Na segunda maquina:
+#   docker compose -f docker/vigia/compose.vigia.yml up -d
+# Os segredos ficam em .segredos/vigia/ (fora do Git), so na segunda maquina e separados dos do gateway.
+#
+# - Mesma imagem do gateway (mcp-claro), papel "vigia"; as migracoes do banco do vigia rodam antes,
+#   com "migrar-vigia" (migrations_vigia/, alembic_vigia.ini).
+# - Banco proprio: postgres:18.7 oficial, com TLS (banco-com-tls.sh) e o mesmo pg_hba.conf do banco principal.
+# - O vigia sai para a internet (rede vigia_saida): endereco publico do gateway, provedor de login, SMTP e
+#   webhooks proprios. O banco fica so na rede vigia_interna, sem saida.
+# - Porta 9445 (WATCH_INTERNAL_PORT): GET /ultimo-fechamento, para o despachante conferir na partida.
+#   Com mTLS: aceita so certificados de cliente da autoridade em ca_despachante.pem, e ainda pede o segredo
+#   vigia_continuidade. Abra no firewall so para o endereco da maquina principal.
+name: mcp-claro-vigia
+
+x-vigia: &vigia
+  image: mcp-claro:dev
+  read_only: true
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  logging:
+    driver: local
+  environment: &ambiente
+    APP_ENV: teste
+    # Endereco publico do gateway: o mesmo PUBLIC_BASE_URL da maquina principal (a audiencia sai dele).
+    PUBLIC_BASE_URL: https://mcp-claro.localhost
+    WATCH_PUBLIC_URL: https://mcp-claro.localhost
+    IDP_KIND: keycloak
+    IDP_ISSUER_URL: https://mcp-claro.localhost/login/realms/mcp-claro
+    DATABASE_URL: postgresql://mcp_claro_vigia@banco_vigia:5432/mcp_claro_vigia
+    DATABASE_PASSWORD_FILE: /run/secrets/db_vigia
+    DB_SSLMODE: verify-full
+    DB_SSLROOTCERT: /run/secrets/ca_vigia.pem
+  depends_on:
+    banco_vigia:
+      condition: service_healthy
+
+services:
+  banco_vigia:
+    image: postgres:18.7@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
+    restart: unless-stopped
+    entrypoint: ["/usr/local/bin/banco-com-tls.sh"]
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf"]
+    environment:
+      POSTGRES_USER: mcp_claro_vigia_migracao
+      POSTGRES_DB: mcp_claro_vigia
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_vigia_migracao
+    secrets:
+      [db_vigia_migracao, db_vigia, banco_vigia_cert.pem, banco_vigia_key.pem, ca_vigia.pem]
+    volumes:
+      - banco_vigia:/var/lib/postgresql
+      - ./banco-com-tls.sh:/usr/local/bin/banco-com-tls.sh:ro
+      - ../postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./iniciar/10-vigia.sh:/docker-entrypoint-initdb.d/10-vigia.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp_claro_vigia_migracao -d mcp_claro_vigia -h 127.0.0.1"]
+      interval: 5s
+      retries: 20
+    logging:
+      driver: local
+    networks: [vigia_interna]
+
+  migrar_vigia:
+    <<: *vigia
+    restart: "no"
+    command: ["migrar-vigia"]
+    environment:
+      <<: *ambiente
+      DATABASE_URL: postgresql://mcp_claro_vigia_migracao@banco_vigia:5432/mcp_claro_vigia
+      DATABASE_PASSWORD_FILE: /run/secrets/db_vigia_migracao
+    secrets: [db_vigia_migracao, ca_vigia.pem]
+    networks: [vigia_interna]
+
+  vigia:
+    <<: *vigia
+    command: ["vigia"]
+    environment:
+      <<: *ambiente
+      # Identidade de programa no provedor de login (private_key_jwt, ES256).
+      WATCH_CLIENT_ID: mcp-claro-vigia
+      WATCH_KEY_FILE: /run/secrets/vigia_chave.pem
+      WATCH_KEY_ID: mcp-claro-vigia-1
+      WATCH_TOKEN_SCOPE: mcp-claro
+      WATCH_OTHER_AUDIENCE_SCOPE: outro-servico
+      # Ritmos (valores iniciais do plano).
+      WATCH_PING_SECONDS: "60"
+      WATCH_PROBE_INTERVAL_SECONDS: "600"
+      WATCH_SILENCE_ALARM_SECONDS: "900"
+      PATROL_FAILS_TO_CLOSE: "2"
+      # Canais proprios do vigia, separados dos do gateway.
+      WATCH_ALARM_EMAILS: equipe-gateway@mcp-claro.localhost
+      WATCH_SMTP_HOST: smtp.exemplo.invalid
+      WATCH_SMTP_PORT: "587"
+      WATCH_SMTP_FROM: vigia@mcp-claro.localhost
+      WATCH_SMTP_USERNAME: vigia
+      WATCH_SMTP_PASSWORD_FILE: /run/secrets/vigia_smtp
+      WATCH_SMTP_STARTTLS: ligado
+      WATCH_WEBHOOK_TARGETS: https://alertas.exemplo.invalid/mcp-claro-vigia
+      WATCH_WEBHOOK_SECRET_FILE: /run/secrets/vigia_webhook_assinatura
+      # Conferencia de continuidade com o despachante (porta 9445, TLS e mTLS).
+      WATCH_INTERNAL_PORT: "9445"
+      WATCH_CONTINUITY_TOKEN_FILE: /run/secrets/vigia_continuidade
+      INTERNAL_CERT_FILE: /run/secrets/vigia_cert.pem
+      INTERNAL_KEY_FILE: /run/secrets/vigia_key.pem
+      INTERNAL_CA_FILE: /run/secrets/ca_vigia.pem
+      INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_despachante.pem
+      # So em desenvolvimento: autoridade local do portao (Caddy "tls internal") para o endereco publico.
+      # WATCH_CA_FILE: /run/secrets/ca_portao_dev.pem
+    secrets:
+      - db_vigia
+      - ca_vigia.pem
+      - vigia_chave.pem
+      - vigia_smtp
+      - vigia_webhook_assinatura
+      - vigia_continuidade
+      - vigia_cert.pem
+      - vigia_key.pem
+      - ca_despachante.pem
+    ports: ["9445:9445"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "mcp_claro.saude", "vigia"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    depends_on:
+      banco_vigia:
+        condition: service_healthy
+      migrar_vigia:
+        condition: service_completed_successfully
+    networks: [vigia_interna, vigia_saida]
+
+networks:
+  vigia_interna:
+    internal: true
+  vigia_saida: {}
+
+volumes:
+  banco_vigia: {}
+
+secrets:
+  db_vigia_migracao: { file: ../../.segredos/vigia/db_vigia_migracao }
+  db_vigia: { file: ../../.segredos/vigia/db_vigia }
+  ca_vigia.pem: { file: ../../.segredos/vigia/ca_vigia.pem }
+  banco_vigia_cert.pem: { file: ../../.segredos/vigia/banco_vigia_cert.pem }
+  banco_vigia_key.pem: { file: ../../.segredos/vigia/banco_vigia_key.pem }
+  vigia_chave.pem: { file: ../../.segredos/vigia/vigia_chave.pem }
+  vigia_smtp: { file: ../../.segredos/vigia/vigia_smtp }
+  vigia_webhook_assinatura: { file: ../../.segredos/vigia/vigia_webhook_assinatura }
+  vigia_continuidade: { file: ../../.segredos/vigia/vigia_continuidade }
+  vigia_cert.pem: { file: ../../.segredos/vigia/vigia_cert.pem }
+  vigia_key.pem: { file: ../../.segredos/vigia/vigia_key.pem }
+  ca_despachante.pem: { file: ../../.segredos/vigia/ca_despachante.pem }

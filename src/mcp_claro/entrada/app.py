@@ -50,8 +50,8 @@ def criar_app_entrada(
 ) -> Starlette:
     p.conferir()
     http_login = http_login or httpx2.AsyncClient(timeout=httpx2.Timeout(5.0), follow_redirects=False)
-    despachante = ClienteDespachante(p) if leitor is None else None
-    ler: Leitor = leitor or despachante.ler  # type: ignore[union-attr]
+    despachante = ClienteDespachante(p)
+    ler: Leitor = leitor or despachante.ler
     servidor = criar_servidor(p, engine, ler)
     sm = StreamableHTTPSessionManager(
         app=servidor,
@@ -91,8 +91,7 @@ def criar_app_entrada(
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
             log.info("partida", papel="entrada", versao=__version__, mcp=VERSAO_MCP)
             yield
-            if despachante is not None:
-                await despachante.fechar()
+            await despachante.fechar()
             await http_login.aclose()
 
     rotas: list[Any] = [
@@ -101,6 +100,12 @@ def criar_app_entrada(
         Route("/.well-known/oauth-protected-resource", metadados_recurso, methods=["GET"]),
         Route("/saude", saude, methods=["GET"]),
     ]
+    from mcp_claro.entrada.fechamentos import rotas_fechamentos
+    from mcp_claro.telas import rotas_telas
+
+    rotas.extend(rotas_telas(p, engine, despachante, http_login=http_login))
+    # O vigia busca os fechamentos com o cracha proprio de programa, mesmo com a entrada fechada.
+    rotas.extend(rotas_fechamentos(p, engine, verificador))
     app = Starlette(routes=rotas, lifespan=ciclo)
     app.state.parametros = p
     return app

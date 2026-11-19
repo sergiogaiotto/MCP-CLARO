@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block titulo %}Bloquear agora{% endblock %}
+{% block conteudo %}
+<h1>Bloquear agora</h1>
+<p>Viu algo estranho? Bloqueie com um toque.</p>
+<p>O bloqueio vale na hora. O que você bloquear para de ler por você.</p>
+<p><strong>Só o ADMIN desfaz um bloqueio.</strong> Para parar por um tempo e voltar sozinho, use <a href="/telas/pausa">Pausar</a>.</p>
+
+<section class="cartao parar">
+  <h2>Bloquear todos os meus aplicativos</h2>
+  <p>O que acontece: nenhum aplicativo lê mais nada por você, a partir de agora.</p>
+  <p>Para voltar, você fala com o ADMIN.</p>
+  <form method="post" action="/telas/bloqueio">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="aplicativo" value="todos">
+    <button type="submit" class="grande">Bloquear todos agora</button>
+  </form>
+</section>
+
+<h2>Bloquear um aplicativo só</h2>
+{% if not aplicativos %}
+<p class="cartao">Ainda não há aplicativo habilitado no MCP-CLARO.</p>
+{% endif %}
+{% for a in aplicativos %}
+<section class="cartao">
+  <h3>{{ a.nome }}{% if a.com_ordem %} <span class="etiqueta">tem ordem sua valendo</span>{% endif %}</h3>
+  <p>O que acontece: {{ a.nome }} para de ler por você agora. Os outros aplicativos continuam.</p>
+  <form method="post" action="/telas/bloqueio">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="aplicativo" value="{{ a.id }}">
+    <button type="submit">Bloquear {{ a.nome }} agora</button>
+  </form>
+</section>
+{% endfor %}
+
+{% include "_paradas.html" %}
+{% endblock %}

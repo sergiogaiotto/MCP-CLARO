@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block titulo %}Portas do MCP-CLARO{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin">Área do ADMIN</a></p>
+<h1>Portas do MCP-CLARO</h1>
+<p>A entrada recebe os pedidos dos aplicativos. A porta de saída leva os pedidos aos sistemas.</p>
+
+<h2>Entrada</h2>
+<div class="cartao">
+  {% if entrada %}
+  <p>Agora: <strong>{% if entrada.nivel == "aberta" %}aberta{% elif entrada.nivel == "so_leitura" %}só de leitura{% else %}fechada{% endif %}</strong>, desde {{ entrada.mudou_em | data_hora }} ({{ entrada_por }}).</p>
+  {% if entrada.motivo %}<p class="dica">Motivo: {{ entrada.motivo }}</p>{% endif %}
+  {% else %}
+  <p><strong>Sem estado gravado: a entrada conta como fechada.</strong></p>
+  {% endif %}
+</div>
+<form method="post" action="/telas/admin/portas/entrada" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <fieldset>
+    <legend>Como a entrada fica?</legend>
+    <label class="opcao"><input type="radio" name="nivel" value="aberta" required> Aberta: atende o que as outras regras deixarem.</label>
+    <label class="opcao"><input type="radio" name="nivel" value="so_leitura"> Só de leitura: atende só o que só lê.</label>
+    <label class="opcao"><input type="radio" name="nivel" value="fechada"> Fechada: recusa todo pedido, até a lista de ferramentas.</label>
+  </fieldset>
+  <label for="motivo_entrada">Motivo</label>
+  <textarea id="motivo_entrada" name="motivo" required minlength="5" maxlength="300"></textarea>
+  <button type="submit">Mudar a entrada</button>
+</form>
+
+<h2>Porta de saída</h2>
+<div class="cartao">
+  {% if saida %}
+  <p>Agora: <strong>{% if saida.aberta %}aberta{% else %}fechada{% endif %}</strong>, desde {{ saida.mudou_em | data_hora }} ({{ saida_por }}).</p>
+  {% if saida.motivo %}<p class="dica">Motivo: {{ saida.motivo }}</p>{% endif %}
+  {% else %}
+  <p><strong>Sem estado gravado: a porta de saída conta como fechada.</strong></p>
+  {% endif %}
+  <p class="dica">Fechada, nada vai a sistema nenhum. Reabrir é sempre decisão registrada.</p>
+</div>
+<form method="post" action="/telas/admin/portas/saida" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <fieldset>
+    <legend>Abrir ou fechar?</legend>
+    <label class="opcao"><input type="radio" name="acao" value="abrir" required> Abrir a porta de saída.</label>
+    <label class="opcao"><input type="radio" name="acao" value="fechar"> Fechar a porta de saída: nada vai aos sistemas.</label>
+  </fieldset>
+  <label for="motivo_saida">Motivo</label>
+  <textarea id="motivo_saida" name="motivo" required minlength="5" maxlength="300"></textarea>
+  <button type="submit">Mudar a porta de saída</button>
+</form>
+{% endblock %}

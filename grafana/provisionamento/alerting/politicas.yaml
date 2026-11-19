@@ -1,0 +1,11 @@
+# Politica de avisos: todo alerta vai ao webhook interno das rotinas. As rotinas evitam aviso repetido
+# (chave unica por impressao, situacao e inicio do alerta).
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: mcp-claro-rotinas
+    group_by: ["grafana_folder", "alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

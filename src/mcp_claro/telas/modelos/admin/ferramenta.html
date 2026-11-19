@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block titulo %}Revisar {{ nome }}{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin/sistemas/{{ sistema.id }}">Sistema {{ sistema.nome }}</a></p>
+<h1>Revisar a ferramenta <code>{{ nome }}</code></h1>
+{% if mudou %}
+<p class="recusa">O sistema mudou esta ferramenta desde a última revisão. Confira tudo de novo.</p>
+{% endif %}
+
+<section class="cartao">
+  <h2>O que o sistema declara</h2>
+  <p class="dica">Este texto vem do sistema. Ele não é mostrado às pessoas nem aos aplicativos.</p>
+  <p class="estranho">{{ definicao.get("description", "(sem descrição)") }}</p>
+  <p><strong>Campos que a ferramenta pede:</strong></p>
+  <pre>{{ esquema_entrada }}</pre>
+</section>
+
+<form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/ferramenta" class="cartao">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="nome" value="{{ nome }}">
+  <h2>Sua revisão</h2>
+  <label for="nome_vitrine">Nome na vitrine</label>
+  <input type="text" id="nome_vitrine" name="nome_vitrine" required maxlength="128" value="{{ valores.nome_vitrine }}">
+  <p class="dica">É o nome que o aplicativo de IA vê. Use letras sem acento, números e _ . -</p>
+  <label for="titulo">Título (opcional)</label>
+  <input type="text" id="titulo" name="titulo" maxlength="120" value="{{ valores.titulo }}">
+  <label for="descricao">Descrição própria</label>
+  <textarea id="descricao" name="descricao" required maxlength="1000">{{ valores.descricao }}</textarea>
+  <p class="dica">Escreva com suas palavras o que a ferramenta faz. Este é o texto que as pessoas veem.</p>
+  <fieldset>
+    <legend>Classe</legend>
+    <label class="opcao"><input type="radio" name="classe" value="le" {% if valores.classe == "le" %}checked{% endif %}> Só lê: não muda nada no sistema.</label>
+    <label class="opcao"><input type="radio" name="classe" value="muda" {% if valores.classe == "muda" %}checked{% endif %}> Muda algo e não tem volta.</label>
+    <label class="opcao"><input type="radio" name="classe" value="tem_volta" {% if valores.classe == "tem_volta" %}checked{% endif %}> Muda algo, mas dá para desfazer.</label>
+  </fieldset>
+  <fieldset>
+    <legend>Risco</legend>
+    {% for valor, texto in [("baixo", "Baixo"), ("medio", "Médio"), ("alto", "Alto")] %}
+    <label class="opcao"><input type="radio" name="risco" value="{{ valor }}" {% if valores.risco == valor %}checked{% endif %}> {{ texto }}</label>
+    {% endfor %}
+  </fieldset>
+  <fieldset>
+    <legend>Campos pessoais da resposta</legend>
+    <p class="dica">Estes campos são mascarados antes de chegar ao aplicativo.</p>
+    {% for campo in campos_saida %}
+    <label class="opcao"><input type="checkbox" name="campos" value="{{ campo }}" {% if campo in valores.campos %}checked{% endif %}> <code>{{ campo }}</code></label>
+    {% endfor %}
+    <label for="outros_campos">Outros campos (separados por vírgula)</label>
+    <input type="text" id="outros_campos" name="outros_campos" maxlength="1000" value="{{ outros_campos }}">
+  </fieldset>
+  <button type="submit">Gravar a revisão</button>
+  {% if revisao %}<p class="dica">Revisão atual: versão {{ revisao.versao }}. Gravar cria a versão seguinte.</p>{% endif %}
+</form>
+{% endblock %}

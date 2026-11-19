@@ -1,0 +1,30 @@
+# Fonte de dados do MCP-CLARO: o PostgreSQL do produto, com o usuario grafana_leitor.
+# O grafana_leitor so tem SELECT nas visoes de medicoes (migracao 0004): contagens sem pessoa e sem conteudo.
+# A senha vem do segredo do Docker db_grafana_leitor. As variaveis de ambiente vem do Compose.
+apiVersion: 1
+
+prune: true
+
+datasources:
+  - name: MCP-CLARO medicoes
+    uid: mcp-claro-medicoes
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: ${MCP_CLARO_BANCO_ENDERECO}
+    user: grafana_leitor
+    isDefault: true
+    editable: false
+    jsonData:
+      database: ${MCP_CLARO_BANCO_NOME}
+      sslmode: ${MCP_CLARO_BANCO_SSLMODE}
+      tlsConfigurationMethod: file-path
+      sslRootCertFile: /run/secrets/ca_interna.pem
+      postgresVersion: 1500
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+      maxIdleConnsAuto: false
+      connMaxLifetime: 14400
+      timeInterval: 1m
+    secureJsonData:
+      password: $__file{/run/secrets/db_grafana_leitor}

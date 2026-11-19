@@ -140,6 +140,7 @@ jobs:
           docker build -t mcp-claro:ci -f docker/Dockerfile .
           docker build -t mcp-claro-portao:ci docker/caddy
           docker build -t mcp-claro-postgres:ci docker/postgres
+          docker build -t mcp-claro-backup:ci docker/backup
       - name: a imagem recusa versao errada na partida
         run: |
           docker run --rm mcp-claro:ci conferir

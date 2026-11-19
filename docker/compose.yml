@@ -44,13 +44,17 @@ services:
     build: ./postgres
     image: mcp-claro-postgres:dev
     restart: unless-stopped
+    # Um init como PID 1: o servidor do pgBackRest roda ao lado do PostgreSQL no mesmo conteiner.
+    init: true
     environment:
+      PGBACKREST_LIGADO: ligado
+      PGBACKREST_STANZA: mcp-claro
       POSTGRES_USER: mcp_claro_migracao
       POSTGRES_DB: mcp_claro
       POSTGRES_PASSWORD_FILE: /run/secrets/db_migracao
     secrets:
       [db_migracao, db_entrada, db_despachante, db_rotinas, db_grafana_leitor, db_cofre, db_login, db_grafana,
-       banco_cert.pem, banco_key.pem, ca_interna.pem]
+       banco_cert.pem, banco_key.pem, ca_interna.pem, db_backup]
     volumes: ["banco:/var/lib/postgresql"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mcp_claro_migracao -d mcp_claro -h 127.0.0.1"]
@@ -92,7 +96,11 @@ services:
       INTERNAL_HEALTH_KEY_FILE: /run/secrets/entrada_saude_key.pem
       VAULT_ROLE_ID_FILE: /run/secrets/cofre_entrada_role_id
       VAULT_SECRET_ID_FILE: /run/secrets/cofre_entrada_secret_id
-    secrets: [db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem, ca_clientes_entrada.pem,
+      # Telas: login das pessoas pelo cliente confidencial; a troca do codigo vai pela rede interna.
+      SCREENS_CLIENT_ID: mcp-claro-telas
+      SCREENS_CLIENT_SECRET_FILE: /run/secrets/telas_cliente
+      SCREENS_IDP_TOKEN_URL: http://login:8080/login/realms/mcp-claro/protocol/openid-connect/token
+    secrets: [telas_cliente, db_entrada, ca_interna.pem, entrada_cert.pem, entrada_key.pem, ca_clientes_entrada.pem,
               entrada_cliente_cert.pem, entrada_cliente_key.pem, entrada_saude_cert.pem, entrada_saude_key.pem,
               cofre_entrada_role_id, cofre_entrada_secret_id]
     depends_on:
@@ -141,6 +149,9 @@ services:
       SMTP_PORT: "1025"
       SMTP_FROM: mcp-claro@mcp-claro.localhost
       SMTP_STARTTLS: desligado
+      WEBHOOK_SECRET_FILE: /run/secrets/webhook_assinatura
+      GRAFANA_WEBHOOK_PASSWORD_FILE: /run/secrets/grafana_webhook
+      NOTIFY_ADMIN_EMAILS: admin@mcp-claro.localhost
       # A porta das rotinas aceita so o Grafana (alertas por webhook interno).
       INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_rotinas.pem
       INTERNAL_CLIENT_CERT_FILE: /run/secrets/rotinas_cliente_cert.pem
@@ -151,12 +162,16 @@ services:
       VAULT_SECRET_ID_FILE: /run/secrets/cofre_rotinas_secret_id
     secrets: [db_rotinas, ca_interna.pem, rotinas_cert.pem, rotinas_key.pem, ca_clientes_rotinas.pem,
               rotinas_cliente_cert.pem, rotinas_cliente_key.pem, rotinas_saude_cert.pem, rotinas_saude_key.pem,
-              cofre_rotinas_role_id, cofre_rotinas_secret_id]
+              cofre_rotinas_role_id, cofre_rotinas_secret_id, webhook_assinatura, grafana_webhook]
     depends_on:
       migrar:
         condition: service_completed_successfully
       cofre-iniciar:
         condition: service_completed_successfully
+      despachante:
+        condition: service_healthy
+      correio:
+        condition: service_started
     networks: [interna, saida]
 
   cofre:
@@ -232,7 +247,8 @@ services:
         set -euo pipefail
         KC_DB_PASSWORD="$$(< /run/secrets/db_login)"
         KC_BOOTSTRAP_ADMIN_PASSWORD="$$(< /run/secrets/login_admin)"
-        export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD
+        MCP_CLARO_TELAS_SEGREDO="$$(< /run/secrets/telas_cliente)"
+        export KC_DB_PASSWORD KC_BOOTSTRAP_ADMIN_PASSWORD MCP_CLARO_TELAS_SEGREDO
         exec /opt/keycloak/bin/kc.sh "$$@"
       - kc
     command: ["start-dev", "--import-realm"]
@@ -252,7 +268,7 @@ services:
       # Audiencia dos crachas: PUBLIC_BASE_URL + /mcp (MCP_RESOURCE_ID do gateway).
       MCP_CLARO_RECURSO: https://mcp-claro.localhost/mcp
       MCP_CLARO_CLIENTES_DE_TESTE: "false"
-    secrets: [db_login, login_admin, ca_interna.pem]
+    secrets: [db_login, login_admin, telas_cliente, ca_interna.pem]
     volumes:
       - ./login/realm-mcp-claro.json:/opt/keycloak/data/import/realm-mcp-claro.json:ro
     depends_on:
@@ -275,6 +291,100 @@ services:
     logging:
       driver: local
     networks: [borda, interna]
+
+  grafana:
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      MCP_CLARO_BANCO_ENDERECO: banco:5432
+      MCP_CLARO_BANCO_NOME: mcp_claro
+      MCP_CLARO_BANCO_SSLMODE: verify-full
+      MCP_CLARO_ALERTAS_URL: https://rotinas:9444/interno/alertas-grafana
+      GF_SERVER_DOMAIN: mcp-claro.localhost
+      GF_SERVER_ROOT_URL: https://mcp-claro.localhost/paineis/
+    volumes:
+      - ../grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ../grafana/provisionamento:/etc/grafana/provisioning:ro
+      - ../grafana/paineis:/etc/grafana/paineis:ro
+      - grafana_dados:/var/lib/grafana
+    secrets:
+      - db_grafana
+      - db_grafana_leitor
+      - grafana_admin
+      - grafana_webhook
+      - ca_interna.pem
+      - grafana_cert.pem
+      - grafana_key.pem
+      - grafana_cliente_cert.pem
+      - grafana_cliente_key.pem
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "--cacert", "/run/secrets/ca_interna.pem",
+             "https://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      banco:
+        condition: service_healthy
+      migrar:
+        condition: service_completed_successfully
+    logging:
+      driver: local
+    networks: [interna]
+
+  backup:
+    build: ./backup
+    image: mcp-claro-backup:dev
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    environment:
+      PGBACKREST_STANZA: mcp-claro
+      BACKUP_COMPLETA_DIA_SEMANA: "7"
+      BACKUP_HORA: "3"
+      BACKUP_INCREMENTAL_HORAS: "1"
+      BACKUP_LOGICO_HORA: "4"
+      BACKUP_VERIFICAR_DIA_SEMANA: "6"
+      BACKUP_SAUDE_HORAS: "26"
+      LOGICO_BANCOS: mcp_claro grafana cofre login
+      LOGICO_GUARDA_DIAS: "35"
+      LOGICO_ENVIO: local
+    secrets:
+      - backup_cifra
+      - db_backup
+      - backup_cert.pem
+      - backup_key.pem
+      - ca_interna.pem
+    volumes:
+      - backup_repositorio:/var/lib/pgbackrest
+      - backup_local:/var/lib/mcp-claro-backup
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/backup.sh", "saude"]
+      interval: 5m
+      timeout: 60s
+      retries: 3
+      start_period: 2h
+    depends_on:
+      banco:
+        condition: service_healthy
+    logging:
+      driver: local
+    # interna: banco. saida: repositorio S3 ou SFTP fora das maquinas (piloto e producao).
+    networks: [interna, saida]
+
+  # So no roteiro de restauracao (docs/restauracao.md), nunca sobe sozinho:
+  #   docker compose ... --profile restauracao run --rm restaurar-logico /var/lib/mcp-claro-backup/logico/<carimbo>
+
+  # So no roteiro de restauracao (docs/restauracao.md), nunca sobe sozinho:
+  #   docker compose ... --profile restauracao run --rm restaurar-logico /var/lib/mcp-claro-backup/logico/<carimbo>
 
   portao:
     build: ./caddy
@@ -307,6 +417,9 @@ networks:
 volumes:
   banco: {}
   portao_dados: {}
+  grafana_dados: {}
+  backup_repositorio: {}
+  backup_local: {}
 
 secrets:
   db_migracao: { file: ../.segredos/db_migracao }
@@ -353,3 +466,15 @@ secrets:
   cofre_despachante_secret_id: { file: ../.segredos/cofre_despachante_secret_id }
   cofre_rotinas_role_id: { file: ../.segredos/cofre_rotinas_role_id }
   cofre_rotinas_secret_id: { file: ../.segredos/cofre_rotinas_secret_id }
+  telas_cliente: { file: ../.segredos/telas_cliente }
+  webhook_assinatura: { file: ../.segredos/webhook_assinatura }
+  grafana_webhook: { file: ../.segredos/grafana_webhook }
+  grafana_admin: { file: ../.segredos/grafana_admin }
+  grafana_cert.pem: { file: ../.segredos/grafana_cert.pem }
+  grafana_key.pem: { file: ../.segredos/grafana_key.pem }
+  grafana_cliente_cert.pem: { file: ../.segredos/grafana_cliente_cert.pem }
+  grafana_cliente_key.pem: { file: ../.segredos/grafana_cliente_key.pem }
+  backup_cifra: { file: ../.segredos/backup_cifra }
+  db_backup: { file: ../.segredos/db_backup }
+  backup_cert.pem: { file: ../.segredos/backup_cert.pem }
+  backup_key.pem: { file: ../.segredos/backup_key.pem }
