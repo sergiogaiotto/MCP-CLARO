@@ -3,13 +3,17 @@
 Calculo proprio, so com a biblioteca padrao. Inclui nome, descricao, esquemas
 de entrada e de saida e etiquetas: qualquer mudanca nesses campos muda a
 impressao. (A receita do FastMCP deixa a descricao de fora e nao serve aqui.)
+
+``impressao_servidor`` resume o servidor inteiro (Fase 3): a lista de cada
+ferramenta declarada com a sua impressao. A receita de ``impressao`` nao muda:
+mudar a receita faria tudo o que ja foi revisado parecer mudado.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 CAMPOS: tuple[str, ...] = ("name", "title", "description", "inputSchema", "outputSchema", "annotations")
@@ -23,6 +27,17 @@ def canonico(definicao: Mapping[str, Any]) -> str:
 def impressao(definicao: Mapping[str, Any]) -> str:
     """``sha256:<hex>`` da forma canonica da definicao declarada pelo sistema."""
     return "sha256:" + hashlib.sha256(canonico(definicao).encode("utf-8")).hexdigest()
+
+
+def impressao_servidor(declaradas: Iterable[tuple[str, str]]) -> str:
+    """``sha256:<hex>`` do servidor inteiro: a lista canonica, ordenada, de ``[nome, impressao]``.
+
+    Nao depende da ordem em que o servidor declara as ferramentas; muda com ferramenta mudada (mesmo so o
+    texto), nova ou sumida. Os nomes sao texto do fornecedor, sem formato: entram como vieram.
+    """
+    pares = sorted([str(nome), str(imp)] for nome, imp in declaradas)
+    canonica = json.dumps(pares, ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonica.encode("utf-8")).hexdigest()
 
 
 def pede_mais(antes: Mapping[str, Any], depois: Mapping[str, Any]) -> bool:

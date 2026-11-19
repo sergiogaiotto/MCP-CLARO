@@ -1,17 +1,31 @@
-"""Consultas ao cadastro. SQL explicito; a vitrine sai daqui, pessoa por pessoa."""
+"""Consultas ao cadastro. SQL explicito; a vitrine sai daqui, pessoa por pessoa.
+
+Servidor de terceiros (Fase 3): so aparece na vitrine com ``terceiros`` verdadeiro (a chave da Fase 3 ligada, ou
+pessoa de teste: quem chama decide) e so com as ferramentas publicadas na revisao do servidor vigente. A revisao
+de uma ferramenta de terceiro grava o esquema limpo (sem texto do fornecedor), sem as dicas do fornecedor e com
+"traz texto de fora".
+"""
 
 from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from mcp_claro.cadastro.esquema import (
+    com_descricoes,
+    conferir_custo,
+    conferir_padroes,
+    conferir_referencias,
+    limpar_textos,
+)
 from mcp_claro.cadastro.impressao import impressao
-from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
+from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, ORIGENS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
 from mcp_claro.entrada.argumentos import conferir_esquema
 
 
@@ -36,6 +50,8 @@ def _sistema(linha: Row[Any], prefixo: str = "") -> Sistema:
         g("selo"),
         g("situacao"),
         g("versao_mcp"),
+        g("revisao_servidor_id"),
+        g("sondagem_desfecho"),
     )
 
 
@@ -75,19 +91,28 @@ async def sistema_por_id(c: AsyncConnection, sistema_id: uuid.UUID) -> Sistema |
     return _sistema(linha) if linha else None
 
 
+# Um terceiro so entra com ``terceiros`` e so com as ferramentas publicadas na revisao do servidor vigente (a
+# guarda de sistemas so deixa a revisao vigente num servidor 'ativo'). Rever uma ferramenta grava outro id: ela sai
+# da vitrine ate a proxima conclusao. A revisada de terceiro tambem precisa da definicao declarada, que so a
+# revisao da Fase 3 grava (``revisar_ferramenta``, com o esquema limpo e as descricoes do ADMIN): uma linha de
+# antes dela nunca leva o texto do fornecedor a vitrine. Sistema proprio: como nas Fases 1 e 2.
 _SQL_VITRINE = """
 SELECT DISTINCT ON (f.id)
        f.*, o.id AS ordem_id,
        s.id AS s_id, s.nome AS s_nome, s.endereco AS s_endereco, s.origem AS s_origem, s.tipo_chave AS s_tipo_chave,
-       s.selo AS s_selo, s.situacao AS s_situacao, s.versao_mcp AS s_versao_mcp
+       s.selo AS s_selo, s.situacao AS s_situacao, s.versao_mcp AS s_versao_mcp,
+       s.revisao_servidor_id AS s_revisao_servidor_id, s.sondagem_desfecho AS s_sondagem_desfecho
 FROM ordens_servico o
 JOIN modelos_ordem m ON m.id = o.modelo_id AND m.ativo
 JOIN modelos_ordem_ferramentas mf ON mf.modelo_id = m.id
 JOIN ferramentas_revisadas f ON f.sistema_id = mf.sistema_id AND f.nome_original = mf.nome_original
                              AND f.situacao = 'ativa'
 JOIN sistemas s ON s.id = f.sistema_id AND s.situacao = 'ativo' AND s.versao_mcp = :versao
+LEFT JOIN revisoes_servidor rs ON rs.id = s.revisao_servidor_id AND rs.sistema_id = s.id
 WHERE o.pessoa_id = :pessoa AND o.aplicativo_id = :aplicativo AND o.situacao = 'ativa'
   AND o.inicio <= now() AND o.fim > now()
+  AND (s.origem = 'proprio'
+       OR (CAST(:terceiros AS boolean) AND f.id = ANY (rs.publicadas) AND f.definicao_declarada IS NOT NULL))
 """
 
 
@@ -107,28 +132,43 @@ def _ferramenta(linha: Row[Any]) -> FerramentaVitrine:
         risco=linha.risco,
         campos_pessoais=tuple(linha.campos_pessoais or ()),
         ordem_id=linha.ordem_id,
+        texto_de_fora=bool(linha.texto_de_fora),
     )
 
 
 async def vitrine(
-    c: AsyncConnection, pessoa_id: uuid.UUID, aplicativo_id: uuid.UUID, versao: str
+    c: AsyncConnection, pessoa_id: uuid.UUID, aplicativo_id: uuid.UUID, versao: str, *, terceiros: bool = False
 ) -> list[FerramentaVitrine]:
+    """A vitrine da pessoa no aplicativo. ``terceiros``: mostra servidores de terceiros (chave da Fase 3 ligada
+    ou pessoa de teste). O padrao e o lado que esconde."""
     linhas = (
         await c.execute(
             text(_SQL_VITRINE + " ORDER BY f.id, o.fim DESC"),
-            {"pessoa": pessoa_id, "aplicativo": aplicativo_id, "versao": versao},
+            {"pessoa": pessoa_id, "aplicativo": aplicativo_id, "versao": versao, "terceiros": terceiros},
         )
     ).all()
     return sorted((_ferramenta(linha) for linha in linhas), key=lambda f: f.nome_vitrine)
 
 
 async def ferramenta_na_vitrine(
-    c: AsyncConnection, pessoa_id: uuid.UUID, aplicativo_id: uuid.UUID, nome_vitrine: str, versao: str
+    c: AsyncConnection,
+    pessoa_id: uuid.UUID,
+    aplicativo_id: uuid.UUID,
+    nome_vitrine: str,
+    versao: str,
+    *,
+    terceiros: bool = False,
 ) -> FerramentaVitrine | None:
     linha = (
         await c.execute(
             text(_SQL_VITRINE + " AND f.nome_vitrine = :nome ORDER BY f.id, o.fim DESC"),
-            {"pessoa": pessoa_id, "aplicativo": aplicativo_id, "versao": versao, "nome": nome_vitrine},
+            {
+                "pessoa": pessoa_id,
+                "aplicativo": aplicativo_id,
+                "versao": versao,
+                "nome": nome_vitrine,
+                "terceiros": terceiros,
+            },
         )
     ).first()
     return _ferramenta(linha) if linha else None
@@ -142,12 +182,20 @@ async def ferramenta_da_ordem(
     ordem_id: uuid.UUID,
     ferramenta_id: uuid.UUID,
     versao: str,
+    terceiros: bool = False,
 ) -> FerramentaVitrine | None:
     """Reconferencia do despachante: a mesma regra da vitrine, presa a ordem e a versao revisada vigente."""
     linha = (
         await c.execute(
             text(_SQL_VITRINE + " AND f.id = :f AND o.id = :o ORDER BY f.id, o.fim DESC"),
-            {"pessoa": pessoa_id, "aplicativo": aplicativo_id, "versao": versao, "f": ferramenta_id, "o": ordem_id},
+            {
+                "pessoa": pessoa_id,
+                "aplicativo": aplicativo_id,
+                "versao": versao,
+                "f": ferramenta_id,
+                "o": ordem_id,
+                "terceiros": terceiros,
+            },
         )
     ).first()
     return _ferramenta(linha) if linha else None
@@ -162,21 +210,6 @@ async def esquema_declarado(c: AsyncConnection, sistema_id: uuid.UUID, nome: str
         )
     ).scalar_one_or_none()
     return dict(valor) if isinstance(valor, dict) else None
-
-
-async def ferramenta_por_id(c: AsyncConnection, ferramenta_id: uuid.UUID) -> FerramentaVitrine | None:
-    linha = (
-        await c.execute(
-            text(
-                "SELECT f.*, NULL::uuid AS ordem_id, s.id AS s_id, s.nome AS s_nome, s.endereco AS s_endereco,"
-                " s.origem AS s_origem, s.tipo_chave AS s_tipo_chave, s.selo AS s_selo, s.situacao AS s_situacao,"
-                " s.versao_mcp AS s_versao_mcp"
-                " FROM ferramentas_revisadas f JOIN sistemas s ON s.id = f.sistema_id WHERE f.id = :i"
-            ),
-            {"i": ferramenta_id},
-        )
-    ).first()
-    return _ferramenta(linha) if linha else None
 
 
 async def ordem_valida(c: AsyncConnection, ordem_id: uuid.UUID, pessoa_id: uuid.UUID, aplicativo_id: uuid.UUID) -> bool:
@@ -221,7 +254,11 @@ async def habilitar_aplicativo(
 async def cadastrar_sistema(
     c: AsyncConnection, *, nome: str, endereco: str, tipo_chave: str, origem: str = "proprio"
 ) -> uuid.UUID:
-    """Cria o sistema pendente. So vira ativo depois da sondagem de versao pelo despachante."""
+    """Cria o sistema pendente. So vira ativo depois da sondagem de versao pelo despachante.
+
+    ``origem``: ``proprio`` ou ``terceiro`` (fixa para sempre; para mudar, cadastra-se de novo)."""
+    if origem not in ORIGENS:
+        raise ValueError(f"origem invalida: escolha {' ou '.join(ORIGENS)}")
     return uuid.UUID(
         str(
             (
@@ -264,18 +301,57 @@ async def revisar_ferramenta(
     esquema_entrada: dict[str, Any] | None = None,
     campos_pessoais: list[str] | None = None,
     campos_destinatario: list[str] | None = None,
+    descricoes_campos: Mapping[str, str] | None = None,
+    texto_de_fora: bool = False,
 ) -> uuid.UUID:
     """Grava nova versao revisada. A anterior vira 'substituida'. O texto e do cadastro, nao do fornecedor.
 
     ``campos_destinatario``: os campos do pedido que dizem para quem a acao vai, marcados pelo ADMIN. So valem
     nomes do esquema de entrada (``CampoForaDoEsquema`` se nao). O limite "so estes destinatarios" confere estes.
+
+    ``descricoes_campos``: descricao escrita pelo ADMIN para campos do primeiro nivel (ate 300 letras; campo que
+    o esquema nao tem levanta ``esquema.CampoDesconhecido``). ``texto_de_fora``: a resposta traz texto escrito por
+    gente de fora (e-mail, pagina, comentario) e vai emoldurada ao aplicativo.
+
+    Servidor de terceiros (``sistemas.origem``, lida nesta transacao): o esquema de entrada e o de saida sao
+    gravados limpos (``esquema.limpar_textos``, depois as descricoes do ADMIN), sem as dicas do fornecedor e com
+    ``texto_de_fora`` sempre verdadeiro (o banco tambem forca as duas coisas). O que pode travar a conferencia
+    dos argumentos na entrada e recusado com a frase para o ADMIN (``esquema.EsquemaRecusado``, um
+    ``EsquemaInvalido``): regra de formato longa ou cara (``esquema.PadraoRecusado``), referencia que so achava
+    texto do fornecedor, esquema grande demais com as referencias seguidas, em ciclo, com ``$dynamicRef`` ou com
+    referencia para fora dele. A ``impressao`` e sempre a da definicao declarada, e ``definicao_declarada`` fica
+    guardada para o antes e depois.
     """
-    esquema = esquema_entrada or dict(definicao_declarada.get("inputSchema") or {})
-    conferir_esquema(esquema)
+    declarada_entrada = esquema_entrada or dict(definicao_declarada.get("inputSchema") or {})
+    # Antes do banco, como nas Fases 1 e 2: esquema invalido e campo de destinatario fora dele. Limpar e por as
+    # descricoes nao muda os nomes dos campos, entao a conferencia vale para o esquema que sera gravado.
+    conferir_esquema(declarada_entrada)
     destinatario = list(dict.fromkeys(campos_destinatario or []))
-    fora = [nome for nome in destinatario if nome not in campos_de_entrada(esquema)]
+    fora = [nome for nome in destinatario if nome not in campos_de_entrada(declarada_entrada)]
     if fora:
         raise CampoForaDoEsquema(fora)
+    origem = (
+        await c.execute(text("SELECT origem FROM sistemas WHERE id = :s"), {"s": sistema_id})
+    ).scalar_one_or_none()
+    de_terceiro = origem is not None and origem != "proprio"
+    saida_declarada = definicao_declarada.get("outputSchema")
+    if de_terceiro:
+        limpo = limpar_textos(declarada_entrada)
+        conferir_referencias(declarada_entrada, limpo)
+        esquema = com_descricoes(limpo, descricoes_campos or {})
+        esquema_saida: Any = limpar_textos(saida_declarada) if isinstance(saida_declarada, dict) else None
+        etiquetas: dict[str, bool] = {}
+        texto_de_fora = True
+    else:
+        esquema = com_descricoes(declarada_entrada, descricoes_campos or {})
+        esquema_saida = saida_declarada
+        etiquetas = {
+            k: bool(v) for k, v in (definicao_declarada.get("annotations") or {}).items() if k in DICAS_CONHECIDAS
+        }
+    conferir_esquema(esquema)
+    if de_terceiro:
+        conferir_padroes(esquema)
+        conferir_custo(esquema)
     nome = str(definicao_declarada["name"])
     await c.execute(
         text(
@@ -300,9 +376,9 @@ async def revisar_ferramenta(
                     text(
                         "INSERT INTO ferramentas_revisadas (sistema_id, nome_original, versao, nome_vitrine, titulo,"
                         " descricao, esquema_entrada, esquema_saida, etiquetas, classe, risco, campos_pessoais,"
-                        " campos_destinatario, impressao, revisado_por) VALUES (:s, :n, :v, :nv, :t, :d,"
-                        " CAST(:ee AS jsonb), CAST(:es AS jsonb), CAST(:et AS jsonb), :c, :r, :cp, :cd, :i, :rp)"
-                        " RETURNING id"
+                        " campos_destinatario, impressao, revisado_por, texto_de_fora, definicao_declarada)"
+                        " VALUES (:s, :n, :v, :nv, :t, :d, CAST(:ee AS jsonb), CAST(:es AS jsonb), CAST(:et AS jsonb),"
+                        " :c, :r, :cp, :cd, :i, :rp, :tf, CAST(:dd AS jsonb)) RETURNING id"
                     ),
                     {
                         "s": sistema_id,
@@ -312,20 +388,16 @@ async def revisar_ferramenta(
                         "t": titulo,
                         "d": descricao,
                         "ee": json.dumps(esquema),
-                        "es": json.dumps(definicao_declarada.get("outputSchema")),
-                        "et": json.dumps(
-                            {
-                                k: bool(v)
-                                for k, v in (definicao_declarada.get("annotations") or {}).items()
-                                if k in DICAS_CONHECIDAS
-                            }
-                        ),
+                        "es": json.dumps(esquema_saida),
+                        "et": json.dumps(etiquetas),
                         "c": classe,
                         "r": risco,
                         "cp": campos_pessoais or [],
                         "cd": destinatario,
                         "i": impressao(definicao_declarada),
                         "rp": revisado_por,
+                        "tf": texto_de_fora,
+                        "dd": json.dumps(definicao_declarada),
                     },
                 )
             ).scalar_one()
