@@ -214,6 +214,8 @@ async def test_identificador_diferente_fecha_saida_e_pausa_aplicativos(banco: Ba
         "restauracao_detectada",
         "intervalo_perdido",
         "aplicativo_pausado_continuidade",
+        # Fase 2: a fila de saida para na mesma transacao (aqui, vazia).
+        "fila_parada_restauracao",
     ]
     intervalo = (
         await banco.linhas("SELECT frase, dados, aplicativo_id FROM extrato WHERE tipo = 'intervalo_perdido'")

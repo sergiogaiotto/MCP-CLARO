@@ -42,6 +42,7 @@ from mcp_claro.rotinas.limpeza import limpar_sessoes
 from mcp_claro.rotinas.medicoes import garantir_particoes, resumir_medicoes
 from mcp_claro.rotinas.mudou_parou import FonteDeclaracoes, conferir_sistemas_proprios
 from mcp_claro.rotinas.ordens import avisar_ordens_a_vencer, vencer_ordens
+from mcp_claro.rotinas.programas import tarefas_dos_programas
 from mcp_claro.rotinas.resumo_semanal import resumo_semanal
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
@@ -200,6 +201,7 @@ def criar_app_rotinas(
                 else [
                     *montar_tarefas(engine, cfg, origem),
                     *tarefas_de_acoes(engine, p, cfg),
+                    *tarefas_dos_programas(engine, p, cfg),
                     *([ronda] if ronda else []),
                 ]
             )

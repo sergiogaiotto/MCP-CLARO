@@ -41,7 +41,7 @@ from mcp_claro.entrada.cracha import Cracha, cracha_atual
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, catraca, estado, revisao
+from mcp_claro.regras import bloqueios, catraca, estado, programas, revisao
 from mcp_claro.regras.bloqueios import Vigentes
 from mcp_claro.regras.estado import EstadoEntrada
 from mcp_claro.saida import pedidos as saida_pedidos
@@ -146,6 +146,12 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             if not p.FEATURE_PHASE1_READ and not pessoa.teste:
                 raise Recusa("A leitura ainda nao foi ligada para pessoas reais (Fase 1).", "fase1_desligada")
             await repositorio.marcar_versao_vista(c, aplicativo.id, VERSAO_MCP)
+        if aplicativo.tipo == "programa":
+            # Programas que rodam sozinhos (decisao 9): cadastro valendo e limite por minuto. A recusa vai ao extrato.
+            try:
+                await programas.conferir_pedido(engine, p, aplicativo, pessoa.id)
+            except programas.ProgramaRecusado as erro:
+                raise Recusa(erro.mensagem, erro.motivo) from erro
         return Quem(cracha, aplicativo, pessoa)
 
     async def portas(q: Quem) -> tuple[EstadoEntrada, Vigentes]:
@@ -156,11 +162,12 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
 
     async def recusar_pedido(q: Quem, metodo: str, motivo: str, mensagem: str) -> Recusa:
         async with engine.begin() as c:
+            linha = await programas.linha(c, q.aplicativo, "pedido_recusado", {"metodo": metodo, "motivo": motivo})
             await registrar(
                 c,
                 papel="entrada",
-                tipo="pedido_recusado",
-                campos={"metodo": metodo, "motivo": motivo},
+                tipo=linha.tipo,
+                campos=linha.campos,
                 aplicativo_id=q.aplicativo.id,
                 pessoa_id=q.pessoa.id,
             )
@@ -177,6 +184,8 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         async with engine.connect() as c:
             ferramentas = await repositorio.vitrine(c, q.pessoa.id, q.aplicativo.id, VERSAO_MCP)
         ferramentas = [f for f in ferramentas if entrada.permite(f.classe) and vigentes.para(f.sistema.id) is None]
+        # Programa so ve sistema de chave propria; assistente nao ve sistema de chave de programa (decisao 9).
+        ferramentas = programas.filtrar_vitrine(q.aplicativo.tipo, ferramentas)
         if not acoes_ligadas(q) or (q.aplicativo.tipo == "programa" and not p.PROGRAM_ACTIONS_ENABLED):
             ferramentas = [f for f in ferramentas if f.classe == "le"]
         tools = [types.Tool.model_validate(f.como_tool()) for f in ferramentas]
@@ -188,11 +197,14 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
 
     async def recusar(q: Quem, ferramenta: str, motivo: str, mensagem: str, trace: str | None) -> Recusa:
         async with engine.begin() as c:
+            linha = await programas.linha(
+                c, q.aplicativo, "leitura_recusada", {"ferramenta": ferramenta[:128], "motivo": motivo}
+            )
             await registrar(
                 c,
                 papel="entrada",
-                tipo="leitura_recusada",
-                campos={"ferramenta": ferramenta[:128], "motivo": motivo},
+                tipo=linha.tipo,
+                campos=linha.campos,
                 aplicativo_id=q.aplicativo.id,
                 pessoa_id=q.pessoa.id,
                 ferramenta=ferramenta[:128],
@@ -226,6 +238,8 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 f"A ferramenta {params.name} nao esta na sua vitrine.",
                 trace,
             )
+        if (recusa_chave := programas.recusa_da_chave(q.aplicativo.tipo, ferramenta.sistema.tipo_chave)) is not None:
+            raise await recusar(q, params.name, recusa_chave.motivo, recusa_chave.mensagem, trace)
         try:
             conferir_argumentos(ferramenta.esquema_entrada, params.arguments)
         except ArgumentosInvalidos as erro:

@@ -715,7 +715,7 @@ async def test_admin_pausa_retoma_recertifica_registra_chave_e_encerra(telas: Te
     r = await nav.post(f"{base}/pausar", {"motivo": "x"}, csrf=csrf)
     assert r.status_code == 400  # motivo curto demais
     r = await nav.post(f"{base}/pausar", {"motivo": "Conferir um alerta da equipe"}, csrf=csrf)
-    assert (r.status_code, r.headers["location"]) == (303, f"{base}?aviso=programa_pausado")
+    assert (r.status_code, r.headers["location"]) == (303, f"{base}?feito=programa_pausado")
     assert (await telas.programa(f"robo-tela-{telas.sufixo}")).situacao == "pausado"
 
     r = await nav.post(f"{base}/retomar", {}, csrf=csrf)
@@ -736,7 +736,7 @@ async def test_admin_pausa_retoma_recertifica_registra_chave_e_encerra(telas: Te
     r = await nav.post(f"{base}/retomar", {}, csrf=csrf)
     assert r.status_code == 400  # encerrado nao volta
     r = await nav.post(f"{base}/pausar", {"motivo": "Depois de encerrado"}, csrf=csrf)
-    assert r.headers["location"] == f"{base}?aviso=programa_nada_mudou"
+    assert r.headers["location"] == f"{base}?feito=programa_nada_mudou"
 
     tipos = [
         ("admin_programa_pausado", "pausado por Carla Admin: Conferir um alerta da equipe."),
@@ -775,7 +775,7 @@ async def test_responsavel_recertifica_na_tela_dele_e_o_substituto_nao(telas: Te
     pagina = await rui.get("/telas/programas")
     assert "Confirmo que este programa segue valendo" in pagina.text
     r = await rui.post(f"/telas/programas/{antes.aplicativo_id}/recertificar", {}, csrf=csrf_rui)
-    assert (r.status_code, r.headers["location"]) == (303, "/telas/programas?aviso=programa_recertificado")
+    assert (r.status_code, r.headers["location"]) == (303, "/telas/programas?feito=programa_recertificado")
     assert (await telas.programa(f"robo-tela-{telas.sufixo}")).revisado_em > antes.revisado_em
     linhas = await telas.extrato("programa_recertificado", antes.aplicativo_id)
     assert [(x.frase, x.pessoa_id) for x in linhas] == [
@@ -843,7 +843,7 @@ async def test_admin_da_ordem_ao_programa_so_com_leitura_de_sistema_de_chave_pro
     )
     assert r.status_code == 400
     r = await nav.post(f"{base}/ordem", {"modelo": str(modelos["programa"]), "dias": "7", "sujeito": conta}, csrf=csrf)
-    assert (r.status_code, r.headers["location"]) == (303, f"{base}?aviso=programa_ordem")
+    assert (r.status_code, r.headers["location"]) == (303, f"{base}?feito=programa_ordem")
     async with telas.dono.connect() as c:
         ordem = (
             await c.execute(

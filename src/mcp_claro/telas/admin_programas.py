@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import BaseRoute, Route
 
 from mcp_claro.cadastro import repositorio
@@ -51,7 +51,7 @@ SEM_RESPONSAVEL: Final = "Sem responsável e substituto com nome, o programa nã
 MESMA_PESSOA: Final = "O responsável e o substituto precisam ser pessoas diferentes."
 NAO_SERVEM: Final = "Responsável e substituto precisam ser pessoas ativas, com nome no cadastro."
 
-# Avisos depois de um passo que deu certo, nestas telas. A URL leva so o codigo.
+# Avisos depois de um passo que deu certo, nestas telas (``?feito=``). A URL leva so o codigo.
 FEITOS: Final[dict[str, str]] = {
     "programa_pausado": "Pronto. O programa foi pausado e não lê mais nada até ser retomado.",
     "programa_retomado": "Pronto. O programa foi retomado. A próxima revisão conta a partir de hoje.",
@@ -64,6 +64,11 @@ FEITOS: Final[dict[str, str]] = {
     "programa_ordem": "Pronto. A ordem de serviço foi dada ao programa. Ela só tem ferramentas que leem.",
     "programa_nada_mudou": "Nada mudou: o programa não estava na situação certa para isto.",
 }
+
+
+def voltar(caminho: str, feito: str) -> RedirectResponse:
+    """Depois de um POST que deu certo, volta por GET com o codigo do aviso destas telas (``FEITOS``)."""
+    return RedirectResponse(f"{caminho}?feito={feito}", status_code=303)
 
 
 def hoje_em_brasilia() -> date:
@@ -225,8 +230,7 @@ class TelasDosProgramas:
         ]
 
     def _aviso(self, pedido: Request) -> str | None:
-        codigo = pedido.query_params.get("aviso", "")
-        return FEITOS.get(codigo) or AVISOS.get(codigo)
+        return FEITOS.get(pedido.query_params.get("feito", "")) or AVISOS.get(pedido.query_params.get("aviso", ""))
 
     # --- Lista e cadastro ---
 
@@ -415,7 +419,7 @@ class TelasDosProgramas:
                     aplicativo_id=aplicativo_id,
                     dados={"responsavel_id": str(programa.responsavel_id), "situacao": programa.situacao},
                 )
-        return ver_depois(f"{BASE_ADMIN}/{aplicativo_id}", feito if programa else "programa_nada_mudou")
+        return voltar(f"{BASE_ADMIN}/{aplicativo_id}", feito if programa else "programa_nada_mudou")
 
     @tela
     async def pausar(self, pedido: Request) -> Response:
@@ -487,7 +491,7 @@ class TelasDosProgramas:
                 )
         if erros:
             return await self._pagina_detalhe(pedido, aplicativo_id, erros)
-        return ver_depois(f"{BASE_ADMIN}/{aplicativo_id}", "programa_retomado" if programa else "programa_nada_mudou")
+        return voltar(f"{BASE_ADMIN}/{aplicativo_id}", "programa_retomado" if programa else "programa_nada_mudou")
 
     @tela
     async def trocar_responsaveis(self, pedido: Request) -> Response:
@@ -525,7 +529,7 @@ class TelasDosProgramas:
                         aplicativo_id=aplicativo_id,
                         dados={"responsavel_id": str(responsavel.id), "substituto_id": str(substituto.id)},
                     )
-                return ver_depois(
+                return voltar(
                     f"{BASE_ADMIN}/{aplicativo_id}", "programa_responsaveis" if programa else "programa_nada_mudou"
                 )
         return await self._pagina_detalhe(pedido, aplicativo_id, erros, dict(f.como_dict()))
@@ -605,7 +609,7 @@ class TelasDosProgramas:
                     aplicativo_id=aplicativo_id,
                     dados={"ordem_id": str(ordem_id), "modelo_id": str(modelo.id), "dias": dias},
                 )
-                return ver_depois(f"{BASE_ADMIN}/{aplicativo_id}", "programa_ordem")
+                return voltar(f"{BASE_ADMIN}/{aplicativo_id}", "programa_ordem")
         return await self._pagina_detalhe(pedido, aplicativo_id, erros, dict(f.como_dict()))
 
     # --- Tela do responsavel ---
@@ -656,7 +660,7 @@ class TelasDosProgramas:
                     aplicativo_id=aplicativo_id,
                     dados={"situacao": programa.situacao},
                 )
-        return ver_depois(BASE_PESSOA, "programa_recertificado" if programa else "programa_nada_mudou")
+        return voltar(BASE_PESSOA, "programa_recertificado" if programa else "programa_nada_mudou")
 
 
 def rotas_admin_programas(t: Telas) -> list[BaseRoute]:

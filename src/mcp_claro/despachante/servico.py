@@ -28,7 +28,7 @@ from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, estado
+from mcp_claro.regras import bloqueios, estado, programas
 from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.despachante")
@@ -96,11 +96,14 @@ class Despachante:
         self, pedido: PedidoLeitura, motivo: str, mensagem: str, ferramenta: str | None
     ) -> LeituraRecusada:
         async with self.engine.begin() as c:
+            linha = await programas.linha(
+                c, pedido.aplicativo_id, "leitura_recusada", {"ferramenta": ferramenta or "?", "motivo": motivo}
+            )
             await registrar(
                 c,
                 papel="despachante",
-                tipo="leitura_recusada",
-                campos={"ferramenta": ferramenta or "?", "motivo": motivo},
+                tipo=linha.tipo,
+                campos=linha.campos,
                 aplicativo_id=pedido.aplicativo_id,
                 pessoa_id=pedido.pessoa_id,
                 ferramenta=ferramenta,
@@ -170,6 +173,11 @@ class Despachante:
         nome = ferramenta.nome_vitrine
         if pessoa != "ativa" or app != "ativo":
             raise await self._recusar(pedido, "bloqueado", "Pessoa ou aplicativo bloqueado ou pausado.", nome)
+        # Programas que rodam sozinhos (decisao 9): cadastro valendo e so sistema de chave propria, antes da chave.
+        async with self.engine.connect() as c:
+            recusa_programa = await programas.reconferir_leitura(c, pedido.aplicativo_id, ferramenta.sistema.tipo_chave)
+        if recusa_programa is not None:
+            raise await self._recusar(pedido, recusa_programa.motivo, recusa_programa.mensagem, nome)
         if ferramenta.classe != "le":
             raise await self._recusar(
                 pedido, "acao_pela_porta_de_leitura", "A porta de leitura so atende leituras.", nome
@@ -261,11 +269,14 @@ class Despachante:
             meta[PREFIXO_META + "aviso"] = "Sistema de chave compartilhada: ele nao distingue as pessoas."
         resultado["_meta"] = meta
         async with self.engine.begin() as c:
+            linha = await programas.linha(
+                c, pedido.aplicativo_id, "leitura_feita", {"ferramenta": ferramenta.nome_vitrine}
+            )
             await registrar(
                 c,
                 papel="despachante",
-                tipo="leitura_feita",
-                campos={"ferramenta": ferramenta.nome_vitrine},
+                tipo=linha.tipo,
+                campos=linha.campos,
                 aplicativo_id=pedido.aplicativo_id,
                 pessoa_id=pedido.pessoa_id,
                 sistema_id=sistema.id,

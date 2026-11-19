@@ -206,6 +206,14 @@ CREATE TABLE comprovantes (
 );
 CREATE TRIGGER comprovantes_sem_update_delete BEFORE UPDATE OR DELETE ON comprovantes
   FOR EACH ROW EXECUTE FUNCTION extrato_recusa_mudanca();
+
+-- Programas que rodam sozinhos (decisao 9): pedidos de cada programa por minuto (PROGRAM_MAX_REQUESTS_PER_MINUTE).
+CREATE TABLE programas_pedidos_minuto (
+  aplicativo_id uuid        NOT NULL REFERENCES aplicativos (id),
+  minuto        timestamptz NOT NULL,
+  contagem      integer     NOT NULL DEFAULT 0 CHECK (contagem >= 0),
+  PRIMARY KEY (aplicativo_id, minuto)
+);
 CREATE TRIGGER comprovantes_sem_truncate BEFORE TRUNCATE ON comprovantes
   FOR EACH STATEMENT EXECUTE FUNCTION extrato_recusa_mudanca();
 """
@@ -244,6 +252,8 @@ GRANT SELECT ON medicoes.v_acoes, medicoes.v_acoes_pedidas, medicoes.v_acoes_par
 """
 
 GRANTS = r"""
+GRANT SELECT, INSERT, UPDATE (contagem) ON programas_pedidos_minuto TO mcp_claro_entrada;
+GRANT SELECT, DELETE ON programas_pedidos_minuto TO mcp_claro_rotinas;
 GRANT USAGE ON SEQUENCE protocolo_seq TO mcp_claro_entrada;
 GRANT SELECT, INSERT ON operacoes, fichas, fila_saida TO mcp_claro_entrada;
 GRANT SELECT ON transicoes_saida TO mcp_claro_entrada, mcp_claro_despachante, mcp_claro_rotinas;

@@ -23,7 +23,7 @@ from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada.cracha import ChavesPublicas
 from mcp_claro.logs import logger
-from mcp_claro.telas import admin, admin_portas, consultas
+from mcp_claro.telas import admin, admin_portas, admin_programas, consultas
 from mcp_claro.telas.acoes import TelasDeAcoes
 from mcp_claro.telas.autorizar import TelasDeAutorizacao
 from mcp_claro.telas.bloqueio import TelasDeBloqueio
@@ -324,6 +324,7 @@ def rotas_telas(
         *acoes.rotas(),
         *TelasDePasskeys(t).rotas(),
         *TelasDeLimites(t).rotas(),
+        *admin_programas.rotas_admin_programas(t),  # antes de adm.rotas(): /admin/programas e destas telas
         *adm.rotas(),
         *admin_portas.TelasDoAdminPortas(t).rotas(),
         Mount("/estaticos", app=StaticFiles(directory=PASTA_ESTATICOS), name="estaticos"),
