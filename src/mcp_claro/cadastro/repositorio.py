@@ -236,6 +236,20 @@ async def cadastrar_sistema(
     )
 
 
+class CampoForaDoEsquema(ValueError):
+    """Campo de destinatario que o esquema de entrada da ferramenta nao tem."""
+
+    def __init__(self, campos: list[str]) -> None:
+        self.campos = campos
+        super().__init__("campos fora do esquema de entrada: " + ", ".join(campos))
+
+
+def campos_de_entrada(esquema: Any) -> tuple[str, ...]:
+    """Os nomes das propriedades do esquema de entrada, na ordem do esquema."""
+    propriedades = esquema.get("properties") if isinstance(esquema, dict) else None
+    return tuple(str(nome) for nome in propriedades) if isinstance(propriedades, dict) else ()
+
+
 async def revisar_ferramenta(
     c: AsyncConnection,
     *,
@@ -249,10 +263,19 @@ async def revisar_ferramenta(
     titulo: str | None = None,
     esquema_entrada: dict[str, Any] | None = None,
     campos_pessoais: list[str] | None = None,
+    campos_destinatario: list[str] | None = None,
 ) -> uuid.UUID:
-    """Grava nova versao revisada. A anterior vira 'substituida'. O texto e do cadastro, nao do fornecedor."""
+    """Grava nova versao revisada. A anterior vira 'substituida'. O texto e do cadastro, nao do fornecedor.
+
+    ``campos_destinatario``: os campos do pedido que dizem para quem a acao vai, marcados pelo ADMIN. So valem
+    nomes do esquema de entrada (``CampoForaDoEsquema`` se nao). O limite "so estes destinatarios" confere estes.
+    """
     esquema = esquema_entrada or dict(definicao_declarada.get("inputSchema") or {})
     conferir_esquema(esquema)
+    destinatario = list(dict.fromkeys(campos_destinatario or []))
+    fora = [nome for nome in destinatario if nome not in campos_de_entrada(esquema)]
+    if fora:
+        raise CampoForaDoEsquema(fora)
     nome = str(definicao_declarada["name"])
     await c.execute(
         text(
@@ -277,8 +300,9 @@ async def revisar_ferramenta(
                     text(
                         "INSERT INTO ferramentas_revisadas (sistema_id, nome_original, versao, nome_vitrine, titulo,"
                         " descricao, esquema_entrada, esquema_saida, etiquetas, classe, risco, campos_pessoais,"
-                        " impressao, revisado_por) VALUES (:s, :n, :v, :nv, :t, :d, CAST(:ee AS jsonb),"
-                        " CAST(:es AS jsonb), CAST(:et AS jsonb), :c, :r, :cp, :i, :rp) RETURNING id"
+                        " campos_destinatario, impressao, revisado_por) VALUES (:s, :n, :v, :nv, :t, :d,"
+                        " CAST(:ee AS jsonb), CAST(:es AS jsonb), CAST(:et AS jsonb), :c, :r, :cp, :cd, :i, :rp)"
+                        " RETURNING id"
                     ),
                     {
                         "s": sistema_id,
@@ -299,6 +323,7 @@ async def revisar_ferramenta(
                         "c": classe,
                         "r": risco,
                         "cp": campos_pessoais or [],
+                        "cd": destinatario,
                         "i": impressao(definicao_declarada),
                         "rp": revisado_por,
                     },

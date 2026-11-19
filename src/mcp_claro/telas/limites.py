@@ -9,12 +9,18 @@ para os destinatarios escolhidos (ou para qualquer destinatario, dito com clarez
 - Criar e ampliar pedem a passkey quando ``FEATURE_PASSKEY`` esta ligado. O desafio fica preso ao resumo
   exato do que foi pedido (finalidade "limite"): a passkey aprova este limite, nao outro. Encerrar nao pede.
   Com a passkey desligada, criar e ampliar pedem o login refeito na hora (``Telas.login_recente``).
-- "So estes destinatarios": o campo escolhido aceita so os valores escritos, e cada outro campo do esquema que
-  pode dizer um destinatario (texto ou lista de textos) entra com a lista vazia: tem de vir vazio ou faltar.
-  Um pedido com copia para outra pessoa, por exemplo, passa pela ficha.
+- "So estes destinatarios": quem diz quais campos do pedido dizem o destinatario e o ADMIN, na revisao da
+  ferramenta (``ferramentas_revisadas.campos_destinatario``). O campo escolhido aceita so os valores escritos,
+  e cada outro campo marcado pelo ADMIN entra com a lista vazia: tem de vir vazio ou faltar. Um pedido com
+  copia para outra pessoa, por exemplo, passa pela ficha. O resto do pedido (o texto da mensagem) fica livre.
+  Sem campo marcado, o limite so pode valer para qualquer destinatario. Criar trava a versao revisada lida
+  (``consultas.travar_revisao``): a revisao do ADMIN que marca um campo novo nao cruza com um limite sendo criado.
 - Ampliar so aumenta: mais vezes por dia ou mais prazo. Para mudar os destinatarios, encerre e crie outro.
   Ampliar segue o teto vigente: um limite acima do teto de agora so renova ate o teto, e o prazo nunca passa
   de ``ALLOWANCE_MAX_DAYS`` a contar de hoje.
+- Com a passkey ligada, um limite criado ou ampliado sem ela nao vale (o nucleo nao o gasta): a tela marca
+  "Nao vale com a passkey ligada" e nao o amplia; a pessoa cria outro, com a passkey (o que nao vale nao conta
+  como "limite igual"), e pode encerrar o antigo.
 - Encerrar cancela, na mesma transacao, o que o limite ja tinha liberado e ainda espera a hora de sair.
 """
 
@@ -58,6 +64,14 @@ LOGIN_REFEITO_LIMITE: Final = (
     "A passkey está desligada nesta instalação: criar ou ampliar um limite pede um login refeito na hora."
     " Entre de novo e tente outra vez. Nada mudou."
 )
+NAO_VALE_COM_PASSKEY: Final = (
+    "Este limite foi criado ou ampliado sem a passkey e não vale com a passkey ligada: as ações dele passam pela"
+    " ficha. Ele não pode ser ampliado. Encerre este limite e crie outro, com a passkey. Nada mudou."
+)
+SEM_CAMPO_MARCADO: Final = (
+    "O ADMIN ainda não marcou qual campo desta ação diz o destinatário. Por enquanto, o limite só pode valer para"
+    " qualquer destinatário."
+)
 SITUACOES: Final[dict[str, str]] = {
     "ativo": "Valendo",
     "suspenso": "Suspenso",
@@ -89,20 +103,14 @@ def _json(valor: Any) -> Any:
     return json.loads(valor) if isinstance(valor, str) else valor
 
 
-def campos_de_destinatario(esquema: Any) -> tuple[str, ...]:
-    """Campos do esquema de entrada que podem dizer o destinatario: texto, ou lista de textos."""
-    propriedades = esquema.get("properties") if isinstance(esquema, dict) else None
-    if not isinstance(propriedades, dict):
+def campos_de_destinatario(marcados: Any) -> tuple[str, ...]:
+    """Os campos que o ADMIN marcou, na revisao da ferramenta, como os que dizem o destinatario.
+
+    Le a coluna ``ferramentas_revisadas.campos_destinatario`` (o ADMIN so marca campos do esquema de entrada).
+    Nao adivinha pelo tipo do campo: sem marca, nenhum campo (o limite so vale para qualquer destinatario)."""
+    if not isinstance(marcados, list | tuple):
         return ()
-    campos: list[str] = []
-    for nome, definicao in propriedades.items():
-        if not isinstance(definicao, dict):
-            continue
-        tipo = definicao.get("type")
-        itens = definicao.get("items")
-        if tipo == "string" or (tipo == "array" and isinstance(itens, dict) and itens.get("type") == "string"):
-            campos.append(str(nome))
-    return tuple(campos)
+    return tuple(dict.fromkeys(str(nome) for nome in marcados if isinstance(nome, str) and nome))
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +144,7 @@ class Escolha:
             nome_vitrine=linha.nome_vitrine,
             descricao=linha.descricao,
             risco=linha.risco,
-            campos=campos_de_destinatario(_json(linha.esquema_entrada)),
+            campos=campos_de_destinatario(linha.campos_destinatario),
         )
 
 
@@ -163,6 +171,15 @@ class PedidoLimite:
             }
         )
         return "criar:" + hashlib.sha256(corpo.encode("utf-8")).hexdigest()
+
+
+def ferramenta_da_escolha(chave: str) -> uuid.UUID | None:
+    """A versao revisada (``ferramentas_revisadas.id``) da escolha "aplicativo:ferramenta" do formulario."""
+    _, _, ferramenta = chave.partition(":")
+    try:
+        return uuid.UUID(ferramenta)
+    except ValueError:
+        return None
 
 
 def alvo_ampliar(limite_id: uuid.UUID, por_dia: int, dias: int) -> str:
@@ -198,7 +215,9 @@ def ler_pedido(
         return None, ["Ações de risco alto nunca entram em limite: sempre passam pela ficha."]
     destinatarios: list[dict[str, Any]] = []
     tipo = f.texto("destinatarios")
-    if tipo == "estes":
+    if tipo == "estes" and not escolha.campos:
+        erros.append(SEM_CAMPO_MARCADO)
+    elif tipo == "estes":
         campo = f.texto("campo")
         valores = ler_valores(f.texto("valores"))
         if campo not in escolha.campos:
@@ -207,8 +226,8 @@ def ler_pedido(
             erros.append("Escreva pelo menos um destinatário aceito, um por linha.")
         elif len(valores) > MAXIMO_VALORES or any(len(v) > MAXIMO_VALOR for v in valores):
             erros.append(f"Use até {MAXIMO_VALORES} destinatários, cada um com até {MAXIMO_VALOR} letras.")
-        # Os outros campos que podem dizer um destinatario entram vazios: a pessoa consentiu com estes
-        # destinatarios, e uma copia para outra pessoa nao passa sem ficha.
+        # Os outros campos que o ADMIN marcou como destinatario entram vazios: a pessoa consentiu com estes
+        # destinatarios, e uma copia para outra pessoa nao passa sem ficha. Os campos nao marcados ficam livres.
         destinatarios = [{"campo": campo, "valores": valores}] + [
             {"campo": outro, "valores": []} for outro in escolha.campos if outro != campo
         ]
@@ -248,22 +267,47 @@ def destinatarios_legiveis(destinatarios: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Limite:
-    """Um limite como a tela mostra."""
+    """Um limite como a tela mostra. ``ligada``: a passkey esta ligada nesta instalacao agora."""
 
     linha: Row[Any]
     destinatarios: str
+    ligada: bool = False
 
     @property
     def ativo(self) -> bool:
         return str(self.linha.situacao) == "ativo"
 
     @property
+    def nao_vale_com_passkey(self) -> bool:
+        """Criado ou ampliado sem a passkey, com ela ligada agora: nao e gasto (as acoes vao para a ficha)."""
+        return nao_vale_com_passkey(self.linha, self.ligada)
+
+    @property
     def situacao(self) -> str:
+        if self.nao_vale_com_passkey:
+            return "Não vale com a passkey ligada"
         return SITUACOES.get(str(self.linha.situacao), str(self.linha.situacao))
 
 
-def _limite(linha: Row[Any]) -> Limite:
-    return Limite(linha, destinatarios_legiveis(linha.destinatarios))
+async def cancelar_liberadas(c: AsyncConnection, limite_id: uuid.UUID, motivo: str, *, quem: str) -> int:
+    """Na transacao que encerra o limite: cancela o que ele liberou e ainda espera a hora de sair.
+
+    O que o despachante ja marcou "enviando" nao muda (``fila.parar`` so tira de antes de sair)."""
+    canceladas = 0
+    for fila_id in await consultas.liberadas_pelo_limite(c, limite_id):
+        op = await fila.por_fila(c, fila_id)
+        if op is not None and await fila.parar(c, op, Estado.CANCELADA, motivo, quem=quem, papel="entrada"):
+            canceladas += 1
+    return canceladas
+
+
+def nao_vale_com_passkey(linha: Any, ligada: bool) -> bool:
+    """Limite ativo criado ou ampliado sem a passkey, com ela ligada agora: nao e gasto e nao e ampliado."""
+    return ligada and str(linha.situacao) == "ativo" and not bool(linha.com_passkey)
+
+
+def _limite(linha: Row[Any], ligada: bool = False) -> Limite:
+    return Limite(linha, destinatarios_legiveis(linha.destinatarios), ligada)
 
 
 class TelasDeLimites:
@@ -318,7 +362,7 @@ class TelasDeLimites:
             linhas = await consultas.limites_da_pessoa(c, sessao.pessoa.id, FUSO)
             escolhas = await self._escolhas(c, sessao.pessoa.id)
             maximo_dia, maximo_dias = await self._maximos(c)
-        limites = [_limite(linha) for linha in linhas]
+        limites = [_limite(linha, self.ligada) for linha in linhas]
         return self.t.pagina(
             pedido,
             "acoes/limites.html",
@@ -407,6 +451,11 @@ class TelasDeLimites:
         status = 400
         criado: uuid.UUID | None = None
         async with self.t.engine.begin() as c:
+            # Primeiro a trava da versao revisada escolhida: os campos de destinatario lidos aqui valem ate o
+            # COMMIT, e uma revisao do ADMIN que os mude espera (ou ja terminou, e a escolha antiga sai da lista).
+            ferramenta_id = ferramenta_da_escolha(f.texto("escolha"))
+            if ferramenta_id is not None:
+                await consultas.travar_revisao(c, ferramenta_id)
             escolhas = {e.chave: e for e in await self._escolhas(c, pessoa_id)}
             maximo_dia, maximo_dias = await self._maximos(c)
             lido, erros = ler_pedido(f, escolhas, maximo_dia=maximo_dia, maximo_dias=maximo_dias)
@@ -417,6 +466,7 @@ class TelasDeLimites:
                 sistema_id=lido.escolha.sistema_id,
                 nome_original=lido.escolha.nome_original,
                 destinatarios=lido.destinatarios_json,
+                ligada=self.ligada,
             ):
                 erros = ["Você já tem um limite igual valendo para esta ação. Amplie o que existe."]
                 status = 409
@@ -443,7 +493,7 @@ class TelasDeLimites:
                 )
                 await self.t.extrato(
                     c,
-                    "limite_criado" if self.ligada else "limite_criado_sem_passkey",
+                    "limite_criado" if self.ligada else "limite_criado_login_refeito",
                     {"por_dia": lido.por_dia, "ferramenta": e.nome_vitrine},
                     pessoa_id=pessoa_id,
                     aplicativo_id=e.aplicativo_id,
@@ -483,7 +533,7 @@ class TelasDeLimites:
             pedido,
             "acoes/limite.html",
             {
-                "l": _limite(linha),
+                "l": _limite(linha, self.ligada),
                 "minimo_dia": min(int(linha.por_dia), maximo_dia),
                 "maximo_dia": maximo_dia,
                 "acima_do_teto": int(linha.por_dia) > maximo_dia,
@@ -540,6 +590,8 @@ class TelasDeLimites:
             linha = await consultas.limite_da_pessoa(c, sessao.pessoa.id, limite_id, FUSO)
             if linha is None:
                 return passkeys.resposta_desafio(None, "Limite não encontrado.", status=404)
+            if nao_vale_com_passkey(linha, self.ligada):
+                return passkeys.resposta_desafio(None, NAO_VALE_COM_PASSKEY, status=409)
             maximo_dia, maximo_dias = await self._maximos(c)
             por_dia, dias, erros = self._ler_ampliacao(f, linha, maximo_dia, maximo_dias)
             if erros:
@@ -557,52 +609,64 @@ class TelasDeLimites:
         sessao = await self.t.exigir_sessao(pedido)
         f = await self.t.formulario(pedido, sessao)
         limite_id: uuid.UUID = pedido.path_params["limite_id"]
-        pessoa_id = sessao.pessoa.id
+        feito: Row[Any] | None = None
         erros: list[str] = []
         status = 400
-        feito: Row[Any] | None = None
         async with self.t.engine.begin() as c:
-            linha = await consultas.limite_da_pessoa(c, pessoa_id, limite_id, FUSO)
-            if linha is None:
-                return self.t.erro(pedido, 404, "Limite não encontrado", "Este limite não é seu ou não existe.")
-            maximo_dia, maximo_dias = await self._maximos(c)
-            por_dia, dias, erros = self._ler_ampliacao(f, linha, maximo_dia, maximo_dias)
-            if not erros and self.ligada:
-                negada = await passkeys.conferir(
-                    c, self.cer, pessoa_id, "limite", alvo_ampliar(limite_id, por_dia, dias), f.texto("credencial")
-                )
-                if negada is not None:
-                    erros, status = [negada], 403
-            if not erros and self._falta_login(sessao):
-                erros, status = [LOGIN_REFEITO_LIMITE], 403
-            if not erros:
-                feito = await consultas.ampliar_limite(
-                    c,
-                    pessoa_id=pessoa_id,
-                    limite_id=limite_id,
-                    por_dia=por_dia,
-                    dias=dias,
-                    teto_dia=maximo_dia,
-                    teto_dias=maximo_dias,
-                    com_passkey=self.ligada,
-                )
-                if feito is None:
-                    erros, status = ["Este limite não vale mais. Nada mudou."], 409
-                else:
-                    await self.t.extrato(
-                        c,
-                        "limite_ampliado" if self.ligada else "limite_ampliado_sem_passkey",
-                        {"ferramenta": linha.ferramenta, "por_dia": int(feito.por_dia)},
-                        pessoa_id=pessoa_id,
-                        aplicativo_id=linha.aplicativo_id,
-                        sistema_id=linha.sistema_id,
-                        ferramenta=linha.ferramenta,
-                        dados={"limite_id": str(limite_id), "dias": dias},
-                    )
+            linha = await consultas.limite_da_pessoa(c, sessao.pessoa.id, limite_id, FUSO)
+            if linha is not None:
+                feito, erros, status = await self._ampliar(c, f, sessao, linha)
+        # As paginas saem depois da transacao: cada pedido segura uma conexao do pool so.
+        if linha is None:
+            return self.t.erro(pedido, 404, "Limite não encontrado", "Este limite não é seu ou não existe.")
         if feito is None:
             return await self._pagina_limite(pedido, limite_id, erros=erros, status=status)
-        log.info("telas_limite_ampliado", passkey=self.ligada)
+        log.info("telas_limite_ampliado", passkey=bool(feito.com_passkey))
         return ver_depois(f"/telas/limites/{limite_id}", "limite_ampliado")
+
+    async def _ampliar(
+        self, c: AsyncConnection, f: Formulario, sessao: Sessao, linha: Row[Any]
+    ) -> tuple[Row[Any] | None, list[str], int]:
+        """Na transacao: confere o pedido, o reforco (passkey ou login refeito) e amplia. (feito, erros, status)."""
+        pessoa_id, limite_id = sessao.pessoa.id, uuid.UUID(str(linha.id))
+        if nao_vale_com_passkey(linha, self.ligada):
+            return None, [NAO_VALE_COM_PASSKEY], 409
+        maximo_dia, maximo_dias = await self._maximos(c)
+        por_dia, dias, erros = self._ler_ampliacao(f, linha, maximo_dia, maximo_dias)
+        if erros:
+            return None, erros, 400
+        if self.ligada:
+            negada = await passkeys.conferir(
+                c, self.cer, pessoa_id, "limite", alvo_ampliar(limite_id, por_dia, dias), f.texto("credencial")
+            )
+            if negada is not None:
+                return None, [negada], 403
+        if self._falta_login(sessao):
+            return None, [LOGIN_REFEITO_LIMITE], 403
+        feito = await consultas.ampliar_limite(
+            c,
+            pessoa_id=pessoa_id,
+            limite_id=limite_id,
+            por_dia=por_dia,
+            dias=dias,
+            teto_dia=maximo_dia,
+            teto_dias=maximo_dias,
+            com_passkey=self.ligada,
+        )
+        if feito is None:
+            return None, ["Este limite não vale mais. Nada mudou."], 409
+        # O extrato diz como foi ampliado agora: com a passkey, ou (passkey desligada) com o login refeito.
+        await self.t.extrato(
+            c,
+            "limite_ampliado" if feito.com_passkey else "limite_ampliado_login_refeito",
+            {"ferramenta": linha.ferramenta, "por_dia": int(feito.por_dia)},
+            pessoa_id=pessoa_id,
+            aplicativo_id=linha.aplicativo_id,
+            sistema_id=linha.sistema_id,
+            ferramenta=linha.ferramenta,
+            dados={"limite_id": str(limite_id), "dias": dias, "com_passkey": bool(feito.com_passkey)},
+        )
+        return feito, [], 200
 
     @tela
     async def encerrar(self, pedido: Request) -> Response:
@@ -618,7 +682,7 @@ class TelasDeLimites:
                     c, pessoa_id=sessao.pessoa.id, limite_id=limite_id, motivo=MOTIVO_ENCERRADO
                 )
             if feito is not None and linha is not None:
-                canceladas = await self._cancelar_liberadas(c, limite_id)
+                canceladas = await cancelar_liberadas(c, limite_id, MOTIVO_CANCELADA, quem="pessoa")
                 await self.t.extrato(
                     c,
                     "limite_encerrado",
@@ -637,16 +701,3 @@ class TelasDeLimites:
         return RedirectResponse(
             "/telas/limites?" + urlencode({"aviso": "limite_encerrado", "canceladas": canceladas}), status_code=303
         )
-
-    async def _cancelar_liberadas(self, c: AsyncConnection, limite_id: uuid.UUID) -> int:
-        """Na transacao que encerra: cancela o que este limite liberou e ainda espera a hora de sair.
-
-        O que o despachante ja marcou "enviando" nao muda (``fila.parar`` so tira de antes de sair)."""
-        canceladas = 0
-        for fila_id in await consultas.liberadas_pelo_limite(c, limite_id):
-            op = await fila.por_fila(c, fila_id)
-            if op is not None and await fila.parar(
-                c, op, Estado.CANCELADA, MOTIVO_CANCELADA, quem="pessoa", papel="entrada"
-            ):
-                canceladas += 1
-        return canceladas

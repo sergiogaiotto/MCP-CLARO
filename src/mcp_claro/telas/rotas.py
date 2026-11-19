@@ -1,10 +1,11 @@
 """Rotas das telas, montadas em ``/telas`` no app da entrada.
 
-Telas da pessoa: inicio, entrar e sair (e entrar de novo na hora, o login refeito com ``prompt=login`` e
-``max_age=0``, que as acoes de maior risco sem passkey e as passkeys pedem), "Minhas ordens de servico",
-"Meu extrato", "Bloquear agora" e "Pausar" (``telas/bloqueio.py``) e "Autorizar um sistema"
-(``telas/autorizar.py``). Fase 2: caixa de pendencias, ficha, "Minhas acoes" e "estamos confirmando"
-(``telas/acoes.py``), passkeys (``telas/passkeys.py``) e limites por aproximacao (``telas/limites.py``).
+Telas da pessoa (``TelasDaPessoa``): entrar e sair (e entrar de novo na hora, o login refeito com
+``prompt=login`` e ``max_age=0``, que as acoes de maior risco sem passkey e as passkeys pedem), "Minhas ordens de
+servico" e "Meu extrato". "Bloquear agora" e "Pausar" ficam em ``telas/bloqueio.py`` e "Autorizar um sistema" em
+``telas/autorizar.py``. Fase 2: o inicio (``/`` e ``/telas``, com a caixa de pendencias e os cartoes), ficha,
+"Minhas acoes" e "estamos confirmando" (``telas/acoes.py``), passkeys (``telas/passkeys.py``), limites por
+aproximacao (``telas/limites.py``) e "Meus programas" (``telas/admin_programas.py``).
 Telas do ADMIN: em ``telas/admin.py`` (cadastro) e ``telas/admin_portas.py`` (bloqueios, portas,
 pessoas, autorizacao e chaves dos sistemas).
 """
@@ -70,11 +71,7 @@ class TelasDaPessoa:
     def __init__(self, t: Telas) -> None:
         self.t = t
 
-    # --- Inicio, entrar e sair ---
-
-    async def inicio(self, pedido: Request) -> Response:
-        await self.t.sessao(pedido)
-        return self.t.pagina(pedido, "inicio.html")
+    # --- Entrar e sair (o inicio e ``TelasDeAcoes.inicio``, com a caixa de pendencias) ---
 
     async def entrar(self, pedido: Request) -> Response:
         return await self._ao_provedor(pedido, caminho_seguro(pedido.query_params.get("voltar")))

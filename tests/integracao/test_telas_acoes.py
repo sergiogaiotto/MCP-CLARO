@@ -554,10 +554,19 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
     amb: Ambiente, http: httpx2.AsyncClient
 ) -> None:
     await politica(amb, OUTBOX_HOLD_SECONDS=0)
+    mensagem, cancelar = amb.vitrine["enviar_mensagem"], amb.vitrine["cancelar_servico"]
+    # O ADMIN marcou, na revisao, o campo que diz o destinatario (a tela do ADMIN tem teste em test_telas_rodada2).
+    async with amb.admin.begin() as c:
+        await c.execute(
+            text(
+                "UPDATE ferramentas_revisadas SET campos_destinatario = ARRAY['destinatario']"
+                " WHERE nome_vitrine = :n AND situacao = 'ativa'"
+            ),
+            {"n": mensagem},
+        )
     nav = await entrar(amb, http)
     r = await nav.get("/telas/limites")
     assert r.status_code == 200
-    mensagem, cancelar = amb.vitrine["enviar_mensagem"], amb.vitrine["cancelar_servico"]
     achado = re.search(r'href="/telas/limites/novo\?escolha=([0-9a-f-]+:[0-9a-f-]+)"[^>]*>Criar limite', r.text)
     assert achado
     assert f"Estas ações são de risco alto e sempre passam pela ficha: {cancelar}." in r.text
@@ -595,19 +604,19 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
     assert r.status_code == 400
     assert "A quantidade por dia vai de 1 a 5." in r.json()["erro"]
 
-    # Os outros campos de texto da acao precisam vir vazios, e a tela diz isso (a ordem e a do esquema no banco).
-    assert re.search(
-        r"<strong>(destinatario, texto|texto, destinatario)</strong>, menos o que você escolher acima\) precisam vir"
-        r" vazios",
-        pagina,
+    # So o campo marcado pelo ADMIN e conferido; o texto da mensagem fica livre, e a tela diz isso.
+    assert "<strong>destinatario</strong>. O limite confere só ele. O resto do pedido, como o texto, fica livre." in (
+        pagina
     )
+    assert "precisam vir vazios" not in pagina
+    assert '<option value="texto"' not in pagina
     credencial_criar = await assinar(nav, aut, "/telas/limites/desafio", csrf, form)
     r = await nav.post("/telas/limites", {**form, "credencial": credencial_criar}, csrf=csrf)
     assert r.status_code == 303, r.text
     limite_id = r.headers["location"].split("/")[3].split("?")[0]
     r = await nav.get(r.headers["location"])
     assert "O limite foi criado" in r.text
-    assert "Só destinatario: equipe, chefe. Precisam vir vazios: texto" in r.text
+    assert "<dd>Só destinatario: equipe, chefe</dd>" in r.text
     # A mesma resposta de novo, com o limite valendo: o igual ja existe (o reaproveitamento do desafio e provado
     # depois de encerrar, quando nada mais barra antes da passkey).
     r = await nav.post("/telas/limites", {**form, "credencial": credencial_criar}, csrf=csrf)
@@ -626,11 +635,8 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
         True,
         "ativo",
     )
-    # O outro campo de texto da acao (texto) entra vazio: so passa sem ficha o pedido que o deixa vazio.
-    assert linhas[0].destinatarios == [
-        {"campo": "destinatario", "valores": ["equipe", "chefe"]},
-        {"campo": "texto", "valores": []},
-    ]
+    # So o campo marcado entra no limite: o texto fica livre.
+    assert linhas[0].destinatarios == [{"campo": "destinatario", "valores": ["equipe", "chefe"]}]
     frases = [linha.frase for linha in await extrato(amb, "limite_criado", amb.ana_id)]
     assert frases == [f"A pessoa criou um limite de 2 por dia para {mensagem}, com passkey."]
 
@@ -653,17 +659,15 @@ async def test_limite_criado_com_passkey_libera_o_pedido_coberto_sem_ficha(
     assert r.status_code == 400
     assert "sempre passam pela ficha" in r.text
 
-    # O pedido coberto sai sem ficha; o de fora do limite pede ficha, e tambem o que pos algo no outro campo.
-    coberto = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": ""})
+    # O pedido coberto sai sem ficha, com texto qualquer; o de fora do limite pede ficha.
+    coberto = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "Texto livre: externo@fora.com"})
     assert coberto[PREFIXO_META + "estado"] in ("liberada", "enviando", "enviada")
     assert (await operacao(amb, protocolo_de(coberto))).ficha_id is None
     await esperar_estado(amb, protocolo_de(coberto), Estado.ENVIADA)
     assert chamadas(amb, "enviar_mensagem") == 1
     fora = await pedir(amb, "enviar_mensagem", {"destinatario": "estranho", "texto": ""})
     assert fora[PREFIXO_META + "estado"] == "aguardando_ficha"
-    com_outro = await pedir(amb, "enviar_mensagem", {"destinatario": "equipe", "texto": "externo@fora.com"})
-    assert com_outro[PREFIXO_META + "estado"] == "aguardando_ficha"
-    assert (await operacao(amb, protocolo_de(com_outro))).ficha_id is not None
+    assert (await operacao(amb, protocolo_de(fora))).ficha_id is not None
 
     # Ampliar pede passkey; encerrar nao.
     csrf = token_csrf((await nav.get(f"/telas/limites/{limite_id}")).text)
@@ -932,7 +936,12 @@ async def test_passkey_desligada_limite_pede_login_refeito_e_ampliar_segue_o_tet
         async with amb.admin.connect() as c:
             limite = (await c.execute(text("SELECT com_passkey FROM limites WHERE id = :i"), {"i": limite_id})).one()
         assert limite.com_passkey is False
-        assert await extrato(amb, "limite_criado_sem_passkey", amb.ana_id)
+        # O extrato diz como foi criado: com o login refeito na hora (a passkey esta desligada).
+        criados = await extrato(amb, "limite_criado_login_refeito", amb.ana_id)
+        assert [x.frase for x in criados] == [
+            f"A pessoa criou um limite de 5 por dia para {amb.vitrine['enviar_mensagem']}, com o login refeito na"
+            " hora (passkey desligada nesta instalacao)."
+        ]
         coberto = protocolo_de(await pedir(amb, "enviar_mensagem", {"destinatario": "qualquer um", "texto": "oi"}))
         await esperar_estado(amb, coberto, Estado.ENVIADA)
         assert chamadas(amb, "enviar_mensagem") == 1
@@ -970,6 +979,14 @@ async def test_passkey_desligada_limite_pede_login_refeito_e_ampliar_segue_o_tet
                 )
             ).one()
         assert (depois.por_dia, depois.longe, depois.no_teto) == (2, True, True)
+        # O extrato diz a verdade: ampliado com o login refeito, nao "com passkey".
+        assert await extrato(amb, "limite_ampliado", amb.ana_id) == []
+        ampliados = await extrato(amb, "limite_ampliado_login_refeito", amb.ana_id)
+        assert [x.frase for x in ampliados] == [
+            f"A pessoa ampliou um limite de {amb.vitrine['enviar_mensagem']} para 2 por dia, com o login refeito na"
+            " hora (passkey desligada nesta instalacao)."
+        ]
+        assert ampliados[0].dados["com_passkey"] is False
 
 
 async def test_encerrar_limite_cancela_o_que_ele_liberou_e_ainda_espera(

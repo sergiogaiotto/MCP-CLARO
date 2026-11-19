@@ -87,6 +87,8 @@ LOGIN_REFEITO_FICHA: Final = (
     "Esta ação é de risco alto: para confirmar sem a passkey, entre de novo agora e confirme logo depois. Nada seguiu."
 )
 
+FICHA_ALHEIA: Final = (404, "Esta ficha não é sua ou não existe.")
+
 # Recusas de ``fila`` (``DecisaoRecusada.motivo``) em linguagem simples, com o status da resposta.
 RECUSAS: Final[dict[str, tuple[int, str]]] = {
     "ficha_desconhecida": (404, "Ficha não encontrada. Ela não é sua ou não existe."),
@@ -137,20 +139,28 @@ def recusa_legivel(erro: DecisaoRecusada) -> tuple[int, str]:
 # e o navegador os obedece (U+202E inverte o que vem depois). Na tela, viram uma marca visivel como [U+202E].
 CATEGORIAS_ESCONDIDAS: Final = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cn"})
 # Os de direcao (bidi) e de largura zero, ditos um a um (ja sao Cf, ficam aqui por clareza): U+061C, U+200B a
-# U+200F, U+202A a U+202E, U+2066 a U+2069. E os que o Unicode chama de letra ou marca, mas nao desenham nada
-# (preenchedores do hangul e seletores de variacao).
+# U+200F, U+202A a U+202E, U+2066 a U+2069. E os que o Unicode chama de letra, marca ou simbolo, mas nao desenham
+# nada ou desenham um branco: os "ignoraveis" do Unicode (preenchedores do hangul U+115F, U+1160, U+3164 e
+# U+FFA0; U+034F, que junta letras; U+17B4 e U+17B5, vogais do khmer que nao aparecem; seletores de variacao,
+# inclusive os do mongol, U+180B a U+180F) e U+2800, o braille em branco.
 ESCONDIDOS_DITOS: Final = frozenset(
     {
+        0x034F,
         0x061C,
-        *range(0x200B, 0x2010),
-        *range(0x202A, 0x202F),
-        *range(0x2066, 0x206A),
         0x115F,
         0x1160,
+        0x17B4,
+        0x17B5,
+        *range(0x180B, 0x1810),
+        *range(0x200B, 0x2010),
+        *range(0x202A, 0x202F),
+        *range(0x2060, 0x2070),
+        0x2800,
         0x3164,
-        0xFFA0,
         *range(0xFE00, 0xFE10),
-        *range(0xE0100, 0xE01F0),
+        0xFEFF,
+        0xFFA0,
+        *range(0xE0000, 0xE1000),
     }
 )
 
@@ -358,12 +368,16 @@ class TelasDeAcoes:
     # --- Inicio, com a contagem da caixa de pendencias ---
 
     async def inicio(self, pedido: Request) -> Response:
+        """O inicio das telas: a contagem da caixa de pendencias e, para quem e responsavel ou substituto de um
+        programa que roda sozinho, o link "Meus programas"."""
         sessao = await self.t.sessao(pedido)
         contagem: Pendencias | None = None
+        programas = False
         if sessao is not None:
             async with self.t.engine.connect() as c:
                 contagem = separar(await fila.pendencias(c, sessao.pessoa.id))
-        return self.t.pagina(pedido, "inicio.html", {"pendencias": contagem})
+                programas = await consultas.cuida_de_programa(c, sessao.pessoa.id)
+        return self.t.pagina(pedido, "inicio.html", {"pendencias": contagem, "cuida_de_programa": programas})
 
     # --- Caixa de pendencias ---
 
@@ -457,25 +471,28 @@ class TelasDeAcoes:
         recusa: tuple[int, str] | None = None
         com_passkey = False
         confirmada: Operacao | None = None
+        # Toda pagina de erro sai depois da transacao: cada pedido segura uma conexao do pool so (a pagina da
+        # ficha abre a sua).
         async with self.t.engine.begin() as c:
             op = await self._ficha_da_pessoa(c, ficha_id, pessoa_id)
             if op is None:
-                return self.t.erro(pedido, 404, "Ficha não encontrada", "Esta ficha não é sua ou não existe.")
-            if self._pede_login(op):
-                if not recente:
-                    # Sem a passkey, o reforco do risco alto e o login refeito na hora. Nada muda ate la.
-                    log.info("telas_ficha_pede_login_refeito")
-                    return await self._pagina_ficha(pedido, ficha_id, erros=[LOGIN_REFEITO_FICHA], status=403)
+                recusa = FICHA_ALHEIA
+            elif self._pede_login(op) and not recente:
+                # Sem a passkey, o reforco do risco alto e o login refeito na hora. Nada muda ate la.
+                log.info("telas_ficha_pede_login_refeito")
+                recusa = (403, LOGIN_REFEITO_FICHA)
+            elif self._pede_login(op):
                 login_refeito = True  # o reforco usado nesta ficha; o extrato diz "com o login refeito"
-            valores = await politica.varios(c, "OUTBOX_HOLD_SECONDS", "CONFIRM_TOO_FAST_SECONDS")
-            credencial = f.texto("credencial")
-            if ligada and op.ficha_exige_passkey and credencial:
-                # A passkey e conferida aqui, na mesma transacao que confirma. Recusada, o desafio fica gasto.
-                negada = await passkeys.conferir(c, self.cer, pessoa_id, "ficha", str(ficha_id), credencial)
-                if negada is not None:
-                    recusa = (403, negada)
-                com_passkey = negada is None
-            if recusa is None:
+            if op is not None and recusa is None:
+                credencial = f.texto("credencial")
+                if ligada and op.ficha_exige_passkey and credencial:
+                    # A passkey e conferida aqui, na mesma transacao que confirma. Recusada, o desafio fica gasto.
+                    negada = await passkeys.conferir(c, self.cer, pessoa_id, "ficha", str(ficha_id), credencial)
+                    if negada is not None:
+                        recusa = (403, negada)
+                    com_passkey = negada is None
+            if op is not None and recusa is None:
+                valores = await politica.varios(c, "OUTBOX_HOLD_SECONDS", "CONFIRM_TOO_FAST_SECONDS")
                 try:
                     async with c.begin_nested():
                         confirmada = await fila.confirmar_ficha(
@@ -509,14 +526,18 @@ class TelasDeAcoes:
         async with self.t.engine.begin() as c:
             op = await self._ficha_da_pessoa(c, ficha_id, sessao.pessoa.id)
             if op is None:
-                return self.t.erro(pedido, 404, "Ficha não encontrada", "Esta ficha não é sua ou não existe.")
-            try:
-                async with c.begin_nested():
-                    recusada = await fila.recusar_ficha(c, ficha_id, pessoa_id=sessao.pessoa.id)
-            except DecisaoRecusada as erro:
-                recusa = recusa_legivel(erro)
+                recusa = FICHA_ALHEIA
+            else:
+                try:
+                    async with c.begin_nested():
+                        recusada = await fila.recusar_ficha(c, ficha_id, pessoa_id=sessao.pessoa.id)
+                except DecisaoRecusada as erro:
+                    recusa = recusa_legivel(erro)
+        # A pagina sai depois da transacao (uma conexao do pool por pedido).
         if recusa is not None or recusada is None:
             status, mensagem = recusa or (409, "Nada mudou.")
+            if status == 404:
+                return self.t.erro(pedido, 404, "Ficha não encontrada", mensagem)
             return await self._pagina_ficha(pedido, ficha_id, erros=[mensagem], status=status)
         log.info("telas_ficha_recusada_pela_pessoa")
         return ver_depois(f"/telas/acoes/{recusada.id}", "recusada")

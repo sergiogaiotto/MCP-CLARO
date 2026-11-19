@@ -10,6 +10,10 @@
 - Com ``FEATURE_PASSKEY`` desligado, as telas dizem que a passkey esta desligada nesta instalacao.
 - Cadastrar e desativar uma passkey pedem sempre o login refeito na hora (``Telas.login_recente``): quem so tem
   o cookie de uma sessao antiga nao troca a passkey da pessoa pela sua sem passar de novo pelo provedor.
+- A cada passkey cadastrada ou desativada, a pessoa recebe um aviso pela fila de avisos (e-mail), depois do
+  COMMIT: "Uma passkey foi cadastrada na sua conta em <hora de Brasilia>. Se nao foi voce, fale com o ADMIN."
+  O aviso nao leva o id da credencial nem o apelido. Se o aviso nao entrar na fila, a mudanca fica (log so com
+  o tipo do erro).
 """
 
 from __future__ import annotations
@@ -19,11 +23,13 @@ import secrets
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Final
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Row, text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import BaseRoute, Route
@@ -43,8 +49,10 @@ from webauthn.helpers.structs import (
     UserVerificationRequirement,
 )
 
+from mcp_claro.avisos.destinos import avisar_pessoa
 from mcp_claro.config.settings import Parametros
 from mcp_claro.logs import logger
+from mcp_claro.saida.protocolo import FUSO
 from mcp_claro.telas.nucleo import Telas, tela, ver_depois
 from mcp_claro.telas.paginas import AVISOS
 from mcp_claro.telas.sessoes import Sessao
@@ -65,6 +73,36 @@ AVISOS_PASSKEY: Final[dict[str, str]] = {
     "passkey_cadastrada": "Pronto. A passkey foi cadastrada. Use-a para confirmar ações de risco alto e limites.",
     "passkey_desativada": "Pronto. A passkey foi desativada. Ela não serve mais para confirmar nada.",
 }
+
+
+# Aviso a pessoa a cada passkey cadastrada ou desativada: evento da fila de avisos e o que mudou, na frase.
+EVENTOS_AVISO: Final[dict[str, str]] = {"cadastrada": "passkey_cadastrada", "desativada": "passkey_desativada"}
+
+
+def texto_do_aviso(o_que: str, quando: datetime) -> str:
+    """A frase do aviso, com a hora de Brasilia. Sem id de credencial, sem apelido: so o que mudou e quando."""
+    hora = quando.astimezone(ZoneInfo(FUSO)).strftime("%H:%M de %d/%m/%Y")
+    return f"Uma passkey foi {o_que} na sua conta em {hora} (hora de Brasília). Se não foi você, fale com o ADMIN."
+
+
+async def avisar_mudanca(engine: AsyncEngine, pessoa_id: uuid.UUID, o_que: str, quando: datetime) -> bool:
+    """Poe na fila de avisos o aviso de passkey cadastrada ou desativada, numa transacao propria.
+
+    Chamado depois do COMMIT da mudanca: se o aviso nao entrar, a passkey continua cadastrada ou desativada.
+    O log leva so o tipo do erro."""
+    evento = EVENTOS_AVISO[o_que]
+    try:
+        async with engine.begin() as c:
+            return await avisar_pessoa(
+                c,
+                pessoa_id,
+                evento,
+                f"MCP-CLARO: uma passkey foi {o_que} na sua conta",
+                {"texto": texto_do_aviso(o_que, quando)},
+            )
+    except Exception as erro:  # noqa: BLE001 - o aviso nunca desfaz a mudanca na passkey, ja gravada
+        log.warning("passkey_aviso_nao_entrou", evento=evento, erro=type(erro).__name__)
+        return False
 
 
 class PasskeyRecusada(Exception):
@@ -368,6 +406,7 @@ class TelasDePasskeys:
         if isinstance(feito, str):
             return await self._pagina(pedido, erros=[feito], status=400)
         log.info("passkey_cadastrada")
+        await avisar_mudanca(self.t.engine, sessao.pessoa.id, "cadastrada", datetime.now(UTC))
         return ver_depois("/telas/passkeys", "passkey_cadastrada")
 
     @tela
@@ -394,4 +433,5 @@ class TelasDePasskeys:
                 pedido, 404, "Passkey não encontrada", "Esta passkey não é sua ou já estava desativada. Nada mudou."
             )
         log.info("passkey_desativada")
+        await avisar_mudanca(self.t.engine, sessao.pessoa.id, "desativada", datetime.now(UTC))
         return ver_depois("/telas/passkeys", "passkey_desativada")

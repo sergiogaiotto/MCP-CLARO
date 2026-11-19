@@ -17,8 +17,9 @@ Regras fixas no codigo (plano, "Programas que rodam sozinhos: nossa sugestao"):
 Acoes de programas: com ``PROGRAM_ACTIONS_ENABLED`` desligado, a entrada ja recusa (motivo ``programa_so_le``).
 
 Quem usa: a entrada (``conferir_pedido`` em cada pedido de programa, ``filtrar_vitrine`` na vitrine,
-``recusa_da_chave`` na chamada, ``linha`` nas recusas) e o despachante (``reconferir_leitura`` antes de abrir
-a chave, ``linha`` no extrato da leitura).
+``recusa_da_chave`` na chamada, ``linha`` nas recusas, de leitura e de acao), a porta de saida (``linha`` na acao
+pedida e na repetida, em ``saida/fila.py`` e ``saida/pedidos.py``) e o despachante (``reconferir_leitura`` antes
+de abrir a chave, ``linha`` no extrato da leitura).
 """
 
 from __future__ import annotations
@@ -50,6 +51,9 @@ PARA_PROGRAMA: Final[dict[str, str]] = {
     "leitura_feita": "programa_leitura_feita",
     "leitura_recusada": "programa_leitura_recusada",
     "pedido_recusado": "programa_pedido_recusado",
+    "acao_recusada": "programa_acao_recusada",
+    "acao_pedida": "programa_acao_pedida",
+    "acao_repetida": "programa_acao_repetida",
 }
 
 _TIPOS_CHAVE_LEGIVEIS: Final = {"por_pessoa": "uma chave por pessoa", "compartilhada": "uma chave compartilhada"}

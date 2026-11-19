@@ -41,6 +41,7 @@ OUTRO_RECURSO = "https://outro-servico.teste/api"
 RONDA = "mcp-claro-ronda"
 VIGIA = "mcp-claro-vigia"
 ADMIN = "admin-ronda@exemplo.teste"
+LIMITE_DA_RONDA_NOS_TESTES = 10000  # PROGRAM_MAX_REQUESTS_PER_MINUTE da entrada nestes testes
 
 
 def engine_como(p: Parametros, papel: str | None, **extra: Any) -> AsyncEngine:
@@ -157,6 +158,10 @@ def parametros_entrada(banco: Parametros, idp: IdpFalso, porta_idp: int) -> Para
                 "IDP_ISSUER_URL": idp.emissor,
                 "IDP_JWKS_URL": f"http://127.0.0.1:{porta_idp}/jwks",
                 "PATROL_FAILS_TO_CLOSE": 2,
+                # A ronda e o vigia sao programas: cada pedido deles conta no limite por minuto. Varias rodadas no
+                # mesmo minuto, nos testes, passariam do padrao (30), e o controle no limite e inconclusivo. O teste
+                # do limite enche a contagem de proposito (test_ronda_no_limite_por_minuto_e_inconclusiva).
+                "PROGRAM_MAX_REQUESTS_PER_MINUTE": LIMITE_DA_RONDA_NOS_TESTES,
             }
         )
     )

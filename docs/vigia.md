@@ -10,7 +10,7 @@ endereço público (`PUBLIC_BASE_URL`), como um aplicativo de fora. Cada rodada 
 
 | Caso | O que a ronda manda | O que precisa voltar |
 | --- | --- | --- |
-| `controle` | Crachá de verdade da ronda, pedido certo na 2026-07-28 | Resposta do servidor (o crachá passou), sem recusa do cadastro da própria ronda |
+| `controle` | Crachá de verdade da ronda, lista de ferramentas (`tools/list`) certa na 2026-07-28 | A vitrine da ronda. Qualquer recusa deixa o caso inconclusivo |
 | `cracha_falso` | Cópia do crachá de verdade, com o mesmo `kid`, assinada por chave da própria ronda | 401 |
 | `cracha_vencido` | Crachá de verdade guardado de rondas anteriores, já vencido | 401 |
 | `outro_condominio` | Crachá de verdade do mesmo provedor, com a audiência de outro recurso | 401 |
@@ -33,9 +33,12 @@ Qualquer outra recusa, ou um resultado, é **passagem**. Exemplo: com a vitrine 
 ferramenta da Ana e recusa depois, porque a ronda é um programa e o sistema usa chave por pessoa
 (`programa_sem_chave_propria`). Isso é passagem.
 
-O `controle` também fica **inconclusivo** quando a entrada recusa a própria ronda: aplicativo ou conta dela sem
-valer, ou cadastro de programa pausado, encerrado, vencido, sem responsável ativo ou ausente. Assim, a rodada é
-inconclusiva e nunca diz "conforme" sem ter testado a vitrine.
+O `controle` só é **conforme** quando a entrada devolve a vitrine da ronda. Toda recusa da lista de ferramentas
+vem antes de olhar a vitrine, e o caso fica **inconclusivo**: aplicativo ou conta da ronda sem valer, cadastro de
+programa dela pausado, encerrado, vencido, sem responsável ativo ou ausente, limite por minuto, entrada fechada,
+bloqueio ou pausa geral (de tudo, do aplicativo ou da conta da ronda) e qualquer motivo novo. Sem o controle
+conforme, a rodada nunca sai "conforme": sai inconclusiva ou, se outro caso passou, "passou". Essa passagem vai
+ao extrato e ao log, mas não conta para fechar a entrada (veja a seguir).
 
 Cada tentativa vira uma linha na tabela `ronda`, só de acrescentar. A coluna `defendeu` é falsa só quando
 houve passagem; o desfecho fica em `detalhes.situacao`. Nenhum crachá vai à tabela, ao log nem ao extrato.
@@ -43,9 +46,11 @@ houve passagem; o desfecho fica em `detalhes.situacao`. Nenhum crachá vai à ta
 ### Quando algo passa
 
 1. A rodada com passagem registra no extrato: "A ronda das portas achou uma passagem indevida: …".
-2. A ronda conta as rodadas seguidas com passagem **e com o controle em dia**, desde a última mudança do estado
-   da entrada. Rodada sem controle (o crachá da ronda não passou, ou o gateway não respondeu) é inconclusiva e
-   zera a contagem: alarme falso não fecha a entrada.
+2. A ronda conta as rodadas seguidas com passagem **e com o controle conforme**, desde a última mudança do
+   estado da entrada. Rodada sem controle conforme (o crachá da ronda não passou, o gateway não respondeu ou
+   recusou a ronda antes da vitrine) não conta e zera a contagem: alarme falso não fecha a entrada. Por isso,
+   com a ronda bloqueada ou pausada, ou com a entrada fechada, uma passagem fica na tabela `ronda`, no extrato
+   e no log, mas não fecha a entrada.
 3. A cada `PATROL_FAILS_TO_CLOSE` (2) rodadas seguidas, a entrada desce um degrau: aberta, depois só de
    leitura, depois fechada. Cada degrau vai ao extrato ("A ronda das portas achou passagem indevida em 2 rondas
    seguidas e deixou a entrada só de leitura. Só o ADMIN reabre, depois de apurar.") e a um aviso ao ADMIN, por
@@ -64,7 +69,7 @@ com banco próprio. Ele não tem acesso ao banco do gateway e não depende do Gr
 | Parte | Ritmo | O que faz |
 | --- | --- | --- |
 | Pulso | `WATCH_PING_SECONDS` (60 s) | Pede `/.well-known/oauth-protected-resource/mcp` no endereço público. Sem resposta boa por `WATCH_SILENCE_ALARM_SECONDS` (900 s), dispara o alarme de silêncio, uma vez por silêncio. Quando o gateway volta, avisa que voltou |
-| Ronda de fora | `WATCH_PROBE_INTERVAL_SECONDS` (600 s) | Os mesmos sete casos da ronda, com a identidade do vigia. Com `PATROL_FAILS_TO_CLOSE` rodadas seguidas com passagem, dispara alarme. O vigia não fecha a entrada |
+| Ronda de fora | `WATCH_PROBE_INTERVAL_SECONDS` (600 s) | Os mesmos sete casos da ronda, com a identidade do vigia. Com `PATROL_FAILS_TO_CLOSE` rodadas seguidas com passagem e controle conforme, dispara alarme. O vigia não fecha a entrada |
 | Fechamentos | `WATCH_PROBE_INTERVAL_SECONDS` | Busca os fechamentos na entrada com o crachá do programa `mcp-claro-vigia` e guarda só acrescentando |
 | Continuidade | Sob pedido | Diz ao despachante, na partida, qual é o último fechamento guardado |
 

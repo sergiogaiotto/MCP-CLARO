@@ -18,6 +18,20 @@ motivo, o intervalo que pode ter se perdido e cada aplicativo pausado, e uma nov
 ``continuidade_banco``. Reabrir a saida e decisao humana registrada (``reabrir_saida``). Na primeira
 partida, so grava a linha.
 
+Com sinal de restauracao (marca, identificador, linha do tempo ou vigia mais novo), a fila de saida para
+tambem (``parar_por_restauracao``): o que esperava fica parado por restauracao, e nada sai sem nova
+confirmacao.
+
+So com o vigia sem resposta, nao ha sinal de que o banco voltou no tempo, mas tambem falta a testemunha de
+fora: uma copia logica posta no mesmo PostgreSQL sem a marca guarda o identificador e a linha do tempo. Por
+isso o extrato ainda registra o intervalo que pode faltar, e a sequencia do protocolo salta para frente
+(``fila.saltar_protocolo``). A fila nao para, nada muda de estado e o extrato nao fala em restauracao: a
+saida fechada segura tudo (o despachante nao envia com ela fechada). Reabrir a saida nao reativa os
+aplicativos. Com a saida reaberta, o despachante confere cada acao na hora dela: a de aplicativo ja
+reativado sai; a de aplicativo ainda pausado para, sem sair, com o desfecho "o aplicativo esta pausado".
+Para o que espera seguir, o aplicativo volta antes de reabrir (``SEM_SINAL_DE_RESTAURACAO`` diz isso no
+extrato e no motivo da saida fechada).
+
 ``ultimo_fechamento_no_vigia``: ``None`` quando o vigia nao respondeu; ``0`` quando respondeu e ainda
 nao guarda fechamento nenhum.
 
@@ -66,6 +80,11 @@ MOTIVOS: Final[dict[str, str]] = {
 _SINAIS_DE_RESTAURACAO: Final = frozenset(
     {"marca_restaurado", "identificador_mudou", "linha_do_tempo_mudou", "vigia_mais_novo"}
 )
+SEM_SINAL_DE_RESTAURACAO: Final = (
+    "sem sinal de banco restaurado, a fila de saida nao parou: com a saida reaberta, a acao de aplicativo"
+    " reativado sai na hora dela, e a de aplicativo ainda pausado para sem sair"
+)
+"""Acrescentado ao motivo quando so o vigia nao respondeu (a fila nao para, so a saida fecha)."""
 QUEM: Final = quem_rotina("continuidade")
 POUPADOS: Final[tuple[str, ...]] = (CLIENTE_RONDA, CLIENTE_VIGIA)
 """Aplicativos que nao pausam: a ronda e o vigia precisam continuar conferindo o gateway."""
@@ -258,21 +277,23 @@ async def conferir_continuidade(
                 {"limite": limite},
             )
         ).scalar_one_or_none() or ultima.visto_em
+        restauracao = bool(_SINAIS_DE_RESTAURACAO.intersection(motivos))
+        motivo = _legivel(motivos) if restauracao else f"{_legivel(motivos)}; {SEM_SINAL_DE_RESTAURACAO}"
         dados: dict[str, Any] = {
             "motivos": list(motivos),
+            "fila_parada": restauracao,
+            "protocolo_saltou": True,
             "timeline_anterior": anterior.timeline_id,
             "timeline_atual": atual.timeline_id,
             "identificador_mudou": anterior.system_identifier != atual.system_identifier,
             "fechamento_banco": fechamento_banco,
             "fechamento_vigia": ultimo_fechamento_no_vigia,
         }
-        await mudar_saida(c, aberta=False, quem=QUEM, motivo=_legivel(motivos), papel=papel)
-        if _SINAIS_DE_RESTAURACAO.intersection(motivos):
+        await mudar_saida(c, aberta=False, quem=QUEM, motivo=motivo, papel=papel)
+        if restauracao:
             await registrar(c, papel=papel, tipo="restauracao_detectada", dados=dados)
         else:
-            await registrar(
-                c, papel=papel, tipo="continuidade_nao_confere", campos={"motivo": _legivel(motivos)}, dados=dados
-            )
+            await registrar(c, papel=papel, tipo="continuidade_nao_confere", campos={"motivo": motivo}, dados=dados)
         perdidos = None
         if ultimo_fechamento_no_vigia is not None and ultimo_fechamento_no_vigia > (fechamento_banco or 0):
             perdidos = ultimo_fechamento_no_vigia - (fechamento_banco or 0)
@@ -284,12 +305,23 @@ async def conferir_continuidade(
             dados={"desde": desde.isoformat(), "ate": ate.isoformat(), "fechamentos_perdidos": perdidos},
         )
         pausados = await _pausar_aplicativos(c, papel, poupados)
-        # Fase 2: o que estava "enviando" fica nao confirmado; o que esperava na fila para por restauracao.
-        from mcp_claro.saida.fila import parar_por_restauracao
+        from mcp_claro.saida import fila
 
-        await parar_por_restauracao(c, papel=papel)
+        if restauracao:
+            # Fase 2: o que estava "enviando" (sem despachante no ar) fica nao confirmado; o que esperava na fila
+            # para por restauracao. A sequencia do protocolo salta junto.
+            await fila.parar_por_restauracao(c, papel=papel)
+        else:
+            # So o vigia sem resposta: a fila fica como esta, segura pela saida fechada. O protocolo salta assim
+            # mesmo, porque sem o vigia nao da para saber se o banco voltou de uma copia sem a marca.
+            await fila.saltar_protocolo(c)
         linha_id = await _gravar(c, atual, fechamento_banco, ultimo_fechamento_no_vigia, "nao_confere", motivos)
-    log.warning("continuidade_nao_confere", motivos=list(motivos), aplicativos_pausados=len(pausados))
+    log.warning(
+        "continuidade_nao_confere",
+        motivos=list(motivos),
+        aplicativos_pausados=len(pausados),
+        fila_parada=restauracao,
+    )
     return Resultado(
         "nao_confere", atual, anterior, fechamento_banco, ultimo_fechamento_no_vigia, motivos, pausados, linha_id
     )

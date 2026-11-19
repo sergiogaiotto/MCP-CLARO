@@ -86,7 +86,8 @@ uv run mcp-claro conferir
 ```
 
 A partida recusa combinações inválidas: versão do MCP diferente de 2026-07-28, `EDGE_MODE=apigee`, banco sem
-`verify-full` em piloto ou produção, fases ligadas fora de ordem, entre outras. A lista completa está em
+`verify-full` em piloto ou produção, fases ligadas fora de ordem, ações de programas ligadas
+(`PROGRAM_ACTIONS_ENABLED`, decisão 9), entre outras. A lista completa está em
 `src/mcp_claro/config/settings.py` e no [plano](docs/plano.md#parâmetros).
 
 ## Organização

@@ -49,6 +49,8 @@ cat <<'FIM'
 restaurar: pronto. Proximos passos (docs/restauracao.md):
   1. suba o banco (docker compose ... up -d banco); ele le os WAL do repositorio, termina a recuperacao
      e abre numa nova linha do tempo;
-  2. grave a marca "restaurado" (python -m mcp_claro.continuidade marcar-restaurado ...);
+  2. grave a marca "restaurado" (python -m mcp_claro.continuidade marcar-restaurado ...) ANTES de subir a
+     entrada: a marca tambem adianta o numero de protocolo, e um pedido que chegue antes dela pode receber
+     um numero ja dado antes da copia;
   3. suba o resto; a porta de saida fica fechada e os aplicativos pausados ate a decisao do ADMIN.
 FIM

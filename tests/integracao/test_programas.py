@@ -994,7 +994,7 @@ async def test_admin_estende_a_data_de_fim_de_programa_que_nao_foi_encerrado(tel
         )
     r = await nav.post(f"{base}/retomar", {}, csrf=csrf)
     assert r.status_code == 400
-    assert "Estenda a data de fim antes de retomar" in r.text
+    assert "Para mantê-lo, estenda a data de fim agora, nesta tela, e depois retome." in r.text
     r = await nav.post(f"{base}/fim", {"fim": (date.today() + timedelta(days=30)).isoformat()}, csrf=csrf)
     assert r.status_code == 303
     r = await nav.post(f"{base}/retomar", {}, csrf=csrf)

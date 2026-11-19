@@ -64,21 +64,65 @@ restauração com o pgBackRest de verdade (o teste longo roda na rodada diária 
 
 ## Fase 2: agir
 
+Os arquivos de teste citados ficam em `tests/integracao/`, salvo onde se diz `tests/unidade/`.
+
 | Entrega | Situação |
 | --- | --- |
-| Número de protocolo e código de conferência em toda ação | Feito (`saida/protocolo.py`): `CLR-AAAA-NNNNNNNN` e um código de 12 letras e números do que vai seguir |
-| Consulta pelo número de protocolo na vitrine | Feito: `mcp_claro_consultar_protocolo`, só a mesma pessoa pelo mesmo aplicativo |
-| Ficha no gateway, caixa "o aplicativo diz" à parte e caixa de pendências | em andamento |
-| Passkey para risco alto e para criar ou ampliar limites | Em andamento |
-| Aviso de ficha pendente por e-mail e webhook | Em andamento |
-| Porta única de saída: fila, despachante único, espera visível, cancelar antes de sair e "seguir agora" | Feito (`saida/fila.py`, `saida/despachante.py`): trava de sessão, LISTEN/NOTIFY e varredura, "enviando" gravado na conexão da trava |
-| "Estamos confirmando": não confirmada, decisão da pessoa e pedido igual que devolve a original | Feito no banco e na entrada; tela de decisão em andamento |
-| Limite por aproximação: ferramenta, destinatários, quantidade e prazo | Feito no banco e na entrada (gasto atômico, conferido de novo no despachante); telas em andamento |
-| Teto de confirmações e período de experiência | Feito: acima do teto o aplicativo pausa e a fila dele para |
-| Comprovante de bloqueio em três partes | Feito: o bloqueio para a fila na mesma transação e grava o que parou, o que já saiu e o que o sistema informou |
-| Fechamento várias vezes ao dia, guardado no vigia | Feito desde a Fase 1 (`CLOSING_INTERVAL_HOURS`, 6 horas) |
-| Programas que rodam sozinhos, só lendo (decisão 9) | Em andamento |
-| Restauração com ações na fila: a porta de saída volta fechada | Feito: "enviando" vira não confirmada; o que esperava fica parado por restauração |
-| Medições da Fase 2 no Grafana | Feito: fila agora, fim dos envios, caminhos e paradas |
+| Número de protocolo e código de conferência em toda ação | Feito (`saida/protocolo.py`): `CLR-AAAA-NNNNNNNN`, com oito dígitos ou mais, e um código de 12 letras e números do que vai seguir. Prova: `tests/unidade/test_saida_estados.py` e `test_saida_resposta_perdida.py::test_argumentos_e_codigo_trocados_no_banco_nao_batem_com_a_ficha` |
+| Consulta pelo número de protocolo na vitrine | Feito: `mcp_claro_consultar_protocolo`, só a mesma pessoa pelo mesmo aplicativo. Prova: `test_saida.py::test_acao_com_ficha_sai_uma_vez_e_aparece_na_consulta` e `::test_consulta_pelo_protocolo_por_outro_aplicativo_da_mesma_pessoa_nao_acha` |
+| Ficha no gateway, caixa "o aplicativo diz" à parte e caixa de pendências | Feito (`telas/acoes.py`), com os caracteres escondidos trocados por marcas visíveis. Prova: `test_telas_acoes.py::test_pendencias_e_ficha_aparecem_e_outra_pessoa_nao_abre` e `::test_ficha_mostra_caracteres_escondidos_marcados` |
+| Passkey para risco alto e para criar ou ampliar limites | Feito (`telas/passkeys.py`). Com a passkey desligada, essas ações pedem o login refeito na hora. Prova: `test_telas_acoes.py::test_risco_alto_sem_passkey_recusa_e_com_passkey_valida_confirma`, `::test_passkey_desligada_risco_alto_pede_login_refeito`, `::test_cadastrar_e_desativar_passkey_pedem_login_refeito` e `test_telas_rodada2.py::test_passkey_cadastrada_ou_desativada_avisa_a_pessoa` |
+| Aviso de ficha pendente por e-mail e webhook | Feito (`rotinas/acoes.py`): um aviso só, mesmo com duas cópias das rotinas. Prova: `test_rotinas_acoes.py::test_aviso_de_ficha_pendente_uma_vez_por_email_e_webhook` e `::test_duas_copias_das_rotinas_avisam_uma_vez` |
+| Porta única de saída: fila, despachante único, espera visível, cancelar antes de sair e "seguir agora" | Feito (`saida/fila.py`, `saida/despachante.py`): trava de sessão, LISTEN/NOTIFY e varredura, "enviando" gravado na conexão da trava. Prova: `test_saida_disputas.py::test_duas_portas_so_uma_envia_e_a_que_herda_nao_reenvia`, `test_telas_acoes.py::test_espera_visivel_e_cancelar_antes_de_sair` e `::test_seguir_agora_sai_antes` |
+| "Estamos confirmando": não confirmada, decisão da pessoa e pedido igual que devolve a original | Feito, com a tela de decisão. O pedido igual conta em qualquer idade enquanto a original pode sair. "Não saiu" e "não confirmada" seguem regra escrita. Prova: `test_saida_resposta_perdida.py`, `test_telas_acoes.py::test_estamos_confirmando_decisao_registrada_uma_vez`, `test_saida_correcoes.py::test_pedido_igual_pendente_conta_fora_da_janela_e_a_janela_vale_depois_de_sair` e `tests/unidade/test_despachante_classifica.py` |
+| Limite por aproximação: ferramenta, destinatários, quantidade e prazo | Feito (`telas/limites.py`): gasto atômico, conferido de novo no despachante. "Só estes destinatários" usa os campos que o ADMIN marca na revisão. Com a passkey ligada, limite feito sem ela não vale. Prova: `test_saida.py::test_limite_libera_sem_ficha_e_nunca_passa_do_teto`, `test_saida_disputas.py::test_dois_pedidos_pelo_ultimo_uso_de_um_limite_so_um_passa`, `test_telas_rodada2.py` e `test_saida_rodada2.py::test_limite_so_estes_com_argumento_fora_do_esquema_vai_para_a_ficha` |
+| Teto de confirmações e período de experiência | Feito: acima do teto, o aplicativo pausa e a fila dele para. Prova: `test_saida.py::test_teto_de_fichas_pausa_o_aplicativo_e_para_a_fila`, `::test_periodo_de_experiencia_manda_tudo_para_a_ficha_e_depois_o_limite_vale` e `test_saida_correcoes.py::test_reativar_depois_do_teto_nao_pausa_de_novo` |
+| Comprovante de bloqueio em três partes | Feito (`fila.parar_por_bloqueio`): o que paramos a tempo, o que já tinha seguido e o que ainda está em conferência, na mesma transação do bloqueio. O que o sistema informou fica para a Fase 4. Prova: `test_saida_correcoes.py::test_comprovante_do_bloqueio_em_tres_partes` e `test_telas_acoes.py::test_comprovante_do_bloqueio_em_tres_partes` |
+| Fechamento várias vezes ao dia, guardado no vigia | Feito desde a Fase 1 (`CLOSING_INTERVAL_HOURS`, 6 horas). Prova: `test_rotinas_tarefas.py::test_fechamento_encadeado_com_frase` e `test_vigia.py::test_vigia_guarda_os_fechamentos_e_percebe_adulteracao` |
+| Programas que rodam sozinhos, só lendo (decisão 9) | Feito (`regras/programas.py`, `rotinas/programas.py`, `telas/admin_programas.py`). `PROGRAM_ACTIONS_ENABLED` ligado é recusado na partida. Prova: `test_programas.py`, `test_programas_rodada2.py` e `tests/unidade/test_settings_fase2.py` |
+| Restauração com ações na fila: a porta de saída volta fechada | Feito: "enviando" vira não confirmada, o que esperava fica parado por restauração e o número de protocolo salta para frente. Só com o vigia sem resposta, a saída fecha e a fila não para. Prova: `test_saida.py::test_restauracao_para_a_fila_e_nada_sai_sem_nova_confirmacao`, `test_saida_disputas.py::test_restauracao_pela_conferencia_fecha_a_saida_e_nada_sai`, `test_continuidade.py::test_marca_restaurado_adianta_o_protocolo_antes_de_a_entrada_subir`, `test_continuidade_restauracao.py` e `test_saida_rodada2.py::test_vigia_sem_resposta_fecha_a_saida_e_pausa_sem_parar_a_fila` |
+| Medições da Fase 2 no Grafana | Feito: fila agora, fim dos envios, caminhos e paradas. Prova: `test_grafana.py::test_consultas_do_painel_rodam_como_grafana_leitor` |
+
+Provas de saída automatizadas:
+
+- resposta perdida de propósito não duplica nada: `test_saida_resposta_perdida.py`, entre o despachante e o
+  sistema, e `test_saida_resposta_perdida_aplicativo.py`, entre o aplicativo e a entrada, com o cenário da
+  discussão pública sobre repetição (3 rodadas a cada mudança, 20 na rodada diária);
+- o que a ficha mostra é o que segue: `test_saida_resposta_perdida.py::test_argumentos_trocados_no_banco_depois_da_ficha_nao_saem`;
+- "cancelado antes de sair" sem chamada ao sistema: `test_saida.py::test_cancelado_antes_de_sair_nao_chega_ao_sistema`;
+- bloquear e enviar ao mesmo tempo: `test_saida_disputas.py::test_bloquear_e_enviar_ao_mesmo_tempo_so_um_acontece`;
+- bloqueio no meio de uma fila cheia: `test_saida_disputas.py::test_bloqueio_no_meio_da_fila_cheia_para_o_resto_e_o_comprovante_bate`;
+- sequências sorteadas de pedir, confirmar, cancelar, bloquear, perder resposta e reiniciar, com `hypothesis`:
+  `test_saida_estados.py` e `test_saida_sequencias.py::test_sequencias_sorteadas_com_as_operacoes_reais`,
+  curtas a cada mudança e longas na rodada diária;
+- Fase 2 ligada para pessoas reais: `test_saida_fase2_real.py::test_chave_da_fase2_vale_para_pessoas_reais`.
+
+Provas que dependem de gente ou de ambiente real:
+
+- ensaio de restauração com o pgBackRest de verdade e a imagem do PGDG (`test_continuidade_pgbackrest.py`,
+  longo, na rodada diária do CI; pula onde o repositório apt do PGDG não é alcançado);
+- o teste opcional com o Toxiproxy (`test_saida_resposta_perdida_aplicativo.py::test_resposta_perdida_pelo_toxiproxy`),
+  que pula sem a imagem; o `ghcr.io` fica bloqueado no ambiente de testes;
+- passkey com autenticadores e navegadores reais; os testes usam um autenticador em software
+  (`tests/autenticador_falso.py`);
+- o provedor de login real pedindo a senha de novo (`prompt=login`, `max_age=0`) e assinando o `auth_time`; os
+  testes usam um provedor falso (`tests/idp_oidc_falso.py`);
+- sistemas reais (decisão 5); os testes usam o sistema de exemplo `exemplos/acoes_caixa.py`;
+- a prova da issue 3394: o cenário roda refeito com o cortador, pelo gateway inteiro
+  (`test_saida_resposta_perdida_aplicativo.py::test_resposta_perdida_ao_aplicativo_e_repeticao_nao_duplicam_o_efeito`).
+  Os scripts da própria discussão ficam num repositório à parte e não rodaram contra o gateway;
+- um aplicativo-piloto achando o resultado de uma ação pela consulta do número de protocolo;
+- telas de ficha, limite e "estamos confirmando" entendidas por pessoas sem formação técnica.
+
+Ainda falta no código:
+
+- as pendências do responsável e a reconferência completa do cadastro do programa na porta de saída. Sem elas,
+  `PROGRAM_ACTIONS_ENABLED` não liga, e a prova "com ações ligadas, um programa não age fora do limite" fica
+  para depois ([programas](programas.md));
+- uma tela para reativar um assistente pausado pela conferência do banco. Hoje, só os programas têm essa tela;
+  o roteiro de [restauração](restauracao.md) diz como fazer enquanto isso;
+- fechar a porta de saída e avisar enquanto o cofre estiver trancado, como diz o [plano](plano.md#cofre-e-chaves).
+  Hoje, com o cofre trancado, a entrada ainda dá número à ação, e o despachante a dá como "não saiu", porque a
+  chave do sistema não abre.
 
 Roteiro para quem cuida do dia a dia: [Porta de saída](saida.md).

@@ -469,20 +469,20 @@ async def decidir(m: Mundo, acao: Acao, passo: str, pessoa: str, com_passkey: bo
         "seguir_agora": certa and antes == Estado.LIBERADA,
         "decidir": certa and antes == Estado.NAO_CONFIRMADA and acao.decisao is None,
     }[passo]
-    if passo == "recusar" and certa and antes != Estado.AGUARDANDO_FICHA and not acao.ficha_decidida:
-        # Hoje, recusar a ficha de uma acao que ja parou (bloqueio, restauracao) grava a recusa na ficha e no
-        # extrato, sem mudar a fila (defeito relatado ao nucleo). Vale conferir so que a fila nao muda.
-        deve = passou
-        m.resumo["recusa_de_ficha_parada"] += int(passou)
+    # Recusar a ficha de uma acao que ja parou (bloqueio, restauracao) e recusado como confirmar: a ficha
+    # continua sem decisao, nada vai ao extrato e a fila nao muda.
     assert passou == deve, f"{passo} {acao.op.protocolo} em {antes} por {pessoa}: passou={passou}, devia {deve}"
     if passou and passo in ("confirmar", "recusar", "cancelar") and acao.op.ficha_id is not None:
         acao.ficha_decidida = True
     m.resumo[f"{passo}_passou"] += int(passou)
     if passou and passo == "confirmar":
         acao.liberada_por = "ficha_com_passkey" if com_passkey else "ficha"
-    if passou and passo == "recusar" and antes != Estado.AGUARDANDO_FICHA:
-        await atualizar(m)
-        assert acao.estado == antes, f"{acao.op.protocolo}: recusar a ficha mudou a fila de {antes} para {acao.estado}"
+    if not passou and passo == "recusar" and acao.op.ficha_id is not None and not acao.ficha_decidida:
+        async with amb.admin.connect() as c:
+            decisao = (
+                await c.execute(text("SELECT decisao FROM fichas WHERE id = :f"), {"f": acao.op.ficha_id})
+            ).scalar_one()
+        assert decisao is None, f"{acao.op.protocolo}: a recusa recusada gravou a decisao {decisao} na ficha"
 
 
 async def enviar(m: Mundo, modo: str) -> None:

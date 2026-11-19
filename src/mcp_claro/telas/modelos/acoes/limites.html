@@ -20,12 +20,12 @@
   <tbody>
   {% for x in ativos %}
     <tr>
-      <td>{{ x.linha.ferramenta }} <span class="dica">pelo aplicativo {{ x.linha.aplicativo }}, no sistema {{ x.linha.sistema }}</span></td>
+      <td>{{ x.linha.ferramenta }} <span class="dica">pelo aplicativo {{ x.linha.aplicativo }}, no sistema {{ x.linha.sistema }}</span>{% if x.nao_vale_com_passkey %}<br><strong>Não vale com a passkey ligada.</strong> <span class="dica">Foi criado sem a passkey: as ações dele passam pela ficha. Encerre e crie outro, com a passkey.</span>{% endif %}</td>
       <td>{{ x.destinatarios }}</td>
       <td>{{ x.linha.usados_hoje }} de {{ x.linha.por_dia }}</td>
       <td>{{ x.linha.valido_ate | data_hora }}</td>
       <td>
-        <a href="/telas/limites/{{ x.linha.id }}" hx-boost="false">Ver ou ampliar</a>
+        <a href="/telas/limites/{{ x.linha.id }}" hx-boost="false">{% if x.nao_vale_com_passkey %}Ver{% else %}Ver ou ampliar{% endif %}</a>
         <form class="em-linha" method="post" action="/telas/limites/{{ x.linha.id }}/encerrar">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button type="submit" class="secundario">Encerrar</button>

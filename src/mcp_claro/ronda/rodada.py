@@ -4,9 +4,9 @@
 2. Guarda cada tentativa na tabela ``ronda`` (so de acrescentar), com o desfecho em ``detalhes``.
    ``defendeu`` e falso so quando houve passagem indevida.
 3. Se houve passagem, registra ``ronda_falha`` no extrato.
-4. Conta as rodadas seguidas com passagem e com o teste de controle em dia, desde a ultima mudanca
-   do estado da entrada. A cada ``PATROL_FAILS_TO_CLOSE`` delas, a entrada desce um degrau:
-   ``aberta`` -> ``so_leitura`` -> ``fechada``. Cada degrau vai ao extrato (``ronda_fechou_entrada``
+4. Conta as rodadas seguidas com passagem e com o teste de controle em dia (a entrada devolveu a vitrine
+   da ronda), desde a ultima mudanca do estado da entrada. A cada ``PATROL_FAILS_TO_CLOSE`` delas, a entrada
+   desce um degrau: ``aberta`` -> ``so_leitura`` -> ``fechada``. Cada degrau vai ao extrato (``ronda_fechou_entrada``
    e ``estado_entrada_mudou``) e a um aviso ao ADMIN. Reabrir e decisao humana registrada: a
    reabertura muda o estado e zera a contagem.
 5. Com ``PATROL_AUTOCLOSE_ENABLED`` desligado, a ronda nao fecha nada: registra

@@ -239,6 +239,9 @@ class Parametros(BaseSettings):
     SCREENS_IDP_TOKEN_URL: str | None = None
     SCREENS_TIMEZONE: str = "America/Sao_Paulo"
     SCREENS_FOREIGN_LEDGER_WINDOW_MINUTES: int = Field(default=30, ge=5, le=240)
+    # Idade maxima do login (auth_time do provedor) para contar como "login refeito na hora", em segundos.
+    # A faixa (60 a 900) e conferida em ``problemas``, com frase legivel.
+    SCREENS_RECENT_LOGIN_SECONDS: int = 300
 
     # Rotinas e avisos (Fase 1)
     NOTIFY_ADMIN_EMAILS: ListaTexto = Field(default_factory=list)
@@ -389,6 +392,8 @@ class Parametros(BaseSettings):
                 erros.append("Em piloto ou producao, DISPATCHER_INTERNAL_URL deve usar https (mTLS).")
         if self.SCREENS_SESSION_IDLE_MINUTES > self.SCREENS_SESSION_TTL_MINUTES:
             erros.append("SCREENS_SESSION_IDLE_MINUTES nao pode passar de SCREENS_SESSION_TTL_MINUTES.")
+        if not 60 <= self.SCREENS_RECENT_LOGIN_SECONDS <= 900:
+            erros.append("SCREENS_RECENT_LOGIN_SECONDS aceita de 60 a 900.")
         if self.NOTIFY_RETRY_CAP_SECONDS < self.NOTIFY_RETRY_BASE_SECONDS:
             erros.append("NOTIFY_RETRY_CAP_SECONDS deve ser maior ou igual a NOTIFY_RETRY_BASE_SECONDS.")
         email_ruim = [e for e in self.NOTIFY_ADMIN_EMAILS if not _parece_email(e)]

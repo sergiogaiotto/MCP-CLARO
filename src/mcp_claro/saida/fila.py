@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
@@ -22,8 +22,9 @@ from typing import Any, Final
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from mcp_claro.cadastro.modelos import FerramentaVitrine
+from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine
 from mcp_claro.extrato import registrar
+from mcp_claro.regras import programas
 from mcp_claro.regras.bloqueios import Bloqueio, quem_rotina
 from mcp_claro.saida import travas
 from mcp_claro.saida.estados import ANTES_DE_SAIR, FRASE, Estado
@@ -34,6 +35,10 @@ QUEM_TETO: Final = quem_rotina("teto_confirmacoes")
 """Quem liga a pausa do teto de fichas por hora (``CONFIRM_CAP_PER_HOUR``)."""
 SALTO_NA_RESTAURACAO: Final = 1_000_000
 """Quanto a sequencia do protocolo anda para frente quando o banco volta de uma copia."""
+DEPOIS_DA_RETOMADA: Final = " (resposta depois da retomada)"
+"""Vai no fim do desfecho quando a resposta chega depois de a retomada dar a acao como nao confirmada."""
+QUEM_RETOMA: Final = "despachante:retomada"
+"""``mudou_por`` da retomada: diferente do ``despachante`` que so o fim do envio grava a partir de "enviando"."""
 COMO_CONFIRMOU: Final = {"sessao": "sem passkey", "passkey": "com passkey", "login_refeito": "com o login refeito"}
 DECISOES_NAO_CONFIRMADA: Final = {
     "aconteceu": "aconteceu no sistema",
@@ -234,14 +239,35 @@ async def pedido_igual(c: AsyncConnection, chave: str, janela_minutos: int) -> O
 # Limites por aproximacao
 
 
-def cobre(destinatarios: Any, argumentos: dict[str, Any]) -> bool:
+def _valores_do_campo(valor: Any) -> list[str] | None:
+    """O valor de um campo de destinatario como lista de textos; ``None`` quando nao da para conferir.
+
+    Ausente, ``None``, ``""`` ou ``[]``: vazio. Texto: um destinatario. Lista so de textos: a lista. Qualquer
+    outra coisa (numero, objeto, lista com objeto) nao e conferida, e o limite nao cobre."""
+    if valor is None or valor == "" or valor == []:
+        return []
+    if isinstance(valor, str):
+        return [valor]
+    if isinstance(valor, list) and all(isinstance(v, str) for v in valor):
+        return list(valor)
+    return None
+
+
+def cobre(destinatarios: Any, argumentos: dict[str, Any], *, propriedades: Collection[str] | None = None) -> bool:
     """Lista vazia: qualquer destinatario. Cada item ``{"campo", "valores"}`` exige o argumento entre os valores.
 
     Item com ``valores`` vazio quer dizer "este campo tem de vir ausente, vazio ou lista vazia": e assim que um
     limite "so estes destinatarios" fecha os outros campos de destinatario da ferramenta (copia, copia oculta).
+    Item com valores exige pelo menos um destinatario, e todos entre os valores.
+
+    ``propriedades`` (chaves de ``esquema_entrada.properties`` da ferramenta revisada): num limite "so estes",
+    qualquer argumento fora delas faz o limite nao cobrir, e o pedido vai para a ficha. Os campos do esquema
+    que nao sao de destinatario (como o texto da mensagem) ficam livres.
     """
     itens = _json(destinatarios) or []
     if not isinstance(itens, list):
+        return False
+    if itens and propriedades is not None and any(chave not in propriedades for chave in argumentos):
         return False
     for item in itens:
         if not isinstance(item, dict):
@@ -249,15 +275,33 @@ def cobre(destinatarios: Any, argumentos: dict[str, Any]) -> bool:
         campo, valores = item.get("campo"), item.get("valores")
         if not isinstance(campo, str) or not isinstance(valores, list):
             return False
-        valor = argumentos.get(campo)
-        if not valores:
-            if valor is None or (isinstance(valor, str | list) and len(valor) == 0):
-                continue
+        pedidos = _valores_do_campo(argumentos.get(campo))
+        if pedidos is None:
             return False
-        pedidos = valor if isinstance(valor, list) else [valor]
-        if not pedidos or any(not isinstance(v, str) or v not in valores for v in pedidos):
+        if not valores:
+            if pedidos:
+                return False
+            continue
+        if not pedidos or any(v not in valores for v in pedidos):
             return False
     return True
+
+
+async def propriedades_da_ferramenta(c: AsyncConnection, sistema_id: uuid.UUID, nome_original: str) -> frozenset[str]:
+    """Chaves de ``esquema_entrada.properties`` da revisao ativa da ferramenta (vazio sem revisao ativa)."""
+    esquema = _json(
+        (
+            await c.execute(
+                text(
+                    "SELECT esquema_entrada FROM ferramentas_revisadas WHERE sistema_id = :s AND nome_original = :n"
+                    " AND situacao = 'ativa'"
+                ),
+                {"s": sistema_id, "n": nome_original},
+            )
+        ).scalar_one_or_none()
+    )
+    propriedades = esquema.get("properties") if isinstance(esquema, dict) else None
+    return frozenset(propriedades) if isinstance(propriedades, dict) else frozenset()
 
 
 async def gastar_limite(
@@ -277,6 +321,9 @@ async def gastar_limite(
 
     Virada do dia (Brasilia): o dia gravado nunca volta. Um pedido que comecou antes da meia-noite e grava
     depois de outro do dia novo conta no dia novo.
+
+    Limite "so estes destinatarios": ``cobre`` recebe as chaves do esquema de entrada da ferramenta revisada,
+    lidas nesta mesma transacao. Argumento fora do esquema faz o pedido ir para a ficha.
     """
     candidatos = (
         await c.execute(
@@ -288,8 +335,11 @@ async def gastar_limite(
             {"p": pessoa_id, "a": aplicativo_id, "s": sistema_id, "n": nome_original, "pk": exige_passkey},
         )
     ).all()
+    propriedades: frozenset[str] | None = None
     for linha in candidatos:
-        if not cobre(linha.destinatarios, argumentos):
+        if _json(linha.destinatarios) and propriedades is None:
+            propriedades = await propriedades_da_ferramenta(c, sistema_id, nome_original)
+        if not cobre(linha.destinatarios, argumentos, propriedades=propriedades):
             continue
         gasto = (
             await c.execute(
@@ -338,7 +388,9 @@ async def registrar_pedido(
     prazo_ficha_minutos: int,
     espera_segundos: int,
     trace_id: str | None = None,
+    aplicativo: Aplicativo | None = None,
 ) -> Operacao:
+    """``aplicativo`` (opcional, o mesmo de ``aplicativo_id``) poupa a consulta do extrato para um assistente."""
     protocolo = await novo_protocolo(c)
     codigo = codigo_conferencia(ferramenta.sistema.id, ferramenta.nome_original, argumentos)
     operacao_id = (
@@ -393,11 +445,18 @@ async def registrar_pedido(
             ),
             {"o": operacao_id, "fi": ficha_id},
         )
+    # Para um programa, a linha diz "programa X, responsavel Y" (``programas.linha``), como nas leituras.
+    linha = await programas.linha(
+        c,
+        aplicativo if aplicativo is not None and aplicativo.id == aplicativo_id else aplicativo_id,
+        "acao_pedida",
+        {"ferramenta": ferramenta.nome_vitrine, "protocolo": protocolo},
+    )
     await registrar(
         c,
         papel="entrada",
-        tipo="acao_pedida",
-        campos={"ferramenta": ferramenta.nome_vitrine, "protocolo": protocolo},
+        tipo=linha.tipo,
+        campos=linha.campos,
         protocolo=protocolo,
         aplicativo_id=aplicativo_id,
         pessoa_id=pessoa_id,
@@ -555,14 +614,26 @@ async def confirmar_ficha(
 
 
 async def recusar_ficha(c: AsyncConnection, ficha_id: uuid.UUID, *, pessoa_id: uuid.UUID) -> Operacao:
+    """Recusa a ficha e cancela a acao. So vale enquanto a acao espera a ficha, como a confirmacao.
+
+    A acao que ja parou (bloqueio, restauracao) com a ficha ainda sem decisao nao muda: a recusa e recusada,
+    sem gravar a decisao na ficha nem linha no extrato."""
     f = await _ficha_travada(c, ficha_id, pessoa_id)
-    await c.execute(
-        text(
-            "UPDATE fila_saida SET estado = 'cancelada', mudou_por = 'pessoa'"
-            " WHERE operacao_id = :o AND estado = 'aguardando_ficha'"
-        ),
-        {"o": f.operacao_id},
-    )
+    cancelada = (
+        await c.execute(
+            text(
+                "UPDATE fila_saida SET estado = 'cancelada', mudou_por = 'pessoa'"
+                " WHERE operacao_id = :o AND estado = 'aguardando_ficha' RETURNING id"
+            ),
+            {"o": f.operacao_id},
+        )
+    ).scalar_one_or_none()
+    if cancelada is None:
+        atual = _existe(await por_id(c, f.operacao_id))
+        raise DecisaoRecusada(
+            "nao_esta_aguardando",
+            f"Esta acao nao espera mais a sua decisao: a ficha nao foi recusada e nada mudou. {FRASE[atual.estado]}",
+        )
     await c.execute(
         text(
             "UPDATE fichas SET decisao = 'recusada', decidida_em = now(), decidida_por = :p,"
@@ -761,7 +832,10 @@ _TIPO_FINAL: Final = {
 async def finalizar(
     c: AsyncConnection, op: Operacao, estado: Estado, resultado: dict[str, Any] | None, desfecho: str
 ) -> bool:
-    """Grava o fim do envio. Se outra copia ja deu a acao como nao confirmada, so guarda a resposta."""
+    """Grava o fim do envio. Se outra copia ja deu a acao como nao confirmada, so guarda a resposta.
+
+    Nova tentativa depois de um COMMIT que deu certo, mas cuja confirmacao se perdeu: a linha ja tem o que este
+    fim gravou (``_fim_ja_gravado``), antes ou depois de uma retomada. Nada e gravado de novo."""
     if estado not in _TIPO_FINAL:
         raise ValueError(f"O fim de um envio nao pode ser {estado}.")
     saiu = estado != Estado.NAO_SAIU
@@ -775,12 +849,14 @@ async def finalizar(
             {"i": op.fila_id, "e": str(estado), "saiu": saiu},
         )
     ).scalar_one_or_none()
+    if mudou is None and await _fim_ja_gravado(c, op, estado, desfecho):
+        return True
     await c.execute(
         text("UPDATE operacoes SET resultado = CAST(:r AS jsonb), desfecho = :d WHERE id = :o"),
         {
             "o": op.id,
             "r": json.dumps(resultado, ensure_ascii=False) if resultado is not None else None,
-            "d": desfecho if mudou is not None else f"{desfecho} (resposta depois da retomada)",
+            "d": desfecho if mudou is not None else desfecho + DEPOIS_DA_RETOMADA,
         },
     )
     tipo = _TIPO_FINAL[estado]
@@ -804,7 +880,33 @@ async def finalizar(
     return mudou is not None
 
 
-async def retomar_enviando(c: AsyncConnection, *, quem: str = "despachante") -> list[str]:
+async def _fim_ja_gravado(c: AsyncConnection, op: Operacao, estado: Estado, desfecho: str) -> bool:
+    """A linha ja tem o que este fim de envio grava. Dois casos:
+
+    - gravado pelo fim do envio: o mesmo estado, ``mudou_por = 'despachante'`` e o mesmo desfecho;
+    - depois de uma retomada (``despachante:retomada`` ou ``restauracao``): a linha e nao confirmada, e o
+      desfecho e o deste fim com a marca ``DEPOIS_DA_RETOMADA``.
+
+    Depois de "enviando", so o fim do envio e a retomada levam a linha a um estado final, e estado final nao
+    muda mais. Um envio so tem um fim, e so ele escreve o desfecho com a marca: achar isso quer dizer que a
+    tentativa anterior chegou ao banco."""
+    linha = (
+        await c.execute(
+            text(
+                "SELECT f.estado, f.mudou_por, o.desfecho FROM fila_saida f JOIN operacoes o ON o.id = f.operacao_id"
+                " WHERE f.id = :i"
+            ),
+            {"i": op.fila_id},
+        )
+    ).first()
+    if linha is None:
+        return False
+    if linha.mudou_por == "despachante":
+        return (linha.estado, linha.desfecho) == (str(estado), desfecho)
+    return (linha.estado, linha.desfecho) == (str(Estado.NAO_CONFIRMADA), desfecho + DEPOIS_DA_RETOMADA)
+
+
+async def retomar_enviando(c: AsyncConnection, *, quem: str = QUEM_RETOMA) -> list[str]:
     """Quem assume a porta (ou a partida depois de queda) acha acoes em "enviando": viram nao confirmadas."""
     linhas = (
         await c.execute(
@@ -984,6 +1086,17 @@ async def comprovante_do_bloqueio(c: AsyncConnection, bloqueio_id: uuid.UUID) ->
     )
 
 
+async def saltar_protocolo(c: AsyncConnection) -> None:
+    """A sequencia do protocolo anda ``SALTO_NA_RESTAURACAO`` para frente.
+
+    Se o banco voltou de uma copia, os numeros dados depois dela se perderam com ela, mas as pessoas e os
+    aplicativos podem guarda-los: nenhum deles e dado de novo a outra acao."""
+    await c.execute(
+        text("SELECT setval('protocolo_seq', (SELECT last_value FROM protocolo_seq) + :n)"),
+        {"n": SALTO_NA_RESTAURACAO},
+    )
+
+
 async def parar_por_restauracao(c: AsyncConnection, *, papel: str = "despachante") -> tuple[int, int]:
     """Banco restaurado: o que estava "enviando" fica nao confirmado; o que esperava para por restauracao.
 
@@ -998,10 +1111,7 @@ async def parar_por_restauracao(c: AsyncConnection, *, papel: str = "despachante
       perdido com ela, nao e dado de novo a outra acao.
     """
     await travas.exclusiva(c, [travas.TUDO])
-    await c.execute(
-        text("SELECT setval('protocolo_seq', (SELECT last_value FROM protocolo_seq) + :n)"),
-        {"n": SALTO_NA_RESTAURACAO},
-    )
+    await saltar_protocolo(c)
     livre = bool(
         (await c.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": travas.DESPACHANTE_UNICO})).scalar_one()
     )

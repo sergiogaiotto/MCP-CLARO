@@ -68,7 +68,7 @@ def test_classificar_versao() -> None:
 
 def test_classificar_controle_e_outra_pessoa() -> None:
     assert classificar_controle(Resposta(200, resultado({"tools": []}))) is Situacao.CONFORME
-    assert classificar_controle(Resposta(400, erro(-32602, "entrada_fechada"))) is Situacao.CONFORME
+    assert classificar_controle(Resposta(400, erro(-32602, "entrada_fechada"))) is Situacao.INCONCLUSIVO
     assert classificar_controle(Resposta(400, erro(-32022))) is Situacao.INCONCLUSIVO
     assert classificar_controle(Resposta(401, None)) is Situacao.INCONCLUSIVO
     assert classificar_outra_pessoa(Resposta(400, erro(-32602, "fora_da_vitrine"))) is Situacao.CONFORME
@@ -131,9 +131,29 @@ def test_outra_pessoa_com_erro_interno_e_inconclusivo() -> None:
 def test_controle_inconclusivo_quando_a_entrada_recusa_a_propria_ronda(motivo: str) -> None:
     """Ronda com o proprio programa pausado, sem cadastro ou vencido: a rodada e inconclusiva, nunca conforme."""
     assert classificar_controle(Resposta(400, erro(-32602, motivo))) is Situacao.INCONCLUSIVO
-    assert classificar_controle(Resposta(400, erro(-32602, "bloqueio_tudo"))) is Situacao.CONFORME
-    # O limite por minuto passa sozinho: o cracha passou pelas portas e o cadastro vale.
-    assert classificar_controle(Resposta(400, erro(-32602, "programa_limite_minuto"))) is Situacao.CONFORME
+
+
+@pytest.mark.parametrize(
+    "motivo",
+    [
+        # Rodada 2 (observacao 1): antes, estas davam conforme, e a rodada dizia "conforme" sem testar a vitrine.
+        "entrada_fechada",
+        "bloqueio_tudo",
+        "pausa_tudo",
+        "bloqueio_aplicativo",
+        "pausa_aplicativo",
+        "bloqueio_pessoa",
+        "pausa_pessoa_aplicativo",
+        "programa_limite_minuto",
+        "motivo_que_ainda_nao_existe",
+        None,
+    ],
+)
+def test_controle_so_e_conforme_com_resultado(motivo: str | None) -> None:
+    """Qualquer recusa no controle (que e um ``tools/list``) vem antes da vitrine: inconclusivo."""
+    assert classificar_controle(Resposta(400, erro(-32602, motivo))) is Situacao.INCONCLUSIVO
+    assert classificar_controle(Resposta(200, erro(-32603))) is Situacao.INCONCLUSIVO
+    assert classificar_controle(Resposta(200, resultado({"tools": []}))) is Situacao.CONFORME
 
 
 def test_motivos_do_cadastro_do_programa_batem_com_as_regras() -> None:
@@ -260,6 +280,20 @@ async def test_ronda_com_o_proprio_programa_pausado_e_inconclusiva(idp: IdpFalso
     casos = await rodada(GatewayFalso(idp, recusa_da_lista="programa_pausado"), Fonte(idp))
     assert casos[Caso.CONTROLE].situacao is Situacao.INCONCLUSIVO
     assert casos[Caso.OUTRA_PESSOA].situacao is Situacao.INCONCLUSIVO
+    resumo = Resumo(list(casos.values()))
+    assert not resumo.controle_ok
+    assert not resumo.falhou
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("recusa", ["bloqueio_aplicativo", "entrada_fechada", "pausa_tudo", "programa_limite_minuto"])
+async def test_ronda_recusada_antes_da_vitrine_e_inconclusiva(idp: IdpFalso, recusa: str) -> None:
+    """Observacao 1 da primeira rodada: com a ronda recusada antes da vitrine, a rodada nunca diz "conforme"."""
+    casos = await rodada(GatewayFalso(idp, recusa_da_lista=recusa), Fonte(idp))
+    assert casos[Caso.CONTROLE].situacao is Situacao.INCONCLUSIVO
+    assert casos[Caso.CONTROLE].detalhes["motivo"] == recusa
+    assert casos[Caso.OUTRA_PESSOA].situacao is Situacao.INCONCLUSIVO
+    assert casos[Caso.CRACHA_FALSO].situacao is Situacao.CONFORME  # as portas de antes seguem testadas
     resumo = Resumo(list(casos.values()))
     assert not resumo.controle_ok
     assert not resumo.falhou

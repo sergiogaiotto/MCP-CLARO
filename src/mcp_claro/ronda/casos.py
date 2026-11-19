@@ -2,10 +2,11 @@
 
 Cada rodada faz, em ordem, um pedido por caso:
 
-- ``controle``: cracha de verdade da ronda, pedido certo na 2026-07-28. Precisa passar pela porta
-  do cracha e pela de versao (qualquer resposta JSON-RPC serve), menos a recusa que diz que a propria
-  ronda nao pode pedir agora (aplicativo, conta ou cadastro de programa dela sem valer): com ela, a
-  vitrine nao e testada. Sem controle em dia, a rodada e inconclusiva e nao conta para fechar a entrada.
+- ``controle``: cracha de verdade da ronda, ``tools/list`` certo na 2026-07-28. So e conforme quando a
+  entrada devolve a vitrine da ronda (um resultado). Qualquer recusa (aplicativo, conta ou cadastro de
+  programa da ronda sem valer, limite por minuto, entrada fechada, bloqueio ou pausa geral) quer dizer que
+  a vitrine nao foi testada: inconclusivo. Sem controle em dia, a rodada e inconclusiva e nao conta para
+  fechar a entrada.
 - ``cracha_falso``: copia do cracha de verdade, assinada por chave propria da ronda. Espera 401.
 - ``cracha_vencido``: cracha de verdade guardado de rondas anteriores, ja vencido. Espera 401.
 - ``outro_condominio``: cracha de verdade do mesmo provedor com audiencia de outro recurso. Espera 401.
@@ -80,7 +81,8 @@ MOTIVOS_DO_CADASTRO_DO_PROGRAMA: Final = frozenset(
 _RECUSAS_DA_PROPRIA_RONDA: Final = frozenset({"sem_cracha", "fase1_desligada"}) | (
     MOTIVOS_DO_CADASTRO_DO_PROGRAMA - {"programa_limite_minuto"}
 )
-"""O cadastro da ronda nao vale. O limite por minuto fica de fora: passa sozinho e nao diz que o cadastro falhou."""
+"""O cadastro da ronda nao vale. O limite por minuto fica de fora: passa sozinho e nao diz que o cadastro falhou
+(``recusa_antes_da_vitrine`` o pega pelos motivos do cadastro)."""
 _PREFIXOS_DA_PROPRIA_RONDA: Final = ("app_", "pessoa_")  # aplicativo ou conta da ronda sem valer (``quem``)
 
 MOTIVOS_ANTES_DA_VITRINE_GERAIS: Final = frozenset(
@@ -283,10 +285,15 @@ def _passou_das_portas(r: Resposta) -> bool:
 
 
 def classificar_controle(r: Resposta) -> Situacao:
-    """O cracha de verdade passou pelas portas. Se a entrada recusou a propria ronda, a vitrine nao foi testada."""
-    if not _passou_das_portas(r) or recusa_da_propria_ronda(r.motivo):
-        return Situacao.INCONCLUSIVO
-    return Situacao.CONFORME
+    """Conforme so quando o cracha de verdade passou pelas portas e a entrada devolveu a vitrine (um resultado).
+
+    Qualquer recusa no controle vem antes da vitrine (``entrada/servidor.py``, ``quem`` e ``listar``): a propria
+    ronda sem valer, limite por minuto, entrada fechada, bloqueio ou pausa geral, ou um motivo novo. Com ela, o
+    caso ``outra_pessoa`` tambem nao testa a vitrine, e a rodada nao pode dizer "conforme": inconclusivo.
+    """
+    if _passou_das_portas(r) and r.tem_resultado:
+        return Situacao.CONFORME
+    return Situacao.INCONCLUSIVO
 
 
 def classificar_cracha(r: Resposta) -> Situacao:

@@ -13,9 +13,10 @@ Para cada acao liberada e na hora:
    igual ao que vai seguir;
 3. marca "enviando" e grava, antes de qualquer byte sair (o que o envio le do banco e lido antes);
 4. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema;
-5. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. Se o banco falhar
-   ao gravar o fim, tenta de novo algumas vezes; se nao der, a linha fica "enviando" e a proxima retomada a
-   da como nao confirmada.
+5. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. O caractere nulo
+   (U+0000), que o banco nao guarda, vira U+FFFD no resultado. Se o banco falhar ao gravar o fim, tenta de
+   novo algumas vezes; se nao der, encerra o turno: a conexao da trava cai, quem assumir a porta (esta mesma,
+   na volta seguinte, ou outra copia) da a linha "enviando" como nao confirmada, e nada e reenviado.
 
 O despachante acorda pelo ``LISTEN mcp_claro_saida`` e, de reserva, por varredura. Com a porta de saida
 fechada, so olha de novo a cada varredura.
@@ -27,7 +28,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, Final
 
 import mcp_types as types
 from sqlalchemy import text
@@ -68,6 +69,40 @@ TENTATIVAS_DO_FIM = 4
 """Vezes que o despachante tenta gravar o fim de um envio antes de deixar a retomada decidir."""
 ESPERA_DO_FIM = 0.25
 """Espera entre as tentativas (segundos, crescendo a cada uma)."""
+APLICATIVO_PARADO: Final[dict[str, str]] = {
+    "pausado": "o aplicativo esta pausado",
+    "bloqueado": "o aplicativo esta bloqueado",
+}
+"""Desfecho da acao parada porque o aplicativo nao esta ativo (``aplicativos.situacao``)."""
+NULO = "\x00"
+TROCA_DO_NULO = "\ufffd"
+"""O PostgreSQL nao guarda U+0000 em texto nem em jsonb: no resultado, ele vira U+FFFD (caractere de troca)."""
+
+
+class FimNaoGravado(RuntimeError):
+    """O fim do envio nao gravou depois de todas as tentativas. Encerra o turno da porta para a retomada decidir.
+
+    A mensagem so diz a linha e o estado: o erro do banco pode trazer os valores do comando (o resultado)."""
+
+
+def sem_nulo(valor: Any) -> tuple[Any, int]:
+    """Troca U+0000 por U+FFFD em todo texto (chaves e valores, em qualquer profundidade). Devolve (valor, trocas)."""
+    if isinstance(valor, str):
+        trocas = valor.count(NULO)
+        return (valor.replace(NULO, TROCA_DO_NULO), trocas) if trocas else (valor, 0)
+    if isinstance(valor, dict):
+        limpo: dict[Any, Any] = {}
+        total = 0
+        for chave, item in valor.items():
+            nova_chave, n_chave = sem_nulo(chave)
+            novo_item, n_item = sem_nulo(item)
+            limpo[nova_chave] = novo_item
+            total += n_chave + n_item
+        return limpo, total
+    if isinstance(valor, list):
+        itens = [sem_nulo(item) for item in valor]
+        return [item for item, _ in itens], sum(n for _, n in itens)
+    return valor, 0
 
 
 class PortaDeSaida:
@@ -164,7 +199,7 @@ class PortaDeSaida:
 
     async def assumir(self, dono: AsyncConnection | None = None) -> list[str]:
         async with self._transacao(dono) as c:
-            retomadas = await fila.retomar_enviando(c, quem="despachante:retomada")
+            retomadas = await fila.retomar_enviando(c, quem=fila.QUEM_RETOMA)
             await registrar(c, papel="despachante", tipo="despachante_assumiu", campos={"retomadas": len(retomadas)})
         self.assumiu.set()
         log.info("porta_de_saida_assumida", retomadas=len(retomadas))
@@ -237,12 +272,19 @@ class PortaDeSaida:
         CONTADORES.somar("acoes", estado=str(final), sistema=ferramenta.sistema.nome)
         return True
 
-    async def _gravar_fim(self, op: Operacao, final: Estado, resultado: dict[str, Any] | None, desfecho: str) -> bool:
+    async def _gravar_fim(self, op: Operacao, final: Estado, resultado: dict[str, Any] | None, desfecho: str) -> None:
         """Grava o fim do envio, tentando de novo algumas vezes se o banco falhar.
 
-        Sem conseguir, a linha fica "enviando": quem assumir a porta (ou a proxima partida) a da como nao
-        confirmada, e nada e reenviado. O log nao leva o resultado nem o erro do banco (que pode trazer os
-        valores do comando), so o tipo do erro."""
+        Antes, troca U+0000 por U+FFFD no resultado (o banco recusaria a gravacao todas as vezes). Sem conseguir
+        gravar, levanta ``FimNaoGravado``: o turno da porta acaba, a conexao da trava cai, e quem assumir a porta
+        da a linha "enviando" como nao confirmada (``retomar_enviando``). Nada e reenviado. Uma tentativa nova
+        depois de um COMMIT que deu certo (e cuja confirmacao se perdeu) reconhece o proprio fim
+        (``fila.finalizar``). O log nao leva o resultado nem o erro do banco (que pode trazer os valores do
+        comando), so o tipo do erro."""
+        if resultado is not None:
+            resultado, trocas = sem_nulo(resultado)
+            if trocas:
+                log.warning("resultado_com_caractere_nulo", fila_id=op.fila_id, trocas=trocas)
         for tentativa in range(1, TENTATIVAS_DO_FIM + 1):
             try:
                 async with self.engine.begin() as c:
@@ -252,9 +294,9 @@ class PortaDeSaida:
                 if tentativa < TENTATIVAS_DO_FIM:
                     await asyncio.sleep(ESPERA_DO_FIM * tentativa)
             else:
-                return True
+                return
         log.error("fim_do_envio_nao_gravado", fila_id=op.fila_id, estado=str(final))
-        return False
+        raise FimNaoGravado(f"O fim do envio da linha {op.fila_id} ({final}) nao gravou; a retomada decide.") from None
 
     async def _conferir(self, c: Any, op: Operacao) -> FerramentaVitrine | tuple[Estado, str]:
         situacoes = (
@@ -267,8 +309,12 @@ class PortaDeSaida:
                 {"p": op.pessoa_id, "a": op.aplicativo_id},
             )
         ).one()
-        if situacoes.pessoa != "ativa" or situacoes.app != "ativo":
-            return Estado.PARADA_POR_BLOQUEIO, "pessoa ou aplicativo parado"
+        if situacoes.pessoa != "ativa":
+            return Estado.PARADA_POR_BLOQUEIO, "a pessoa nao esta ativa"
+        if situacoes.app != "ativo":
+            # Hoje so a conferencia do banco na partida (``continuidade``) pausa um aplicativo. O desfecho aparece
+            # na tela da acao como detalhe.
+            return Estado.PARADA_POR_BLOQUEIO, APLICATIVO_PARADO.get(situacoes.app, "o aplicativo nao esta ativo")
         vigentes = await bloqueios.ativos(c, pessoa_id=op.pessoa_id, aplicativo_id=op.aplicativo_id)
         bloqueio = vigentes.para(op.sistema_id)
         if bloqueio is not None:
@@ -348,9 +394,13 @@ class PortaDeSaida:
                 or (limite.pessoa_id, limite.aplicativo_id, limite.sistema_id)
                 != (op.pessoa_id, op.aplicativo_id, op.sistema_id)
                 or limite.nome_original != ferramenta.nome_original
-                or not fila.cobre(limite.destinatarios, op.argumentos)
                 or (self.limite_exige_passkey and not limite.com_passkey)
             ):
+                return Estado.CANCELADA, "o limite nao cobre este pedido"
+            # A mesma conferencia do gasto: "so estes destinatarios" com as chaves do esquema da ferramenta
+            # revisada do limite, lidas nesta transacao (argumento fora do esquema nao sai pelo limite).
+            propriedades = await fila.propriedades_da_ferramenta(c, limite.sistema_id, limite.nome_original)
+            if not fila.cobre(limite.destinatarios, op.argumentos, propriedades=propriedades):
                 return Estado.CANCELADA, "o limite nao cobre este pedido"
         else:
             return Estado.CANCELADA, "sem ficha nem limite"

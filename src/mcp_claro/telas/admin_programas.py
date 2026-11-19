@@ -5,7 +5,9 @@ responsavel e substituto obrigatorios e diferentes, data de fim), listar, ver um
 encerrar, recertificar, registrar a troca da chave, trocar o responsavel e o substituto, estender a data de
 fim de um programa que nao foi encerrado, e dar a ordem de servico do programa (so com ferramentas que leem,
 de sistemas de chave propria do programa). Programa encerrado volta so por um cadastro novo, com o mesmo
-client_id: a linha volta a valer com os dados novos e conta como revisao do ADMIN.
+client_id: a linha volta a valer com os dados novos e conta como revisao do ADMIN. O cadastro de novo nao mexe na
+situacao do aplicativo: se ele esta pausado (por exemplo, pela conferencia do banco), segue pausado, a tela diz
+isso, e so o ADMIN o reativa, na tela do programa ("Reativar o aplicativo").
 
 Responsavel (``/telas/programas``): ve os programas de que e responsavel ou substituto e, na revisao
 periodica (``PROGRAM_OWNER_RECERT_DAYS``), confirma que cada um segue valendo (grava ``revisado_em``).
@@ -35,6 +37,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.logs import logger
 from mcp_claro.regras import programas as regras
 from mcp_claro.regras.programas import Programa
+from mcp_claro.rotinas.programas import protegidos
 from mcp_claro.telas import consultas
 from mcp_claro.telas.admin import CONTROLE, FAMILIA, ID_SIMPLES
 from mcp_claro.telas.nucleo import Telas, tela, uuid_ou_none, ver_depois
@@ -66,6 +69,19 @@ FEITOS: Final[dict[str, str]] = {
     "programa_ordem": "Pronto. A ordem de serviço foi dada ao programa. Ela só tem ferramentas que leem.",
     "programa_recadastrado": (
         "Pronto. O programa foi cadastrado de novo e voltou a valer. Confira abaixo a chave e a ordem de serviço dele."
+    ),
+    "programa_recadastrado_app_pausado": (
+        "Pronto. O cadastro do programa voltou a valer. Mas o aplicativo dele segue pausado, e a entrada continua"
+        " recusando os pedidos dele. A pausa do aplicativo não sai sozinha: depois de conferir, use “Reativar o"
+        " aplicativo”, abaixo."
+    ),
+    "programa_recadastrado_app_parado": (
+        "Pronto. O cadastro do programa voltou a valer. Mas o aplicativo dele não está ativo, e a entrada continua"
+        " recusando os pedidos dele. Veja abaixo a situação do aplicativo."
+    ),
+    "programa_aplicativo_reativado": (
+        "Pronto. O aplicativo do programa foi reativado. Os pedidos dele voltam a passar enquanto o cadastro do"
+        " programa valer."
     ),
     "programa_fim_estendido": "Pronto. A data de fim do programa foi estendida.",
     "programa_nada_mudou": "Nada mudou: o programa não estava na situação certa para isto.",
@@ -142,13 +158,28 @@ class Prazos:
         )
 
 
-def recusa_para_retomar(programa: Programa, prazos: Prazos) -> list[str]:
-    """O que impede o ADMIN de retomar um programa pausado. Vazio: pode retomar."""
+FIM_VENCIDO: Final = (
+    "A data de fim do programa já passou. Na próxima rodada da rotina dos programas, ele é encerrado. Para mantê-lo,"
+    " estenda a data de fim agora, nesta tela, e depois retome. Se ele já tiver sido encerrado, cadastre-o de novo em"
+    " Programas, com o mesmo client_id."
+)
+FIM_VENCIDO_DAS_PORTAS: Final = (
+    "A data de fim do programa já passou. A rotina não encerra a ronda nem o vigia: estenda a data de fim nesta tela"
+    " e depois retome."
+)
+
+
+def recusa_para_retomar(programa: Programa, prazos: Prazos, *, das_portas: bool = False) -> list[str]:
+    """O que impede o ADMIN de retomar um programa pausado. Vazio: pode retomar.
+
+    Com a data de fim vencida, a rotina encerra o programa pausado na rodada seguinte (``ONDE_ENCERRAR_NO_FIM``), menos
+    a ronda e o vigia (``das_portas``): a frase diz isso e manda estender a data logo, nesta tela.
+    """
     if programa.situacao != "pausado":
         return ["Só um programa pausado pode ser retomado."]
     erros: list[str] = []
     if programa.vencido:
-        erros.append("A data de fim do programa já passou. Estenda a data de fim antes de retomar.")
+        erros.append(FIM_VENCIDO_DAS_PORTAS if das_portas else FIM_VENCIDO)
     if not programa.responsavel_ativo or not programa.substituto_ativo:
         erros.append("O responsável ou o substituto não está mais ativo. Troque-os antes de retomar.")
     if prazos.chave_vencida:
@@ -228,6 +259,7 @@ class TelasDosProgramas:
             r(um + "/retomar", self.retomar, "POST"),
             r(um + "/encerrar", self.encerrar, "POST"),
             r(um + "/fim", self.estender_fim, "POST"),
+            r(um + "/aplicativo", self.reativar_aplicativo, "POST"),
             r(um + "/recertificar", self.recertificar_admin, "POST"),
             r(um + "/chave", self.chave_trocada, "POST"),
             r(um + "/responsaveis", self.trocar_responsaveis, "POST"),
@@ -384,6 +416,12 @@ class TelasDosProgramas:
         await repositorio.habilitar_aplicativo(  # o aplicativo ja existe: so o nome muda
             c, client_id=anterior.client_id, nome=nome, familia="programa", tipo="programa"
         )
+        # A situacao do aplicativo nao muda aqui: pausa e decisao do ADMIN, que reativa na tela do programa.
+        aplicativo = str(
+            (
+                await c.execute(text("SELECT situacao FROM aplicativos WHERE id = :a"), {"a": anterior.aplicativo_id})
+            ).scalar_one()
+        )
         await self.t.extrato(
             c,
             "admin_programa_recadastrado",
@@ -403,9 +441,13 @@ class TelasDosProgramas:
                 "fim": fim.isoformat(),
                 "fim_anterior": anterior.fim.isoformat(),
                 "revisado": True,
+                "situacao_aplicativo": aplicativo,
             },
         )
-        return voltar(f"{BASE_ADMIN}/{anterior.aplicativo_id}", "programa_recadastrado")
+        feito = {"ativo": "programa_recadastrado", "pausado": "programa_recadastrado_app_pausado"}.get(
+            aplicativo, "programa_recadastrado_app_parado"
+        )
+        return voltar(f"{BASE_ADMIN}/{anterior.aplicativo_id}", feito)
 
     # --- Um programa ---
 
@@ -567,6 +609,43 @@ class TelasDosProgramas:
         return await self._pagina_detalhe(pedido, aplicativo_id, erros, dict(f.como_dict()))
 
     @tela
+    async def reativar_aplicativo(self, pedido: Request) -> Response:
+        """Reativa o aplicativo pausado de um programa que nao foi encerrado. So por decisao do ADMIN, aqui.
+
+        A pausa do aplicativo (``aplicativos.situacao``, por exemplo da conferencia do banco) nao sai sozinha: nem
+        o cadastro de novo nem o retomar do programa mexem nela. O UPDATE so vale se o aplicativo ainda estiver
+        pausado: dois cliques ao mesmo tempo registram uma vez so.
+        """
+        sessao = await self.t.exigir_admin(pedido)
+        await self.t.formulario(pedido, sessao)
+        aplicativo_id: uuid.UUID = pedido.path_params["aplicativo_id"]
+        programa: Programa | None = None
+        async with self.t.engine.begin() as c:
+            voltou = (
+                await c.execute(
+                    text(
+                        "UPDATE aplicativos a SET situacao = 'ativo', atualizado_em = now() FROM programas pr"
+                        " WHERE a.id = :a AND pr.aplicativo_id = a.id AND a.tipo = 'programa'"
+                        " AND a.situacao = 'pausado' AND pr.situacao <> 'encerrado' RETURNING a.id"
+                    ),
+                    {"a": aplicativo_id},
+                )
+            ).first()
+            if voltou is not None:
+                programa = await regras.ler(c, aplicativo_id)
+            if programa is not None:
+                await self.t.extrato(
+                    c,
+                    "admin_programa_aplicativo_reativado",
+                    programa.campos() | {"quem": sessao.quem},
+                    pessoa_id=sessao.pessoa.id,
+                    aplicativo_id=aplicativo_id,
+                    dados={"responsavel_id": str(programa.responsavel_id), "situacao": programa.situacao},
+                )
+        feito = "programa_aplicativo_reativado" if programa is not None else "programa_nada_mudou"
+        return voltar(f"{BASE_ADMIN}/{aplicativo_id}", feito)
+
+    @tela
     async def recertificar_admin(self, pedido: Request) -> Response:
         return await self._passo_do_admin(
             pedido,
@@ -596,7 +675,9 @@ class TelasDosProgramas:
             erros = (
                 ["Programa não encontrado."]
                 if atual is None
-                else recusa_para_retomar(atual, Prazos.de(atual, self.t.p))
+                else recusa_para_retomar(
+                    atual, Prazos.de(atual, self.t.p), das_portas=atual.client_id in protegidos(self.t.p)
+                )
             )
             programa = (
                 None

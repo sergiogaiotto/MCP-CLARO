@@ -167,6 +167,10 @@ FRASES_DOS_PROGRAMAS = {
         "antes": "01/12/2026",
         "fim": "01/06/2027",
     },
+    "admin_programa_aplicativo_reativado": {"programa": "Robo", "responsavel": "Rui", "quem": "Carla"},
+    "programa_acao_recusada": {"ferramenta": "fechar_x", "programa": "Robo", "responsavel": "Rui", "motivo": "m"},
+    "programa_acao_pedida": {"ferramenta": "fechar_x", "programa": "Robo", "responsavel": "Rui", "protocolo": "C-1"},
+    "programa_acao_repetida": {"programa": "Robo", "responsavel": "Rui", "protocolo": "C-1"},
 }
 
 

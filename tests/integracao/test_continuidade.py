@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from mcp_claro.config.settings import Parametros
 from mcp_claro.continuidade import (
+    SEM_SINAL_DE_RESTAURACAO,
     ReaberturaRecusada,
     conferir_continuidade,
     marcar_restaurado,
@@ -30,6 +31,8 @@ from mcp_claro.continuidade import (
 from mcp_claro.db.engine import url_asyncpg
 from mcp_claro.extrato import fechar
 from mcp_claro.extrato.frases import frase
+from mcp_claro.saida.fila import SALTO_NA_RESTAURACAO
+from mcp_claro.saida.protocolo import novo_protocolo, protocolo_valido
 from tests.conftest import RAIZ
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
@@ -311,9 +314,13 @@ async def test_vigia_sem_resposta_fecha_a_saida(banco: Banco) -> None:
     r = await conferir_continuidade(banco.despachante, None)
     assert r.motivos == ("vigia_sem_resposta",)
     assert await banco.valor("SELECT aberta FROM estado_saida") is False
+    # Sem sinal de restauracao: o motivo diz que a fila nao parou, e nada fala em restauracao.
+    motivo = f"o vigia nao respondeu; {SEM_SINAL_DE_RESTAURACAO}"
     texto = await banco.valor("SELECT frase FROM extrato WHERE tipo = 'continuidade_nao_confere'")
-    assert texto == frase("continuidade_nao_confere", motivo="o vigia nao respondeu")
-    assert await banco.valor("SELECT count(*) FROM extrato WHERE tipo = 'restauracao_detectada'") == 0
+    assert texto == frase("continuidade_nao_confere", motivo=motivo)
+    assert await banco.valor("SELECT motivo FROM estado_saida") == motivo
+    for tipo in ("restauracao_detectada", "fila_parada_restauracao", "fila_restauracao_envio_com_dono"):
+        assert await banco.valor("SELECT count(*) FROM extrato WHERE tipo = :t", t=tipo) == 0, tipo
 
 
 async def test_sem_vigia_exigido_o_silencio_do_vigia_nao_fecha(banco: Banco) -> None:
@@ -379,3 +386,36 @@ async def test_situacao_para_o_roteiro(banco: Banco) -> None:
     assert visto["saida_aberta"] is True
     assert visto["ultima_linha"]["desfecho"] == "primeira_partida"
     assert visto["timeline_id"] >= 1
+
+
+def numero(protocolo: str) -> int:
+    return int(protocolo.rsplit("-", 1)[1])
+
+
+async def protocolo_da_entrada(banco: Banco) -> str:
+    async with banco.entrada.begin() as c:
+        return await novo_protocolo(c)
+
+
+async def test_marca_restaurado_adianta_o_protocolo_antes_de_a_entrada_subir(banco: Banco) -> None:
+    """Segunda rodada: a marca (gravada pelo roteiro antes de a entrada subir) ja salta a sequencia do protocolo.
+
+    Os numeros dados depois da copia, e perdidos com ela, nao voltam, nem antes da conferencia do despachante.
+    A conferencia salta de novo: dois saltos so deixam um buraco maior, e o numero continua valido."""
+    await conferir_continuidade(banco.despachante, 0)
+    na_copia = numero(await protocolo_da_entrada(banco))
+    perdidos = [numero(await protocolo_da_entrada(banco)) for _ in range(3)]
+    # A copia volta a sequencia para o ponto dela (como num pg_dump ou numa recuperacao para um ponto no tempo).
+    await banco.fazer("SELECT setval('protocolo_seq', :n)", n=na_copia)
+
+    await marcar_restaurado(banco.despachante, "Pessoa da operacao", "Ensaio do salto")
+    depois_da_marca = numero(await protocolo_da_entrada(banco))
+    assert depois_da_marca > max(perdidos)
+    assert depois_da_marca == na_copia + SALTO_NA_RESTAURACAO + 1  # o mesmo salto da conferencia
+
+    r = await conferir_continuidade(banco.despachante, 0)
+    assert r.motivos == ("marca_restaurado",)
+    depois_da_conferencia = await protocolo_da_entrada(banco)
+    assert numero(depois_da_conferencia) > depois_da_marca
+    assert numero(depois_da_conferencia) >= depois_da_marca + SALTO_NA_RESTAURACAO
+    assert protocolo_valido(depois_da_conferencia)

@@ -18,7 +18,9 @@ parâmetro ligado, a partida é recusada (veja o fim desta página).
 - Até `PROGRAM_MAX_REQUESTS_PER_MINUTE` pedidos por minuto (30 no início). O pedido seguinte, no mesmo minuto,
   é recusado (`programa_limite_minuto`). A conta é feita no PostgreSQL, num só comando, mesmo com pedidos ao
   mesmo tempo. A regra de um programa nunca afrouxa esse padrão.
-- Cada leitura vai ao extrato como "Leitura em X feita pelo programa P, responsável R".
+- Cada leitura vai ao extrato como "Leitura em X feita pelo programa P, responsável R". A recusa de uma ação
+  também diz o programa e o responsável: "Ação em X pelo programa P, responsável R, recusada antes de virar
+  protocolo: programa_so_le".
 
 O programa só passa se o cadastro dele vale agora: situação "ativo", data de fim igual ou depois de hoje (no
 fuso de Brasília), responsável e substituto ativos. Senão, a resposta diz por quê, nada é enviado e a recusa
@@ -94,6 +96,12 @@ A linha do programa volta a valer com os dados novos, a revisão conta a partir 
 A data da troca da chave não muda: se a chave passou do prazo, registre a troca antes. Confira também a ordem de
 serviço dele. Um programa que ainda vale (ativo ou pausado) não é cadastrado de novo.
 
+O cadastro de novo não mexe na situação do **aplicativo** do programa. Se o aplicativo está pausado (por exemplo,
+pela conferência do banco depois de uma restauração), ele segue pausado, e a entrada continua recusando os
+pedidos dele (`app_pausado`). A tela diz isso logo depois do cadastro. A pausa do aplicativo é decisão do ADMIN e
+não sai sozinha: na tela do programa, depois de conferir no extrato o que pode ter se perdido, o ADMIN usa
+**Reativar o aplicativo**. O passo vai ao extrato com o nome de quem fez.
+
 ## Prazos e rotinas
 
 A rotina `programas` roda a cada `ROUTINES_INTERVAL_SECONDS`. Cada mudança vai ao extrato e vira aviso por
@@ -108,23 +116,29 @@ link de `/telas/programas`; o do ADMIN, o link da tela do programa na área do A
 | Chave vencida | A chave fez `PROGRAM_KEY_MAX_AGE_DAYS` dias sem troca registrada | O programa pausa. Registre a troca e retome |
 | Falta de uso | `PROGRAM_IDLE_PAUSE_DAYS` (30) dias sem pedido, contados do último pedido ou da última revisão | O programa pausa. Se ainda for preciso, o ADMIN retoma |
 | Responsável inativo | O responsável ou o substituto foi desativado | O programa pausa. Troque-os e retome |
-| Fim | A data de fim passou | O programa é encerrado. Antes disso, o ADMIN pode estender a data de fim na tela do programa |
+| Fim | A data de fim passou | O programa é encerrado, também se estiver pausado, na rodada seguinte da rotina. Antes disso, o ADMIN pode estender a data de fim na tela do programa |
 
 Retomar é decisão do ADMIN e conta como revisão dele. Só retoma o que está pausado, com a data de fim valendo,
-responsável e substituto ativos e chave dentro do prazo.
+responsável e substituto ativos e chave dentro do prazo. Com a data de fim vencida, a tela recusa retomar e avisa
+que a rotina encerra o programa na próxima rodada: estenda a data logo, na mesma tela, e depois retome. Se ele já
+foi encerrado, só volta por um cadastro novo, com o mesmo `client_id`.
 
 **A ronda e o vigia são a exceção.** Os programas `PATROL_CLIENT_ID` (`mcp-claro-ronda`) e `WATCH_CLIENT_ID`
 (`mcp-claro-vigia`) testam as portas do MCP-CLARO, e a rotina nunca os pausa nem os encerra. Quando um deles
 cumpre uma das condições da tabela, a rotina avisa com destaque ("IMPORTANTE") o ADMIN, o responsável e o
 substituto, uma vez para cada situação, e registra no extrato. O ADMIN resolve na tela do programa. Enquanto o
 cadastro da ronda não vale (pausado, sem cadastro, vencido ou sem responsável ativo), a entrada recusa os pedidos
-dela e a ronda fica **inconclusiva**: ela não diz "conforme" sem ter testado a vitrine. Detalhes em
+dela e a ronda fica **inconclusiva**: ela não diz "conforme" sem ter testado a vitrine. O mesmo vale para
+qualquer outra recusa antes da vitrine, como bloqueio ou pausa, entrada fechada ou limite por minuto. Detalhes em
 [vigia.md](vigia.md).
 
 ## `PROGRAM_ACTIONS_ENABLED`: por que fica desligado
 
-Na Fase 2, o programa só lê. Com `PROGRAM_ACTIONS_ENABLED` ligado, a partida do MCP-CLARO é recusada: o que as
-ações de programas precisam ainda não existe. Ligar será decisão do dono, registrada, depois que existir:
+Na Fase 2, o programa só lê. Com `PROGRAM_ACTIONS_ENABLED` ligado, a partida do MCP-CLARO é recusada em todos os
+papéis (entrada, despachante, rotinas e vigia), e também em `mcp-claro conferir` e `mcp-claro migrar`: faltam as
+pendências do responsável e a reconferência completa do cadastro na porta de saída. A recusa está no código
+(`Parametros.problemas`, em `config/settings.py`): mudar só o parâmetro não liga nada. Pela decisão 9, as ações de
+programas ligam depois das provas da Fase 2, por decisão do dono, registrada, e só depois que existir:
 
 - **as pendências do responsável:** a ação de um programa precisa aparecer para o responsável decidir, com aviso.
   Hoje, a ficha ficaria presa à conta de serviço do programa e só venceria, sem ninguém ver;

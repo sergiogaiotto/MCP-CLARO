@@ -344,11 +344,58 @@ GRANT UPDATE (avisada_em) ON fichas TO mcp_claro_rotinas;
 GRANT UPDATE (desfecho) ON operacoes TO mcp_claro_entrada, mcp_claro_rotinas;
 """
 
+CAMPOS_DESTINATARIO = r"""
+-- Segunda rodada: campos de destinatario. O ADMIN marca, na revisao da ferramenta, quais campos do pedido dizem
+-- para quem a acao vai (para, copia, copia oculta...). O limite "so estes destinatarios" confere estes campos;
+-- o resto do pedido fica livre. Vazio: o ADMIN nao marcou nenhum, e o limite so vale para qualquer destinatario.
+-- GRANTs: os de 0002 sao da tabela inteira e valem para a coluna nova. Entrada, despachante e rotinas a leem
+-- (GRANT SELECT ON ferramentas_revisadas); a entrada a grava ao revisar (GRANT INSERT ON ferramentas_revisadas).
+-- Ninguem a muda depois (o UPDATE da entrada e das rotinas so cobre situacao e motivo): mudar e revisar de novo.
+ALTER TABLE ferramentas_revisadas ADD COLUMN campos_destinatario text[] NOT NULL DEFAULT '{}'
+  CHECK (cardinality(campos_destinatario) <= 30 AND array_position(campos_destinatario, NULL) IS NULL);
+-- Fim da segunda rodada: campos de destinatario.
+"""
+
+CONTINUIDADE_RODADA2 = r"""
+-- Segunda rodada: continuidade. A marca "restaurado" (roteiro de restauracao) tambem adianta o numero de
+-- protocolo, antes de a entrada subir: um numero dado depois da copia, e perdido com ela, nao e dado de novo a
+-- outra acao. O salto e o mesmo da conferencia na partida do despachante (fila.SALTO_NA_RESTAURACAO, 1000000;
+-- o teste confere). Dois saltos (marca e conferencia) so deixam um buraco maior: a sequencia so anda para frente.
+-- Mesmo corpo da 0004 no resto; o downgrade desta migracao nao existe (o MCP-CLARO nao desfaz migracoes).
+CREATE OR REPLACE FUNCTION continuidade_marcar_restaurado(p_quem text, p_motivo text) RETURNS bigint
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  atual record;
+  novo  bigint;
+BEGIN
+  IF coalesce(btrim(p_quem), '') = '' OR coalesce(btrim(p_motivo), '') = '' THEN
+    RAISE EXCEPTION 'Diga quem marcou e o motivo da marca restaurado' USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  SELECT * INTO atual FROM continuidade_controle();
+  INSERT INTO continuidade_banco (system_identifier, timeline_id, ultimo_fechamento, restaurado, motivo,
+                                  origem, desfecho, quem)
+  VALUES (atual.system_identifier, atual.timeline_id, (SELECT max(numero) FROM fechamentos), true,
+          left(btrim(p_motivo), 500), 'roteiro', 'marca_restaurado', left(btrim(p_quem), 200))
+  RETURNING id INTO novo;
+  PERFORM setval('protocolo_seq', (SELECT last_value FROM protocolo_seq) + 1000000);
+  -- Mesma frase de mcp_claro.extrato.frases ("restauracao_marcada"); o teste confere.
+  PERFORM extrato_registrar('roteiro', 'restauracao_marcada',
+    'O roteiro de restauracao marcou o banco como restaurado; a porta de saida fecha na proxima partida.',
+    NULL, NULL, NULL, NULL, NULL, jsonb_build_object('continuidade_id', novo), NULL);
+  RETURN novo;
+END $$;
+REVOKE ALL ON FUNCTION continuidade_marcar_restaurado(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION continuidade_marcar_restaurado(text, text) TO mcp_claro_despachante;
+-- Fim da segunda rodada: continuidade.
+"""
+
 
 def upgrade() -> None:
     sql_em_bloco(SQL)
     sql_em_bloco(GRANTS)
     sql_em_bloco(VISOES)
+    sql_em_bloco(CAMPOS_DESTINATARIO)  # Segunda rodada: campos de destinatario
+    sql_em_bloco(CONTINUIDADE_RODADA2)  # Segunda rodada: continuidade
 
 
 def downgrade() -> None:

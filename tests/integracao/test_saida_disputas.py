@@ -1045,6 +1045,16 @@ async def test_restauracao_pela_conferencia_fecha_a_saida_e_nada_sai(amb: Ambien
         if not await situacao_da_saida(amb):
             await continuidade.reabrir_saida(amb.entrada_db, f"admin:{amb.admin_id}", "Fim do teste")
         await reativar(amb, pausados)
+        await apagar_continuidade_falsa(amb)
+
+
+async def apagar_continuidade_falsa(amb: Ambiente) -> None:
+    """Tira a linha de continuidade com identificador falso ('1') que o teste gravou: o banco de teste e o mesmo
+    para a sessao inteira. A tabela e so de acrescentar (gatilho); o dono do banco de teste, que e superusuario,
+    desliga os gatilhos so nesta transacao (``session_replication_role``)."""
+    async with amb.admin.begin() as c:
+        await c.execute(text("SET LOCAL session_replication_role = replica"))
+        await c.execute(text("DELETE FROM continuidade_banco WHERE system_identifier = '1'"))
 
 
 async def situacao_da_saida(amb: Ambiente) -> bool:

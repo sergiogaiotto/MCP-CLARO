@@ -62,10 +62,6 @@ FRASES: Final[dict[str, Frase]] = {
         ),
         Frase("nao_confirmada_decidida", "A pessoa registrou sobre o protocolo {protocolo}: {decisao}."),
         Frase(
-            "comprovante_bloqueio",
-            "Comprovante do bloqueio: {paradas} acoes paradas antes de sair; {ja_saidas} ja tinham saido.",
-        ),
-        Frase(
             "fila_parada_restauracao",
             "Banco restaurado: {paradas} acoes paradas na fila e {duvida} nao confirmadas; nada sai sem nova"
             " confirmacao.",
@@ -98,6 +94,27 @@ FRASES: Final[dict[str, Frase]] = {
             "admin_programa_fim_estendido",
             "Programa {programa}, responsavel {responsavel}: {quem} estendeu a data de fim de {antes} para {fim}.",
         ),
+        Frase(
+            "admin_programa_aplicativo_reativado",
+            "Programa {programa}, responsavel {responsavel}: {quem} reativou o aplicativo do programa, que estava"
+            " pausado.",
+        ),
+        # Acoes de um programa ("programa X, responsavel Y"), pelas mesmas regras de acao_*. Hoje so a recusa
+        # acontece de verdade: com PROGRAM_ACTIONS_ENABLED desligado, nenhuma acao de programa vira protocolo.
+        Frase(
+            "programa_acao_recusada",
+            "Acao em {ferramenta} pelo programa {programa}, responsavel {responsavel}, recusada antes de virar"
+            " protocolo: {motivo}.",
+        ),
+        Frase(
+            "programa_acao_pedida",
+            "Acao {ferramenta} pedida pelo programa {programa}, responsavel {responsavel}; protocolo {protocolo}.",
+        ),
+        Frase(
+            "programa_acao_repetida",
+            "Pedido do programa {programa}, responsavel {responsavel}, igual ao do protocolo {protocolo}: devolvida"
+            " a operacao original, nada novo saiu.",
+        ),
         # Fase 2: correcoes da revisao (nucleo).
         Frase(
             "comprovante_bloqueio_partes",
@@ -113,6 +130,17 @@ FRASES: Final[dict[str, Frase]] = {
             "fila_restauracao_envio_com_dono",
             "Na conferencia do banco, {enviando} acoes estavam saindo por um despachante no ar; ele mesmo grava o"
             " fim delas.",
+        ),
+        # Fase 2: segunda rodada (telas).
+        Frase(
+            "limite_criado_login_refeito",
+            "A pessoa criou um limite de {por_dia} por dia para {ferramenta}, com o login refeito na hora (passkey"
+            " desligada nesta instalacao).",
+        ),
+        Frase(
+            "limite_ampliado_login_refeito",
+            "A pessoa ampliou um limite de {ferramenta} para {por_dia} por dia, com o login refeito na hora (passkey"
+            " desligada nesta instalacao).",
         ),
         # Fase 2: programas que rodam sozinhos (decisao 9).
         Frase(

@@ -735,7 +735,13 @@ async def test_fim_que_nao_grava_deixa_enviando_e_a_retomada_decide(
 
     monkeypatch.setattr(fila, "finalizar", sempre_falha)
     p = porta(amb)
-    assert await p.enviar_uma() is True  # nao derruba a porta
+    # Segunda rodada: sem gravar, o erro encerra o turno da porta (a trava cai e quem assumir decide). A
+    # mensagem nao leva o erro do banco, que pode trazer o resultado.
+    with pytest.raises(despachante_mod.FimNaoGravado) as erro:
+        await p.enviar_uma()
+    assert erro.value.__cause__ is None
+    assert erro.value.__context__ is None
+    assert "conexao caiu" not in str(erro.value)
     assert len(tentativas) == despachante_mod.TENTATIVAS_DO_FIM
     assert (await operacao(amb, op.protocolo)).estado == Estado.ENVIANDO
     assert chamadas(amb, "criar_chamado") == antes + 1

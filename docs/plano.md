@@ -391,7 +391,7 @@ Vencida, enviada, não saiu, sistema pediu dados, cancelada, parada por bloqueio
 
 - não tem `elicitation_callback` nem `sampling_callback`, e assim não responde sozinho a pedidos do sistema;
 - numa ação, `InputRequiredResult` vira o estado final "sistema pediu dados", sem segunda volta, também nos sistemas próprios;
-- numa ação, não há reenvio depois de 401: o despachante renova a chave antes de enviar, e um 401 no envio vira "não saiu" (o sistema recusou na porta, antes de executar), com a chave dada como vencida para a pessoa autorizar de novo.
+- numa ação, não há reenvio depois de 401: o despachante renova a chave antes de enviar, e um 401 no envio vira "não saiu" (o sistema recusou na porta, antes de executar), com a chave dada como vencida: o próximo pedido a renova antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada.
 
 O `OAuthClientProvider` do kit pode reenviar um pedido depois de um 401, para renovar a chave. Isso será conferido em "Provar a base", com um sistema de teste que conta as chamadas.
 
@@ -442,7 +442,7 @@ Ferramentas só de desenvolvimento e teste, fora da imagem do produto:
 | `mcp`, linha 1.x | 1.30.0, 07/09/2026 | MIT | Só o sistema de exemplo da geração antiga, em imagem de teste separada |
 | Suíte de conformidade | `@modelcontextprotocol/conformance` 0.2.0-alpha.12, 01/10/2026 | MIT | Teste oficial do padrão |
 | MCP Inspector | 2.16.0, 18/11/2026 | Em transição de MIT para Apache-2.0 | Testes rápidos com `--protocol-era modern` |
-| Toxiproxy | 2.13.0, 14/10/2026 | MIT | Perder respostas de propósito |
+| Toxiproxy | 2.13.0, 14/10/2026 | MIT | Perder respostas de propósito. Trocado nos testes por um intermediário próprio; o teste com ele ficou opcional ([decisões, "Provas da Fase 2: resposta perdida"](decisoes.md#provas-da-fase-2-resposta-perdida-19112026)) |
 | Mailpit e webhook-tester | 1.34.0; 2.3.0 | MIT | Receber avisos nos testes |
 | `locust` | 2.47.0, 21/10/2026 | MIT | Carga, em contêiner próprio |
 | `bandit` e `pip-audit` | 1.9.4 e 2.10.1 | Apache-2.0 | Código e dependências |
@@ -473,6 +473,8 @@ Há dois tipos de parâmetro. Os de implantação vêm do ambiente e mudam com u
 
 Os nomes seguem o padrão em inglês já usado na proposta. Todo valor numérico abaixo é inicial, a ajustar no piloto (decisão 11).
 
+Nos parâmetros usados pela Fase 2, o valor inicial vem com a faixa aceita entre parênteses. Fora dela, a partida recusa o parâmetro. Num valor de política, o que estiver fora da faixa na tabela é trazido para dentro dela na leitura. Os valores e as faixas estão em `src/mcp_claro/config/settings.py` e `src/mcp_claro/config/politica.py`.
+
 ### Portão, endereço e versão
 
 | Parâmetro | Valor inicial | O que controla | Quando muda |
@@ -485,7 +487,8 @@ Os nomes seguem o padrão em inglês já usado na proposta. Todo valor numérico
 | `MCP_ACCEPTED_VERSIONS` | `2026-07-28` | Versões aceitas dos aplicativos. A partida recusa outro valor | Na revisão de compatibilidade da próxima versão do MCP, com mudança de código |
 | `MCP_UPSTREAM_VERSION` | `2026-07-28` | Versão fixada no cliente que fala com os sistemas. A partida recusa outro valor | Na mesma revisão |
 | `MCP_RESPONSE_MODE` | `inteira` | Forma da resposta: um corpo JSON só | Fluxo contínuo só depois de testado nos portões |
-| `RESPONSE_MAX_WAIT_SECONDS` | 20 | Espera máxima antes de devolver o número de protocolo; nada fica pendurado | Se o piloto mostrar esperas maiores ou menores |
+| `RESPONSE_MAX_WAIT_SECONDS` | 20 (de 1 a 120) | Espera máxima antes de devolver o número de protocolo; nada fica pendurado | Se o piloto mostrar esperas maiores ou menores |
+| `OUTBOX_SWEEP_SECONDS` | 5 (de 1 a 300) | Varredura de reserva da porta de saída, além dos avisos do PostgreSQL (LISTEN/NOTIFY) | Pelo teste de carga |
 | `ALLOWED_HOSTS` | Nome de `PUBLIC_BASE_URL` | Lista de nomes aceitos, contra religação de DNS | Junto com o endereço público |
 | `FORWARDED_ALLOW_IPS` | Endereço do portão na rede interna | De quem o gateway aceita cabeçalhos de origem | Se o portão mudar de endereço |
 | `GATEWAY_INTERNAL_PORT` | 8443 | Porta interna da entrada, com mTLS | Raramente |
@@ -507,6 +510,7 @@ Os nomes seguem o padrão em inglês já usado na proposta. Todo valor numérico
 | `VAULT_SEAL_MODE` | `static` em teste; produção a decidir (`shamir`, `static`, `transit` ou `kms`) | Como o cofre é destravado depois de um reinício. `transit` pede outro OpenBao. `kms` usa plugin e, em geral, um serviço comercial de chaves, fora da regra do código aberto | Decisão 6 |
 | `VAULT_AUTH_METHOD` | `approle` | Login de máquina do despachante e da entrada | Raramente |
 | `REQUEST_STATE_KEY_ROTATION_DAYS` | 30 | Rodízio da chave comum do estado das confirmações | Pela revisão de segurança |
+| `SCREENS_RECENT_LOGIN_SECONDS` | 300 (de 60 a 900) | Idade máxima do login, pela hora que o provedor assina (`auth_time`), para contar como login refeito na hora | Pela revisão de segurança |
 
 ### Chaves de liga e desliga
 
@@ -517,7 +521,7 @@ Os nomes seguem o padrão em inglês já usado na proposta. Todo valor numérico
 | `FEATURE_PHASE3_THIRD_PARTY` | `desligado` | Servidores de terceiros | Liga quando a Fase 3 passa nas provas |
 | `FEATURE_PHASE4_BADGES` | `desligado` | Selos de nível 2 e 3 | Liga quando a Fase 4 passa nas provas |
 | `FEATURE_TASKS` | `desligado` | Extensão Tasks (decisão 13) | Só com implementação própria sobre PostgreSQL e provas |
-| `FEATURE_PASSKEY` | `ligado` com a Fase 2 | Passkey nas ações de maior risco | Desliga só pela ordem de corte |
+| `FEATURE_PASSKEY` | `ligado` com a Fase 2 | Passkey nas ações de maior risco e para criar ou ampliar limites. Desligada, essas ações pedem o login refeito na hora | Desliga só pela ordem de corte |
 | `FEATURE_TOOL_SEARCH` | `desligado` | Busca sob demanda na vitrine | Quando as ferramentas forem muitas |
 | `PATROL_AUTOCLOSE_ENABLED` | `ligado` | Poder da ronda de fechar a entrada sozinha | Desliga só pela ordem de corte |
 | `AUTH_ENTERPRISE_ASSERTION_ENABLED` | `falso` | Afirmação de identidade empresarial | Se houver provedor de login da organização |
@@ -531,18 +535,18 @@ Todos ficam na tabela de política, com registro de quem mudou. Todos são inici
 | `WORK_ORDER_MAX_DAYS` | 30 | Validade máxima de uma ordem de serviço | Piloto |
 | `WORK_ORDER_WARN_DAYS` | 7 | Aviso antes de a ordem vencer | Piloto |
 | `WORK_ORDER_IDLE_DAYS` | 14 | Dias sem uso até a autorização ficar inativa | Piloto |
-| `TRIAL_PERIOD_DAYS` | 14 | Período de experiência: tudo passa pela pessoa | Piloto |
-| `OUTBOX_HOLD_SECONDS` | 60 | Espera antes de seguir, com relógio visível | Piloto, pelas telas |
-| `CARD_TTL_MINUTES` | 30 | Prazo de uma ficha; sem resposta, nada segue | Piloto |
-| `CONFIRM_CAP_PER_HOUR` | 10 | Teto de confirmações por aplicativo; acima dele, o aplicativo pausa | Piloto |
-| `CONFIRM_TOO_FAST_SECONDS` | 3 | Confirmação mais rápida que isso entra na contagem de "rápida demais" | Piloto |
+| `TRIAL_PERIOD_DAYS` | 14 (de 0 a 90) | Período de experiência: tudo passa pela pessoa | Piloto |
+| `OUTBOX_HOLD_SECONDS` | 60 (de 0 a 3600) | Espera antes de seguir, com relógio visível | Piloto, pelas telas |
+| `CARD_TTL_MINUTES` | 30 (de 1 a 1440) | Prazo de uma ficha; sem resposta, nada segue | Piloto |
+| `CONFIRM_CAP_PER_HOUR` | 10 (de 1 a 1000) | Teto de confirmações por aplicativo; acima dele, o aplicativo pausa | Piloto |
+| `CONFIRM_TOO_FAST_SECONDS` | 3 (de 0 a 60) | Confirmação mais rápida que isso entra na contagem de "rápida demais" | Piloto |
 | `THREE_SIGNALS_WINDOW_MINUTES` | 240 | Janela em que os três sinais se somam | Fase 3 |
-| `DUPLICATE_WINDOW_MINUTES` | 30 | Intervalo em que um pedido igual conta como repetição | Piloto |
+| `DUPLICATE_WINDOW_MINUTES` | 30 (de 1 a 1440) | Intervalo em que um pedido igual a uma ação que já saiu, ou ficou não confirmada, conta como repetição, desde a última mudança dela. A ação que ainda pode sair conta em qualquer idade | Piloto |
 | `BADGE_TTL_DAYS` | 90 | Validade de um selo de nível 2 ou 3 | Fase 4 |
 | `LEDGER_RETENTION_DAYS` | 730 | Guarda do extrato | Piloto e revisão de LGPD |
 | `READS_CAP_PER_DAY` | 200 | Catraca: leituras por ordem de serviço por dia | Piloto |
-| `ALLOWANCE_MAX_PER_DAY` | 5 | Teto diário máximo de um limite por aproximação | Piloto |
-| `ALLOWANCE_MAX_DAYS` | 30 | Prazo máximo de um limite por aproximação | Piloto |
+| `ALLOWANCE_MAX_PER_DAY` | 5 (de 1 a 1000) | Teto diário máximo de um limite por aproximação | Piloto |
+| `ALLOWANCE_MAX_DAYS` | 30 (de 1 a 365) | Prazo máximo de um limite por aproximação | Piloto |
 
 ### Programas que rodam sozinhos (decisão 9)
 
@@ -552,8 +556,8 @@ Todos ficam na tabela de política, com registro de quem mudou. Todos são inici
 | `PROGRAM_TOKEN_TTL_SECONDS` | 300 | Validade do crachá de um programa | Piloto |
 | `PROGRAM_KEY_MAX_AGE_DAYS` | 90 | Prazo para trocar a chave do programa | Revisão de segurança |
 | `PROGRAM_KEY_EXPIRY_WARN_DAYS` | 14 | Aviso antes de a chave vencer | Piloto |
-| `PROGRAM_ACTIONS_ENABLED` | `falso` | Se programas podem agir, dentro de limites | Liga só depois das provas da Fase 2 |
-| `PROGRAM_PENDING_TIMEOUT_HOURS` | 24 | Prazo de uma pendência do responsável | Piloto |
+| `PROGRAM_ACTIONS_ENABLED` | `falso` | Se programas podem agir, dentro de limites. Hoje a partida recusa o valor ligado: faltam as pendências do responsável e a reconferência completa ([decisões](decisoes.md#mudanças-deliberadas-da-fase-2-19112026)) | Liga só depois das provas da Fase 2, com mudança de código revisada |
+| `PROGRAM_PENDING_TIMEOUT_HOURS` | 24 (de 1 a 168) | Prazo de uma pendência do responsável | Piloto |
 | `PROGRAM_OWNER_RECERT_DAYS` | 90 | Revisão periódica pelo responsável | Piloto |
 | `PROGRAM_IDLE_PAUSE_DAYS` | 30 | Dias sem uso até o programa pausar | Piloto |
 | `PROGRAM_MAX_REQUESTS_PER_MINUTE` | 30 | Limite de pedidos de um programa | Teste de carga e piloto |
@@ -565,7 +569,7 @@ Todos ficam na tabela de política, com registro de quem mudou. Todos são inici
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | Definir; porta 587 com STARTTLS | Servidor de e-mail dos avisos | Na instalação |
 | `SMTP_PASSWORD_FILE` | Segredo do Docker | Senha do SMTP | No rodízio de senhas |
 | `WEBHOOK_TARGETS` | Nenhum; o ADMIN cadastra | Destinos de webhook, assinados | Quando o ADMIN cadastrar |
-| `NOTIFY_PENDING_AFTER_MINUTES` | 5 | Quando avisar de ficha pendente | Piloto |
+| `NOTIFY_PENDING_AFTER_MINUTES` | 5 (de 1 a 1440) | Quando avisar de ficha pendente | Piloto |
 | `NOTIFY_RETRY_MAX` | 5 | Novas tentativas de um aviso; aviso pode repetir, ação não | Piloto |
 | `PATROL_INTERVAL_SECONDS` | 300 | Intervalo da ronda das portas | Piloto |
 | `PATROL_FAILS_TO_CLOSE` | 2, como na proposta | Tentativas indevidas seguidas que fecham a entrada por etapas | Raramente |
@@ -747,6 +751,8 @@ Prova de saída:
 - Telas de ficha, limite e "estamos confirmando" entendidas por pessoas sem formação técnica.
 - Em teste, com ações ligadas, um programa não age fora do limite. O que passa vai às pendências do responsável e vence.
 
+O que mudou de propósito em relação a este plano durante a Fase 2 está em [decisões, "Mudanças deliberadas da Fase 2"](decisoes.md#mudanças-deliberadas-da-fase-2-19112026). O que cada prova já tem, e o que depende de gente ou de ambiente real, está no [andamento](andamento.md#fase-2-agir).
+
 ### Fase 3: servidores de terceiros
 
 Objetivo: receber servidores que não são do dono, cada um revisado e atendido na sala de visitas.
@@ -810,10 +816,10 @@ Cada tipo de teste tem uma pergunta e um momento. "Antes de abrir fase" quer diz
 | Bateria própria de versão e crachá | Versão antiga recusada, dos dois lados. Crachá de outro condomínio, vencido ou de outro emissor recusado | `pytest`, MCP Inspector 2.16.0 e cliente FastMCP fixado | A cada mudança |
 | Suíte oficial de conformidade | O gateway segue as regras de comunicação da 2026-07-28, como servidor, como cliente e no provedor de login | `@modelcontextprotocol/conformance` 0.2.0-alpha.12, Node 22 em contêiner de teste | A cada mudança e antes de abrir fase |
 | Ensaio do dublê mal-intencionado | Aplicativo falso tenta pular a ficha, reusar confirmação, trocar o pedido e chamar fora da vitrine. Tenta também agir pela porta de leitura e por outra pessoa | Cliente e servidores de teste com FastMCP e kit oficial | Todo dia e antes de abrir fase |
-| Resposta perdida de propósito | Repetir depois de resposta perdida não duplica efeito | Toxiproxy 2.13.0, cortando só o caminho da resposta; teste público da discussão sobre repetição | Todo dia, da Fase 2 em diante, e antes de abrir fase |
+| Resposta perdida de propósito | Repetir depois de resposta perdida não duplica efeito | Intermediário de teste `tests/cortador.py`, cortando só o caminho da resposta, entre o despachante e o sistema e entre o aplicativo e a entrada; o cenário do teste público da discussão sobre repetição, refeito pelo gateway inteiro. O Toxiproxy 2.13.0 ficou como teste opcional ([decisões, "Provas da Fase 2: resposta perdida"](decisoes.md#provas-da-fase-2-resposta-perdida-19112026)) | A cada mudança (curto) e todo dia (longo), da Fase 2 em diante, e antes de abrir fase |
 | Ronda das portas | A ronda acusa uma falha plantada e fecha a entrada por etapas | Módulo `ronda` contra ambiente com falha plantada; vigia de fora | A cada mudança no módulo; em produção, sempre |
 | Carga | Limites de pedidos funcionam; fila sob pressão não perde estado; medições não seguram pedido | `locust` 2.47.0 em contêiner próprio | Antes de abrir fase |
-| Restauração de backup | Restaurar numa máquina limpa. O gateway percebe a restauração, fecha a porta de saída e pausa os aplicativos; a fila vira "resultado não confirmado" | pgBackRest e `pg_dump`, com roteiro escrito | Antes de abrir fase e a cada `BACKUP_RESTORE_DRILL_DAYS` |
+| Restauração de backup | Restaurar numa máquina limpa. O gateway percebe a restauração, fecha a porta de saída e pausa os aplicativos; o que estava "enviando" vira "resultado não confirmado", o que esperava fica parado por restauração e o número de protocolo salta para frente | pgBackRest e `pg_dump`, com roteiro escrito | Antes de abrir fase e a cada `BACKUP_RESTORE_DRILL_DAYS` |
 | Avisos | E-mail e webhook chegam, com assinatura, e novas tentativas funcionam | Mailpit, em modo de erro forçado, e webhook-tester | Todo dia |
 | Varredura de segurança | Dependências, imagens, código e segredos sem falha conhecida aberta | `pip-audit`, Grype, Trivy, Syft, regras `S` do `ruff`, `bandit` | A cada mudança e todo dia |
 | Telas com pessoas sem formação técnica | A pessoa explica, com as próprias palavras, o que vai acontecer ao confirmar, cancelar e bloquear | Sessões guiadas com roteiro, sem ajuda da equipe | Antes de abrir a Fase 1 e a Fase 2 |
@@ -836,10 +842,10 @@ Regras dos testes:
 | `pessoas` | Emissor e identificador da pessoa, situação | Entrada, no primeiro login; ADMIN |
 | `programas` | Programas que rodam sozinhos, responsável, substituto, data de fim | ADMIN; responsável aprova limites |
 | `sistemas` | Endereço, tipo de chave, selo, versão, sondagem guardada, quarentena | ADMIN; rotinas marcam quarentena |
-| `ferramentas_revisadas` | Definição revisada, classe (lê, muda, tem volta), risco, campos pessoais, impressão digital | ADMIN; cada mudança vira nova versão |
+| `ferramentas_revisadas` | Definição revisada, classe (lê, muda, tem volta), risco, campos pessoais, campos de destinatário, impressão digital | ADMIN; cada mudança vira nova versão |
 | `ferramentas_vistas` | Definição que o sistema declarou na última leitura | Despachante, a pedido das rotinas |
 | `modelos_ordem` e `ordens_servico` | Ordens que existem e ordens concedidas, com prazo e situação | ADMIN; pessoa |
-| `limites` | Limites por aproximação: ferramenta, destinatários, quantidade, prazo | Pessoa, com passkey |
+| `limites` | Limites por aproximação: ferramenta, destinatários, quantidade, prazo | Pessoa, com passkey (com ela desligada, com o login refeito) |
 | `operacoes` | Número de protocolo, código de conferência, estado | Entrada; despachante |
 | `fichas` | Ficha montada, decisão, hora, confirmação por passkey | Entrada; pessoa |
 | `fila_saida` | Uma linha por ação, com os estados de "A porta de saída por dentro". Cada mudança exige o estado anterior | Entrada cria; despachante envia; pessoa cancela |
@@ -889,8 +895,8 @@ Regras dos testes:
 - Restaurar o cofre exige também o meio de destravar. O roteiro diz onde ele fica, sem guardá-lo junto do backup.
 - Na partida, o despachante confere a continuidade do banco. Compara a linha do tempo (`timeline_id`) e o identificador (`system_identifier`) do PostgreSQL com os últimos gravados.
 - Confere também se o último fechamento guardado no vigia não é mais novo que o do banco. Uma recuperação para um ponto no tempo muda a linha do tempo.
-- Se algo não bater, se o vigia não responder ou se o roteiro gravar a marca "restaurado", a porta de saída fica fechada. Os aplicativos também voltam pausados.
-- O que estava na fila vira "resultado não confirmado". Reabrir é decisão humana registrada.
+- Se algo não bater, se o vigia não responder ou se o roteiro gravar a marca "restaurado", a porta de saída fica fechada. Os aplicativos também voltam pausados, e o número de protocolo salta para frente.
+- Com sinal de restauração, o que estava "enviando" vira "resultado não confirmado", e o que esperava na fila fica parado por restauração. Só com o vigia sem resposta, a fila não para: a saída fechada segura tudo ([decisões](decisoes.md#mudanças-deliberadas-da-fase-2-19112026)). Reabrir é decisão humana registrada.
 - O extrato registra o intervalo perdido entre o backup e a restauração.
 
 ### Vigia

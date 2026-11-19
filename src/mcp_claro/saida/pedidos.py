@@ -1,7 +1,8 @@
 """Lado da entrada: o pedido de acao vira protocolo, e a resposta ao aplicativo diz o estado.
 
-Antes da rota: com bloqueio que vale para o pedido, ou com a porta de saida fechada, a acao e recusada
-antes de virar protocolo (nada e gasto, nenhuma ficha e montada).
+Antes da rota: com argumento que traz o caractere nulo (U+0000, que o banco nao guarda), com bloqueio que vale
+para o pedido, ou com a porta de saida fechada, a acao e recusada antes de virar protocolo (nada e gasto,
+nenhuma ficha e montada).
 
 Escolha da rota, nesta ordem:
 
@@ -35,7 +36,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, estado, politica
+from mcp_claro.regras import bloqueios, estado, politica, programas
 from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import FINAIS, FRASE, Estado
 from mcp_claro.saida.fila import Operacao, Rota
@@ -89,6 +90,23 @@ class Pedido:
     trace_id: str | None = None
 
 
+RECUSA_NULO: Final = (
+    "O pedido traz o caractere nulo (U+0000), que o MCP-CLARO nao guarda. Nada foi enviado. "
+    "Peca de novo sem esse caractere."
+)
+
+
+def tem_nulo(valor: Any) -> bool:
+    """Algum texto (chave ou valor, em qualquer profundidade) traz U+0000."""
+    if isinstance(valor, str):
+        return "\x00" in valor
+    if isinstance(valor, dict):
+        return any(tem_nulo(chave) or tem_nulo(item) for chave, item in valor.items())
+    if isinstance(valor, list | tuple):
+        return any(tem_nulo(item) for item in valor)
+    return False
+
+
 def aplicativo_diz(meta: Any) -> str | None:
     """O que o aplicativo diz sobre o pedido: texto dele, mostrado a parte na ficha, nunca como nosso."""
     if not isinstance(meta, dict):
@@ -112,6 +130,9 @@ class Pedidos:
         f = pedido.ferramenta
         if f.ordem_id is None:
             raise AcaoRecusada("fora_da_ordem", "Ferramenta fora da sua ordem de servico. Nada foi enviado.")
+        if tem_nulo(pedido.argumentos):
+            # O banco nao guarda U+0000, e trocar o caractere mudaria a acao que a pessoa confirma: recusa antes.
+            raise AcaoRecusada("caractere_nulo", RECUSA_NULO)
         chave = chave_pedido_igual(pedido.pessoa_id, pedido.aplicativo.id, f.id, pedido.argumentos)
         async with self.engine.begin() as c:
             # Mesma trava do envio: um bloqueio ligado agora ou entrou antes (e e visto aqui) ou espera este
@@ -136,11 +157,13 @@ class Pedidos:
             )
             original = await fila.pedido_igual(c, chave, valores["DUPLICATE_WINDOW_MINUTES"])
             if original is not None:
+                # Para um programa, a linha diz "programa X, responsavel Y" (``programas.linha``).
+                linha = await programas.linha(c, pedido.aplicativo, "acao_repetida", {"protocolo": original.protocolo})
                 await registrar(
                     c,
                     papel="entrada",
-                    tipo="acao_repetida",
-                    campos={"protocolo": original.protocolo},
+                    tipo=linha.tipo,
+                    campos=linha.campos,
                     protocolo=original.protocolo,
                     pessoa_id=pedido.pessoa_id,
                     aplicativo_id=pedido.aplicativo.id,
@@ -167,6 +190,7 @@ class Pedidos:
                     prazo_ficha_minutos=self._prazo_da_ficha(pedido, valores),
                     espera_segundos=valores["OUTBOX_HOLD_SECONDS"],
                     trace_id=pedido.trace_id,
+                    aplicativo=pedido.aplicativo,
                 )
         if op is None or rota is None:
             # A pausa vai numa transacao propria, depois de soltar a trava compartilhada deste pedido: dois

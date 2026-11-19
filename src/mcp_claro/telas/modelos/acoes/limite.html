@@ -13,7 +13,10 @@
     <dt>Criado em</dt><dd>{{ l.linha.criado_em | data_hora }}{% if l.linha.com_passkey %}, com passkey{% endif %}</dd>
   </dl>
 </section>
-{% if l.ativo %}
+{% if l.nao_vale_com_passkey %}
+<p class="atencao" id="nao-vale-com-passkey"><strong>Não vale com a passkey ligada.</strong> Este limite foi criado ou ampliado sem a passkey, quando ela estava desligada nesta instalação. Agora que a passkey está ligada, ele não é usado: as ações dele passam pela ficha. Ele também não pode ser ampliado. Para voltar a ter um limite, encerre este e crie outro, com a passkey.</p>
+{% endif %}
+{% if l.ativo and not l.nao_vale_com_passkey %}
 <h2>Ampliar</h2>
 <p>Ampliar só aumenta: mais vezes por dia ou mais prazo. Para mudar os destinatários, encerre e crie outro.</p>
 {% if acima_do_teto %}
@@ -34,6 +37,8 @@
   <button type="submit">{% if ligada %}Ampliar com a passkey{% else %}Ampliar{% endif %}</button>
 </form>
 {% if ligada %}<script src="/telas/estaticos/passkey.js" defer></script>{% endif %}
+{% endif %}
+{% if l.ativo %}
 <h2>Encerrar</h2>
 <form method="post" action="/telas/limites/{{ l.linha.id }}/encerrar">
   <input type="hidden" name="csrf" value="{{ csrf }}">

@@ -19,6 +19,10 @@ programa. Leia inteiro antes de começar.
   pausados**. Nada vai para sistema nenhum até uma pessoa ADMIN decidir reabrir, e cada aplicativo volta
   por decisão própria. Isso é de propósito: o banco voltou no tempo, e o que estava em andamento pode já ter
   acontecido ou não.
+- Os **números de protocolo** dados depois da cópia se perderam com ela, mas as pessoas e os aplicativos podem
+  tê-los guardado. Por isso o número salta para frente na restauração (1.000.000 na marca "restaurado" e mais
+  1.000.000 na conferência do despachante), para que nenhum deles seja dado de novo a outra ação. O protocolo
+  (`CLR-AAAA-NNNNNNNN`) tem oito dígitos ou mais: depois de alguns saltos, ele pode ficar mais comprido.
 
 ## O meio de destravar: onde fica (e onde nunca fica)
 
@@ -45,7 +49,7 @@ Confira a cada ensaio que as duas pessoas que abrem o cofre de senhas ainda cons
 4. Os comandos abaixo usam este começo, que chamamos de `MC`:
 
    ```sh
-   MC="docker compose -f docker/compose.yml -f docker/grafana/compose.grafana.yml -f docker/backup/compose.backup.yml"
+   MC="docker compose -f docker/compose.yml"
    ```
 
 ## Caminho A: pgBackRest (o normal)
@@ -93,8 +97,11 @@ Confira a cada ensaio que as duas pessoas que abrem o cofre de senhas ainda cons
    # repita ate aparecer "f"
    ```
 
-6. **Grave a marca "restaurado"**, com o seu nome e o motivo. O despachante perceberia sozinho pela linha
-   do tempo nova, mas a marca deixa registrado quem restaurou e por quê:
+6. **Grave a marca "restaurado"**, com o seu nome e o motivo, **antes de subir a entrada** (passo 9). Este
+   passo não é opcional. A marca deixa registrado quem restaurou e por quê, e também faz o número de
+   protocolo saltar 1.000.000 para frente. O despachante perceberia a volta sozinho pela linha do tempo nova,
+   mas só na partida dele, e a entrada não espera o despachante para subir: sem a marca, um pedido que
+   chegasse nesse meio-tempo poderia receber um número já dado antes da cópia.
 
    ```sh
    $MC run --rm --no-deps --entrypoint python migrar -m mcp_claro.continuidade \
@@ -103,24 +110,35 @@ Confira a cada ensaio que as duas pessoas que abrem o cofre de senhas ainda cons
 
 7. **Destrave o cofre**. Suba o cofre; em teste (`static`) ele destrava sozinho com `cofre_selo.key`. No
    piloto (`shamir`), cada guardião entra com a sua parte (`bao operator unseal`), até completar 2 de 3.
-   Enquanto o cofre estiver trancado, a porta de saída continua fechada e sai o aviso "cofre trancado".
+   Enquanto o cofre estiver trancado, as chaves dos sistemas não abrem, e nenhuma ação chega a um sistema. A
+   porta de saída fecha no passo 8; não a reabra antes de destravar o cofre (veja "Reabrir a saída").
 
    ```sh
    $MC up -d cofre
    ```
 
-8. **Suba o resto** e faça uma **cópia completa nova**, que vira o novo ponto de partida:
+8. **Suba primeiro o despachante** e espere ele ficar pronto. Ele só fica pronto depois de conferir a
+   continuidade do banco. Confira que a porta de saída ficou fechada (`saida_aberta: False`):
+
+   ```sh
+   $MC up -d --wait despachante
+   $MC run --rm --no-deps --entrypoint python migrar -m mcp_claro.continuidade situacao
+   ```
+
+   Na partida, o despachante confere a continuidade do banco. A marca (e a linha do tempo nova) fazem a porta
+   de saída fechar e os aplicativos voltarem pausados. O que estava "enviando" fica "não confirmada", o que
+   esperava na fila fica "parada por restauração", e o número de protocolo salta de novo 1.000.000 para frente
+   (com a marca, o salto total fica em 2.000.000). O extrato registra o que pode ter se perdido ("Pode faltar
+   no extrato o que aconteceu entre ... e ...") e cada aplicativo pausado.
+
+9. **Suba o resto** e faça uma **cópia completa nova**, que vira o novo ponto de partida:
 
    ```sh
    $MC up -d
    $MC exec backup backup.sh completa
    ```
 
-   Na partida, o despachante confere a continuidade do banco: a marca (e a linha do tempo nova) fazem a
-   porta de saída fechar e os aplicativos voltarem pausados. O extrato registra o que pode ter se perdido
-   ("Pode faltar no extrato o que aconteceu entre ... e ...") e cada aplicativo pausado.
-
-9. **Confira** antes de reabrir (passo "Reabrir a saída").
+10. **Confira** antes de reabrir (passo "Reabrir a saída").
 
 ## Caminho B: cópia lógica (pg_dump)
 
@@ -153,7 +171,9 @@ se perde.
    ```
 
    Sem a marca, uma cópia lógica posta de volta no **mesmo** servidor não seria percebida: o identificador e
-   a linha do tempo do PostgreSQL não mudam. Por isso o script sempre grava a marca no banco do gateway.
+   a linha do tempo do PostgreSQL não mudam. Por isso o script sempre grava a marca no banco do gateway, logo
+   depois de restaurar e com o gateway ainda parado. A marca também faz o número de protocolo saltar
+   1.000.000 para frente antes de a entrada voltar a dar números.
 
 4. **Atenção aos fechamentos numa máquina nova.** Num servidor PostgreSQL novo, o contador de transações
    começa de novo. As linhas novas do extrato podem cair dentro de trechos já fechados, e a conferência
@@ -167,7 +187,7 @@ se perde.
    backup para um caminho novo (`PGBACKREST_REPO1_PATH`, por exemplo `/var/lib/pgbackrest/2026-11-18`, ou
    outro prefixo no bucket). O backup cria o repositório novo e faz a primeira cópia completa sozinho.
 
-6. Siga os passos 7 e 8 do caminho A (cofre e o resto), e depois "Reabrir a saída".
+6. Siga os passos 7, 8 e 9 do caminho A (cofre, despachante e o resto), e depois "Reabrir a saída".
 
 ## Reabrir a saída
 
@@ -180,7 +200,8 @@ Reabrir é **decisão de uma pessoa ADMIN, registrada**. Antes de reabrir, confi
 - o cofre está destravado e a ronda das portas passou;
 - o que estava em andamento no intervalo perdido foi conferido nos sistemas, com as pessoas.
 
-Depois, a pessoa ADMIN reabre pelas telas. Pela linha de comando, com o identificador dela:
+Depois, a pessoa ADMIN reabre na tela **Portas**, na área do ADMIN, com o motivo. Pela linha de comando,
+com o identificador dela:
 
 ```sh
 $MC run --rm --no-deps --entrypoint python despachante -m mcp_claro.continuidade \
@@ -188,8 +209,52 @@ $MC run --rm --no-deps --entrypoint python despachante -m mcp_claro.continuidade
 ```
 
 O identificador da pessoa ADMIN aparece nas telas do ADMIN, ou em
-`SELECT id, nome FROM pessoas WHERE papel = 'admin'`. Os aplicativos **continuam pausados**: cada um volta
-por decisão de quem responde por ele.
+`SELECT id, nome FROM pessoas WHERE papel = 'admin'`.
+
+### Os aplicativos voltam um por um
+
+Reabrir a saída **não reativa** os aplicativos. Enquanto um aplicativo estiver pausado, a entrada recusa os
+pedidos dele. Se uma ação dele ainda estiver na fila, o despachante a para na hora de sair, sem enviar
+("parada por bloqueio", com o detalhe "o aplicativo está pausado"). Cada aplicativo volta por decisão de quem
+responde por ele, depois de conferir no extrato o que pode ter se perdido, como um bloqueio feito depois da
+cópia:
+
+- **programa que roda sozinho**: o ADMIN usa **Reativar o aplicativo**, na tela do programa (área do ADMIN,
+  Programas). O passo vai ao extrato com o nome de quem fez;
+- **outros aplicativos (assistentes)**: ainda não há tela para isso. Até ela existir, a equipe que opera faz a
+  volta no banco, a pedido do ADMIN, um aplicativo de cada vez. Este passo **não vai ao extrato**: registre no
+  relatório da restauração quem pediu, quando e por quê.
+
+  ```sh
+  $MC exec banco sh -c 'PGPASSWORD=$(cat /run/secrets/db_migracao) psql -U mcp_claro_migracao -d mcp_claro'
+  ```
+
+  ```sql
+  SELECT id, nome FROM aplicativos WHERE situacao = 'pausado' AND tipo = 'assistente';
+  UPDATE aplicativos SET situacao = 'ativo', atualizado_em = now()
+   WHERE id = '<id do aplicativo>' AND situacao = 'pausado' AND tipo = 'assistente';
+  ```
+
+### Quando só o vigia não respondeu
+
+Em piloto e produção, a conferência exige o vigia (`CONTINUITY_REQUIRE_WATCH`). Se o vigia não responder e não
+houver outro sinal de restauração (marca, identificador, linha do tempo ou fechamento mais novo no vigia), a
+conferência faz menos:
+
+- a porta de saída fecha, os aplicativos voltam pausados e o número de protocolo salta 1.000.000 para frente,
+  como numa restauração;
+- a fila **não para**: a conferência não muda o estado de nenhuma ação, e a saída fechada segura tudo;
+- o extrato registra o motivo ("o vigia não respondeu") e o intervalo que pode faltar. Ele não diz que o banco
+  foi restaurado: diz que não houve sinal disso e que a fila não parou. Sem o vigia, não dá para saber se o
+  banco voltou de uma cópia lógica posta sem a marca.
+
+Com a saída reaberta, o despachante confere cada ação na hora dela. A de um aplicativo que já voltou sai,
+depois dessa conferência. A de um aplicativo ainda pausado fica parada, sem sair. Por isso, para o que espera
+seguir, a ordem é esta:
+
+1. confira o vigia: por que não respondeu, e se o último fechamento dele bate com o do banco;
+2. reative os aplicativos, um por um (veja acima);
+3. só depois, reabra a saída.
 
 ## Ensaio de restauração
 
@@ -233,14 +298,23 @@ repositório é o volume separado `backup_repositorio` e a cópia lógica fica n
 
 ## Como o gateway percebe a restauração
 
-Na partida, o despachante lê o identificador (`system_identifier`) e a linha do tempo (`timeline_id`) do
-PostgreSQL e compara com a última linha de `continuidade_banco`. Também compara o último fechamento guardado
-no vigia com o último do banco. Se algo não bater, se o vigia não responder, ou se a última linha for a
-marca "restaurado", ele, numa só transação:
+Na partida, antes de enviar qualquer ação, o despachante lê o identificador (`system_identifier`) e a linha
+do tempo (`timeline_id`) do PostgreSQL e compara com a última linha de `continuidade_banco`. Também compara o
+último fechamento guardado no vigia com o último do banco. Se algo não bater, se o vigia não responder, ou se
+a última linha for a marca "restaurado", a conferência "não confere". Então ele, numa só transação:
 
 1. fecha a porta de saída;
 2. pausa os aplicativos ativos (menos as identidades da ronda e do vigia, que não alcançam sistema real);
 3. registra no extrato o motivo, o intervalo que pode ter se perdido e cada aplicativo pausado;
-4. grava a conferência em `continuidade_banco`, que é só de acrescentar.
+4. faz a sequência do número de protocolo saltar 1.000.000 para frente (`SALTO_NA_RESTAURACAO`);
+5. com sinal de restauração (marca, identificador, linha do tempo ou fechamento mais novo no vigia), para a
+   fila: o que estava "enviando" fica "não confirmada", e o que esperava a ficha ou a hora de sair fica
+   "parada por restauração". Só com o vigia sem resposta, a fila fica como está (veja "Quando só o vigia não
+   respondeu");
+6. grava a conferência em `continuidade_banco`, que é só de acrescentar.
+
+A marca "restaurado" também faz o número saltar 1.000.000, na hora em que é gravada. Por isso, depois de uma
+restauração com a marca, os números podem pular 2.000.000. A sequência só anda para frente, e o protocolo
+aceita oito dígitos ou mais.
 
 Na primeira partida de um banco novo, ele só grava a linha.

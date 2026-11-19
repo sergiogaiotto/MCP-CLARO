@@ -1,5 +1,8 @@
-"""Telas do ADMIN: aplicativos, sistemas e sondagem, revisao de ferramentas, modelos de ordem,
-programas que rodam sozinhos, destinos de webhook e abertura do extrato de outra pessoa.
+"""Telas do ADMIN: aplicativos, sistemas e sondagem, revisao de ferramentas, modelos de ordem, destinos de
+webhook e abertura do extrato de outra pessoa. Os programas que rodam sozinhos estao em ``telas/admin_programas.py``.
+
+Na revisao da ferramenta, o ADMIN marca os campos do pedido que dizem para quem a acao vai (so campos do esquema
+de entrada). O limite "so estes destinatarios" da pessoa confere estes campos; o resto do pedido fica livre.
 
 Toda mudanca vai ao extrato, na mesma transacao, com quem fez. A sondagem de versao e a leitura
 das declaracoes sao pedidas ao despachante pela porta interna: so ele fala com os sistemas.
@@ -10,12 +13,12 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from datetime import date, timedelta
 from typing import Any, Final
 from urllib.parse import urlencode, urlsplit
 
 import httpx2
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import BaseRoute, Route
@@ -24,7 +27,7 @@ from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Ambiente
 from mcp_claro.entrada.argumentos import EsquemaInvalido
 from mcp_claro.logs import logger
-from mcp_claro.telas import consultas
+from mcp_claro.telas import consultas, limites
 from mcp_claro.telas.nucleo import Interrompe, Telas, numero_pagina, tela, uuid_ou_none, ver_depois
 from mcp_claro.telas.seguranca import Formulario
 from mcp_claro.telas.sessoes import Sessao
@@ -40,6 +43,11 @@ CONTROLE: Final = re.compile(r"[\x00-\x1f\x7f]")
 CLASSES: Final = ("le", "muda", "tem_volta")
 RISCOS: Final = ("baixo", "medio", "alto")
 TIPOS_CHAVE: Final = ("por_pessoa", "compartilhada", "programa")
+# Os motivos aparecem para a pessoa (Meus limites, a pagina do limite e a da acao): texto de tela, com acento.
+MOTIVO_CAMPOS_MUDARAM: Final = "o ADMIN marcou outro campo de destinatário nesta ação; crie outro limite se precisar"
+MOTIVO_CANCELADA_CAMPOS: Final = (
+    "cancelada porque o limite que a liberou terminou: o ADMIN mudou os campos de destinatário"
+)
 
 
 def _limpo(valor: str) -> str:
@@ -77,8 +85,6 @@ class TelasDoAdmin:
             r("/admin/sistemas/{sistema_id:uuid}/ferramenta", self.revisar, "POST"),
             r("/admin/modelos", self.modelos),
             r("/admin/modelos", self.criar_modelo, "POST"),
-            r("/admin/programas", self.programas),
-            r("/admin/programas", self.cadastrar_programa, "POST"),
             r("/admin/webhooks", self.webhooks),
             r("/admin/webhooks", self.cadastrar_webhook, "POST"),
             r("/admin/webhooks/{destino_id:uuid}/situacao", self.mudar_webhook, "POST"),
@@ -334,6 +340,7 @@ class TelasDoAdmin:
                     "classe": revisao.classe,
                     "risco": revisao.risco,
                     "campos": list(revisao.campos_pessoais or []),
+                    "destinatario": list(revisao.campos_destinatario or []),
                 }
             else:
                 so_le = bool((definicao.get("annotations") or {}).get("readOnlyHint"))
@@ -344,6 +351,7 @@ class TelasDoAdmin:
                     "classe": "le" if so_le else "muda",
                     "risco": "medio",
                     "campos": [],
+                    "destinatario": [],
                 }
         outros = [c for c in valores.get("campos", []) if c not in campos_saida]
         return self.t.pagina(
@@ -355,6 +363,7 @@ class TelasDoAdmin:
                 "definicao": definicao,
                 "esquema_entrada": json.dumps(definicao.get("inputSchema") or {}, indent=2, ensure_ascii=False),
                 "campos_saida": campos_saida,
+                "campos_entrada": repositorio.campos_de_entrada(definicao.get("inputSchema") or {}),
                 "outros_campos": ", ".join(outros),
                 "revisao": revisao,
                 "mudou": revisao is not None and revisao.impressao != vista.impressao,
@@ -392,6 +401,15 @@ class TelasDoAdmin:
         campos = list(dict.fromkeys(campos))
         if len(campos) > 30 or not all(NOME_CAMPO.match(c) for c in campos):
             erros.append("Os campos pessoais usam só letras sem acento, números e _ . - (até 30 campos).")
+        async with self.t.engine.connect() as c:
+            vista = await consultas.ferramenta_vista(c, sistema.id, nome)
+        if vista is None:
+            return await self._pagina_ferramenta(pedido, sistema, nome)
+        destinatario = list(dict.fromkeys(f.lista("destinatario")))
+        de_entrada = repositorio.campos_de_entrada(dict(vista.definicao).get("inputSchema") or {})
+        if len(destinatario) > 30 or any(d not in de_entrada for d in destinatario):
+            erros.append("Marque como destinatário só campos que a ferramenta pede (a lista desta página).")
+            destinatario = [d for d in destinatario if d in de_entrada][:30]
         valores = {
             "nome_vitrine": nome_vitrine,
             "titulo": titulo,
@@ -399,13 +417,10 @@ class TelasDoAdmin:
             "classe": classe,
             "risco": risco,
             "campos": campos,
+            "destinatario": destinatario,
         }
         if erros:
             return await self._pagina_ferramenta(pedido, sistema, nome, erros=erros, valores=valores)
-        async with self.t.engine.connect() as c:
-            vista = await consultas.ferramenta_vista(c, sistema.id, nome)
-        if vista is None:
-            return await self._pagina_ferramenta(pedido, sistema, nome)
         try:
             async with self.t.engine.begin() as c:
                 ferramenta_id = await repositorio.revisar_ferramenta(
@@ -419,6 +434,7 @@ class TelasDoAdmin:
                     risco=risco,
                     titulo=titulo or None,
                     campos_pessoais=campos,
+                    campos_destinatario=destinatario,
                 )
                 await self.t.extrato(
                     c,
@@ -433,15 +449,47 @@ class TelasDoAdmin:
                     pessoa_id=sessao.pessoa.id,
                     sistema_id=sistema.id,
                     ferramenta=nome_vitrine,
-                    dados={"ferramenta_id": str(ferramenta_id), "nome_original": nome, "campos_pessoais": campos},
+                    dados={
+                        "ferramenta_id": str(ferramenta_id),
+                        "nome_original": nome,
+                        "campos_pessoais": campos,
+                        "campos_destinatario": destinatario,
+                    },
                 )
+                await self._encerrar_limites_sem_os_campos(c, sistema.id, nome, nome_vitrine, destinatario)
         except EsquemaInvalido as erro:
             erros.append(f"O esquema de entrada desta ferramenta não é aceito: {erro}.")
+        except repositorio.CampoForaDoEsquema:
+            erros.append("Marque como destinatário só campos que a ferramenta pede (a lista desta página).")
         except IntegrityError:
             erros.append("Já existe outra ferramenta valendo com este nome na vitrine. Escolha outro nome.")
         if erros:
             return await self._pagina_ferramenta(pedido, sistema, nome, erros=erros, valores=valores)
         return ver_depois(f"/telas/admin/sistemas/{sistema.id}", "ferramenta_revisada")
+
+    async def _encerrar_limites_sem_os_campos(
+        self, c: AsyncConnection, sistema_id: uuid.UUID, nome: str, nome_vitrine: str, campos: list[str]
+    ) -> int:
+        """Na transacao da revisao: os limites "so estes" que nao conferem um campo marcado agora terminam, e o
+        que eles liberaram e ainda espera a hora de sair e cancelado. Cada pessoa ve no proprio extrato."""
+        encerrados = await consultas.encerrar_limites_sem_os_campos(
+            c, sistema_id=sistema_id, nome_original=nome, campos=campos, motivo=MOTIVO_CAMPOS_MUDARAM
+        )
+        for limite in encerrados:
+            canceladas = await limites.cancelar_liberadas(c, limite.id, MOTIVO_CANCELADA_CAMPOS, quem="admin")
+            await self.t.extrato(
+                c,
+                "limite_encerrado",
+                {"ferramenta": nome_vitrine, "motivo": MOTIVO_CAMPOS_MUDARAM},
+                pessoa_id=limite.pessoa_id,
+                aplicativo_id=limite.aplicativo_id,
+                sistema_id=limite.sistema_id,
+                ferramenta=nome_vitrine,
+                dados={"limite_id": str(limite.id), "canceladas": canceladas, "por": "admin"},
+            )
+        if encerrados:
+            log.info("telas_limites_encerrados_pela_revisao", limites=len(encerrados))
+        return len(encerrados)
 
     # --- Modelos de ordem de servico ---
 
@@ -514,100 +562,6 @@ class TelasDoAdmin:
                 )
                 return ver_depois("/telas/admin/modelos", "modelo_criado")
         return await self._pagina_modelos(pedido, erros, valores)
-
-    # --- Programas que rodam sozinhos (decisao 9) ---
-
-    async def _pagina_programas(
-        self, pedido: Request, erros: list[str] | None = None, valores: dict[str, str] | None = None
-    ) -> Response:
-        async with self.t.engine.connect() as c:
-            programas = await consultas.todos_programas(c)
-            pessoas = await consultas.pessoas(c, so_ativas_com_nome=True)
-        return self.t.pagina(
-            pedido,
-            "admin/programas.html",
-            {
-                "programas": programas,
-                "pessoas": pessoas,
-                "hoje": date.today().isoformat(),
-                "erros": erros or [],
-                "valores": valores or {},
-            },
-            status=400 if erros else 200,
-        )
-
-    @tela
-    async def programas(self, pedido: Request) -> Response:
-        await self.t.exigir_admin(pedido)
-        return await self._pagina_programas(pedido)
-
-    @tela
-    async def cadastrar_programa(self, pedido: Request) -> Response:
-        sessao = await self.t.exigir_admin(pedido)
-        f = await self.t.formulario(pedido, sessao)
-        erros: list[str] = []
-        client_id = f.texto("client_id")
-        if not ID_SIMPLES.match(client_id):
-            erros.append("O client_id usa só letras, números e . _ : - (até 200).")
-        nome = _texto(f, "nome", "o nome do programa", erros, maximo=120)
-        familia = f.texto("familia", "programa").lower() or "programa"
-        if not FAMILIA.match(familia):
-            erros.append("A família usa letras minúsculas, números e -.")
-        finalidade = _texto(f, "finalidade", "para que serve o programa", erros, minimo=10, maximo=500)
-        try:
-            fim = date.fromisoformat(f.texto("fim"))
-        except ValueError:
-            fim = None
-        hoje = date.today()
-        if fim is None or not hoje < fim <= hoje + timedelta(days=366):
-            erros.append("A data de fim precisa ser depois de hoje e em até um ano.")
-        responsavel_id = uuid_ou_none(f.texto("responsavel"))
-        substituto_id = uuid_ou_none(f.texto("substituto"))
-        # Regra fixa do plano (decisao 9): sem responsavel e substituto com nome, o programa nao e salvo.
-        if responsavel_id is None or substituto_id is None:
-            erros.append("Sem responsável e substituto com nome, o programa não é salvo.")
-        elif responsavel_id == substituto_id:
-            erros.append("O responsável e o substituto precisam ser pessoas diferentes.")
-        async with self.t.engine.begin() as c:
-            pessoas = {linha.id: linha for linha in await consultas.pessoas(c, so_ativas_com_nome=True)}
-            responsavel = pessoas.get(responsavel_id) if responsavel_id else None
-            substituto = pessoas.get(substituto_id) if substituto_id else None
-            if responsavel_id and substituto_id and (responsavel is None or substituto is None):
-                erros.append("Responsável e substituto precisam ser pessoas ativas, com nome no cadastro.")
-            if not erros and await consultas.aplicativo_existe(c, client_id):
-                erros.append("Já existe um aplicativo com este client_id.")
-            if not erros and responsavel is not None and substituto is not None and fim is not None:
-                aplicativo_id = await repositorio.habilitar_aplicativo(
-                    c, client_id=client_id, nome=nome, familia=familia, tipo="programa"
-                )
-                await consultas.cadastrar_programa(
-                    c,
-                    aplicativo_id=aplicativo_id,
-                    responsavel_id=responsavel.id,
-                    substituto_id=substituto.id,
-                    finalidade=finalidade,
-                    fim=fim,
-                )
-                await self.t.extrato(
-                    c,
-                    "admin_programa_cadastrado",
-                    {
-                        "aplicativo": nome,
-                        "quem": sessao.quem,
-                        "responsavel": responsavel.nome,
-                        "substituto": substituto.nome,
-                    },
-                    pessoa_id=sessao.pessoa.id,
-                    aplicativo_id=aplicativo_id,
-                    dados={
-                        "client_id": client_id,
-                        "responsavel_id": str(responsavel.id),
-                        "substituto_id": str(substituto.id),
-                        "fim": fim.isoformat(),
-                    },
-                )
-                return ver_depois("/telas/admin/programas", "programa_cadastrado")
-        return await self._pagina_programas(pedido, erros, dict(f.como_dict()))
 
     # --- Destinos de webhook ---
 

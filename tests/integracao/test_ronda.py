@@ -165,6 +165,8 @@ async def test_falha_plantada_fecha_a_entrada_por_etapas(entrada_com_falha: Entr
     assert resposta.json()["error"]["data"]["br.com.claro.mcp-claro/motivo"] == "entrada_fechada"
     r5 = await rodar_ronda(e.p, e.rotinas_db, fonte=fonte, emails_admin=[ADMIN], config=cfg)
     assert r5.nivel_depois == "fechada"
+    # Fechada, a entrada recusa tambem o controle: a vitrine nao foi testada (inconclusivo).
+    assert {t.caso: t for t in r5.tentativas}[Caso.CONTROLE].situacao is Situacao.INCONCLUSIVO
     assert await avisos(e, r5.id) == []
 
     # O ADMIN reabre depois de apurar: a contagem zera.
@@ -259,7 +261,6 @@ async def test_vitrine_furada_a_ronda_acusa_e_fecha_a_entrada(
     entrada: Entrada, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Com a vitrine furada, a entrada recusa depois, pelo tipo de chave (a ronda e um programa). Isso e passagem."""
-    await _zerar_limite_por_minuto(entrada)
     monkeypatch.setattr(repositorio, "ferramenta_na_vitrine", _vitrine_furada)
     cfg = config(entrada)
     r1 = await rodar_ronda(
@@ -293,11 +294,6 @@ async def _mudar_ronda(e: Entrada, sql: str) -> None:
         await c.execute(text(sql), {"a": await _ronda_id(e)})
 
 
-async def _zerar_limite_por_minuto(e: Entrada) -> None:
-    """Rodadas seguidas no mesmo minuto, nos testes, gastam o limite por minuto da ronda. Comeca do zero."""
-    await _mudar_ronda(e, "DELETE FROM programas_pedidos_minuto WHERE aplicativo_id = :a")
-
-
 @pytest.mark.parametrize(
     ("mudanca", "motivo"),
     [
@@ -313,7 +309,6 @@ async def test_ronda_com_o_proprio_programa_sem_valer_e_inconclusiva(
     entrada: Entrada, mudanca: str, motivo: str
 ) -> None:
     """Programa da ronda pausado, sem cadastro ou vencido: a vitrine nao e testada, e a rodada nunca e conforme."""
-    await _zerar_limite_por_minuto(entrada)
     await _mudar_ronda(entrada, mudanca)  # a proxima subida da entrada refaz o cadastro (test_ronda_apoio)
     r = await rodar_ronda(
         entrada.p, entrada.rotinas_db, fonte=FonteFalsa(entrada.idp), emails_admin=[ADMIN], config=config(entrada)
@@ -371,7 +366,6 @@ async def _extrato_desde(e: Entrada, tipo: str, aplicativo_id: uuid.UUID, desde:
 
 async def test_rotina_dos_programas_nao_pausa_nem_encerra_a_ronda_e_avisa_o_admin(entrada: Entrada) -> None:
     ronda_id = await _ronda_id(entrada)
-    await _zerar_limite_por_minuto(entrada)
     try:
         antes = await _ultimo_do_extrato(entrada)
         # Revisao vencida: um programa comum pausaria. A ronda segue ativa e o ADMIN e avisado, uma vez.
@@ -420,3 +414,82 @@ async def test_rotina_dos_programas_nao_pausa_nem_encerra_a_ronda_e_avisa_o_admi
             "UPDATE programas SET revisado_em = now(), fim = current_date + 30, situacao = 'ativo'"
             " WHERE aplicativo_id = :a",
         )
+
+
+# --- Rodada 2 (observacao 1): controle recusado antes da vitrine -----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("ligar", "desligar", "motivo"),
+    [
+        (
+            "INSERT INTO bloqueios (tipo, alcance, aplicativo_id, quem, motivo)"
+            " VALUES ('bloqueio', 'aplicativo', :a, 'admin:teste', 'teste da ronda')",
+            "UPDATE bloqueios SET encerrado_em = now(), encerrado_por = 'admin:teste'"
+            " WHERE aplicativo_id = :a AND encerrado_em IS NULL",
+            "bloqueio_aplicativo",
+        ),
+        (
+            "INSERT INTO bloqueios (tipo, alcance, quem, motivo)"
+            " VALUES ('pausa', 'tudo', 'admin:teste', 'teste da ronda')",
+            "UPDATE bloqueios SET encerrado_em = now(), encerrado_por = 'admin:teste'"
+            " WHERE alcance = 'tudo' AND motivo = 'teste da ronda' AND encerrado_em IS NULL",
+            "pausa_tudo",
+        ),
+        (
+            "UPDATE estado_entrada SET nivel = 'fechada', motivo = 'teste', mudou_em = clock_timestamp(),"
+            " mudou_por = 'instalacao' WHERE id = 1",
+            "UPDATE estado_entrada SET nivel = 'aberta', motivo = 'teste', mudou_em = clock_timestamp(),"
+            " mudou_por = 'instalacao' WHERE id = 1",
+            "entrada_fechada",
+        ),
+    ],
+)
+async def test_ronda_recusada_antes_da_vitrine_e_inconclusiva(
+    entrada: Entrada, ligar: str, desligar: str, motivo: str
+) -> None:
+    """Bloqueio do aplicativo da ronda, pausa geral ou entrada fechada: a rodada nao diz "conforme".
+
+    Antes, o controle recebia a recusa e saia conforme, e a rodada saia "conforme" sem ter testado a vitrine.
+    """
+    try:
+        await _mudar_ronda(entrada, ligar)
+        r = await rodar_ronda(
+            entrada.p, entrada.rotinas_db, fonte=FonteFalsa(entrada.idp), emails_admin=[ADMIN], config=config(entrada)
+        )
+    finally:
+        await _mudar_ronda(entrada, desligar)
+    por_caso = {t.caso: t for t in r.tentativas}
+    assert por_caso[Caso.CONTROLE].detalhes["motivo"] == motivo
+    assert por_caso[Caso.CONTROLE].situacao is Situacao.INCONCLUSIVO
+    assert por_caso[Caso.OUTRA_PESSOA].situacao is Situacao.INCONCLUSIVO
+    assert por_caso[Caso.CRACHA_FALSO].situacao is Situacao.CONFORME  # as portas de antes seguem testadas
+    assert not r.resumo.controle_ok
+    assert not r.resumo.falhou
+    assert r.seguidas == 0
+    guardadas = await linhas(entrada, r.id)
+    assert guardadas["controle"].detalhes["situacao"] == "inconclusivo"
+
+
+async def test_ronda_no_limite_por_minuto_e_inconclusiva(entrada: Entrada) -> None:
+    """Com o limite por minuto da ronda gasto, o controle e recusado antes da vitrine: inconclusivo."""
+    cheio = (
+        "INSERT INTO programas_pedidos_minuto (aplicativo_id, minuto, contagem)"
+        " SELECT :a, date_trunc('minute', now()) + make_interval(mins => m), :limite FROM generate_series(0, 1) m"
+        " ON CONFLICT (aplicativo_id, minuto) DO UPDATE SET contagem = EXCLUDED.contagem"
+    )
+    ronda_id = await _ronda_id(entrada)
+    try:
+        async with entrada.dono.begin() as c:  # este minuto e o seguinte: o teste nao depende da virada
+            await c.execute(text(cheio), {"a": ronda_id, "limite": entrada.p.PROGRAM_MAX_REQUESTS_PER_MINUTE})
+        r = await rodar_ronda(
+            entrada.p, entrada.rotinas_db, fonte=FonteFalsa(entrada.idp), emails_admin=[ADMIN], config=config(entrada)
+        )
+    finally:
+        await _mudar_ronda(entrada, "DELETE FROM programas_pedidos_minuto WHERE aplicativo_id = :a")
+    por_caso = {t.caso: t for t in r.tentativas}
+    assert por_caso[Caso.CONTROLE].detalhes["motivo"] == "programa_limite_minuto"
+    assert por_caso[Caso.CONTROLE].situacao is Situacao.INCONCLUSIVO
+    assert por_caso[Caso.OUTRA_PESSOA].situacao is Situacao.INCONCLUSIVO
+    assert not r.resumo.controle_ok
+    assert not r.resumo.falhou

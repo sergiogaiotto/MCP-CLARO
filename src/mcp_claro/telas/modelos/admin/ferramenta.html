@@ -48,6 +48,17 @@
     <label for="outros_campos">Outros campos (separados por vírgula)</label>
     <input type="text" id="outros_campos" name="outros_campos" maxlength="1000" value="{{ outros_campos }}">
   </fieldset>
+  <fieldset id="campos-destinatario">
+    <legend>Campos do pedido que dizem o destinatário</legend>
+    <p class="dica">Marque os campos que dizem para quem a ação vai: por exemplo, para, cópia e cópia oculta. Não marque o texto da mensagem nem outros dados.</p>
+    <p class="dica">Para que serve: uma pessoa pode criar um limite "só estes destinatários" para esta ação. O MCP-CLARO confere só os campos marcados aqui: um deles precisa trazer um destinatário que a pessoa aceitou, e os outros marcados precisam vir vazios. O resto do pedido fica livre. Sem nenhum campo marcado, o limite desta ação só pode valer para qualquer destinatário.</p>
+    <p class="dica">Se você marcar um campo que não estava marcado, os limites "só estes destinatários" desta ação criados antes terminam agora (eles não conferem o campo novo), e o que eles liberaram e ainda espera a hora de sair é cancelado. Cada pessoa vê isso no extrato e pode criar outro limite.</p>
+    {% for campo in campos_entrada %}
+    <label class="opcao"><input type="checkbox" name="destinatario" value="{{ campo }}" {% if campo in valores.get("destinatario", []) %}checked{% endif %}> <code>{{ campo }}</code></label>
+    {% else %}
+    <p>Esta ferramenta não pede nenhum campo.</p>
+    {% endfor %}
+  </fieldset>
   <button type="submit">Gravar a revisão</button>
   {% if revisao %}<p class="dica">Revisão atual: versão {{ revisao.versao }}. Gravar cria a versão seguinte.</p>{% endif %}
 </form>

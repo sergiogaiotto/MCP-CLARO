@@ -203,19 +203,14 @@ def test_ficha_vencida_nao_tem_botoes() -> None:
 # --- Limites ---
 
 
-def test_campos_de_destinatario_do_esquema() -> None:
-    esquema = {
-        "type": "object",
-        "properties": {
-            "destinatario": {"type": "string"},
-            "copias": {"type": "array", "items": {"type": "string"}},
-            "quantidade": {"type": "integer"},
-            "estranho": "x",
-        },
-    }
-    assert limites.campos_de_destinatario(esquema) == ("destinatario", "copias")
-    assert limites.campos_de_destinatario({"type": "object"}) == ()
+def test_campos_de_destinatario_sao_os_que_o_admin_marcou() -> None:
+    # A coluna ferramentas_revisadas.campos_destinatario, na ordem marcada. Nada e adivinhado pelo tipo do campo.
+    assert limites.campos_de_destinatario(["para", "copia", "para"]) == ("para", "copia")
+    assert limites.campos_de_destinatario(("destinatario",)) == ("destinatario",)
+    assert limites.campos_de_destinatario([]) == ()
     assert limites.campos_de_destinatario(None) == ()
+    # Um esquema (o jeito antigo) nao e marca de ninguem.
+    assert limites.campos_de_destinatario({"properties": {"destinatario": {"type": "string"}}}) == ()
 
 
 def _escolha(risco: str = "medio") -> limites.Escolha:
@@ -284,3 +279,11 @@ def test_destinatarios_legiveis_e_alvo_da_ampliacao() -> None:
 def test_frases_novas_do_extrato() -> None:
     assert frase("limite_criado_sem_passkey", por_dia=2, ferramenta="m").endswith("instalacao).")
     assert frase("limite_ampliado_sem_passkey", por_dia=2, ferramenta="m").startswith("A pessoa ampliou")
+    assert frase("limite_criado_login_refeito", por_dia=2, ferramenta="m") == (
+        "A pessoa criou um limite de 2 por dia para m, com o login refeito na hora (passkey desligada nesta"
+        " instalacao)."
+    )
+    assert frase("limite_ampliado_login_refeito", por_dia=3, ferramenta="m") == (
+        "A pessoa ampliou um limite de m para 3 por dia, com o login refeito na hora (passkey desligada nesta"
+        " instalacao)."
+    )
