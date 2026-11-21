@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
@@ -899,9 +899,19 @@ _TIPO_FINAL: Final = {
 
 
 async def finalizar(
-    c: AsyncConnection, op: Operacao, estado: Estado, resultado: dict[str, Any] | None, desfecho: str
+    c: AsyncConnection,
+    op: Operacao,
+    estado: Estado,
+    resultado: dict[str, Any] | None,
+    desfecho: str,
+    *,
+    pedidos: Sequence[str] = (),
 ) -> bool:
     """Grava o fim do envio. Se outra copia ja deu a acao como nao confirmada, so guarda a resposta.
+
+    ``pedidos``: as categorias do que o sistema pediu no meio da chamada (``Resposta.pedidos``, nosso vocabulario),
+    em ``dados.pedidos`` das linhas ``acao_sistema_pediu_dados`` e ``acao_enviada``, para a tela de pedidos
+    recusados do ADMIN mostrar tambem as acoes.
 
     Nova tentativa depois de um COMMIT que deu certo, mas cuja confirmacao se perdeu: a linha ja tem o que este
     fim gravou (``_fim_ja_gravado``), antes ou depois de uma retomada. Nada e gravado de novo."""
@@ -936,6 +946,8 @@ async def finalizar(
         dados["texto_de_fora"] = op.de_estranhos
     elif tipo == "acao_nao_saiu":
         campos["motivo"] = desfecho
+    if tipo in ("acao_enviada", "acao_sistema_pediu_dados"):
+        dados["pedidos"] = list(pedidos)
     await registrar(
         c,
         papel="despachante",

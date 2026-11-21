@@ -6,15 +6,24 @@
 - O cliente local para terceiro so entra por injecao explicita (``local_para_terceiro``), e so em
   desenvolvimento e teste. Fora deles, a injecao e ignorada: o despachante, que abre todas as chaves, nunca fala
   direto com um servidor de terceiros.
+
+Vocabulario comum do despachante (leitura, declaracoes, sondagem) e da porta de saida (acoes), para que os dois
+lados digam o mesmo, com as mesmas palavras:
+
+- ``linha_da_sala``: a linha ``sala_*`` do extrato para o que a sala barrou num servidor de terceiros (sem sala,
+  endereco que nao e publico, desvio nao seguido);
+- ``pedidos_da_resposta`` e ``pedidos_legiveis``: o que o sistema pediu no meio da chamada, so com as nossas
+  categorias e as nossas palavras (nunca texto, link ou nome de campo do sistema).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from mcp_claro.ligacao import cliente
-from mcp_claro.ligacao.cliente import TETO_RESPOSTA_PADRAO, Resposta, Segredo, Sondagem
+from mcp_claro.ligacao.cliente import ENDERECO_RECUSADO, TETO_RESPOSTA_PADRAO, Resposta, Segredo, Sondagem
 from mcp_claro.ligacao.sala_contrato import SALA_FORA, FalhaNaSala, resposta_sala_fora, sondagem_sala_fora
 
 
@@ -154,3 +163,70 @@ def ligacao_para(
     if local_para_terceiro is not None and ambiente in AMBIENTES_COM_INJECAO:
         return local_para_terceiro
     return SEM_SALA
+
+
+# Vocabulario comum do despachante e da porta de saida ------------------------------------------------------------
+
+LINHA_SALA_FORA: Final = "sala_fora"
+LINHA_ENDERECO_RECUSADO: Final = "sala_endereco_recusado"
+LINHA_DESVIO_RECUSADO: Final = "sala_desvio_recusado"
+_NADA_SAIU_PELA_SALA: Final[dict[str, str]] = {SALA_FORA: LINHA_SALA_FORA, ENDERECO_RECUSADO: LINHA_ENDERECO_RECUSADO}
+
+
+def linha_da_sala(resposta: Resposta | Sondagem, sistema: TemOrigem) -> str | None:
+    """A linha do extrato (``sala_*``) do que a sala barrou numa chamada a um servidor de terceiros, ou None.
+
+    - ``sala_fora`` e ``sala_endereco_recusado``: so quando nada saiu (``Resposta.tipo`` ``nao_enviado``;
+      sondagem sem veredito, ``inalcancavel``), com a excecao da sala ou do cliente fixado. Uma resposta que diga
+      ``duvida`` nunca vira "nada foi enviado";
+    - ``sala_desvio_recusado``: o terceiro respondeu com um desvio 3xx no ultimo status e o MCP-CLARO nao seguiu
+      (``recusado_http``; na sondagem, o desfecho ``desvio``).
+
+    Sistema proprio nunca tem linha da sala. Mesma regra na leitura, nas declaracoes, na sondagem e na acao.
+    """
+    if sistema.origem == "proprio":
+        return None
+    if isinstance(resposta, Sondagem):
+        if resposta.desfecho == "desvio":
+            return LINHA_DESVIO_RECUSADO
+        nada_saiu = resposta.desfecho == "inalcancavel"
+    else:
+        if resposta.tipo == "recusado_http" and resposta.status_http and 300 <= resposta.status_http[-1] < 400:
+            return LINHA_DESVIO_RECUSADO
+        nada_saiu = resposta.tipo == "nao_enviado"
+    return _NADA_SAIU_PELA_SALA.get(resposta.excecao or "") if nada_saiu else None
+
+
+def pedidos_da_resposta(resposta: Resposta) -> tuple[str, ...]:
+    """O que o sistema pediu no meio da chamada: o que o cliente (ou a sala) contou e o que o proprio resultado ou
+    erro mostra (conferido de novo aqui: uma resposta da sala sem a lista nao passa um ``InputRequiredResult`` nem
+    um -32042). Sem repeticao, em ordem."""
+    proprios = cliente.pedidos_do_sistema(resposta.resultado, resposta.erro, ())
+    return tuple(sorted(set(resposta.pedidos) | set(proprios)))
+
+
+PEDIDOS_LEGIVEIS: Final[dict[str, str]] = {
+    cliente.PEDIDO_FORMULARIO: "dados por formulario",
+    cliente.PEDIDO_LINK: "que a pessoa abrisse um link",
+    cliente.PEDIDO_AMOSTRAGEM: "uma resposta da IA do aplicativo",
+    cliente.PEDIDO_RAIZES: "a lista de pastas do aplicativo",
+    cliente.PEDIDO_SO_ESTADO: "uma nova volta",
+    cliente.PEDIDO_LINK_CODIGO_ANTIGO: "que a pessoa abrisse um link",
+}
+"""Cada categoria de ``Resposta.pedidos`` em palavras para quem nao e da area (sem acento, como o extrato)."""
+FORA_DO_PADRAO: Final = "algo fora do padrao 2026-07-28"
+"""Pedido pelo fio antigo (``fio_antigo:<metodo>``), em qualquer metodo, e qualquer categoria desconhecida."""
+
+
+def pedidos_legiveis(pedidos: Iterable[str]) -> str:
+    """Os pedidos do sistema em palavras nossas, sem repeticao, na ordem dada, com "e" antes do ultimo. Vai ao texto
+    da leitura ao aplicativo, a frase do extrato e ao desfecho da acao. So o nosso vocabulario: o que nao e uma
+    categoria nossa vira ``FORA_DO_PADRAO``, nunca o texto que veio."""
+    nomes: list[str] = []
+    for pedido in pedidos:
+        nome = PEDIDOS_LEGIVEIS.get(pedido, FORA_DO_PADRAO)
+        if nome not in nomes:
+            nomes.append(nome)
+    if not nomes:
+        return FORA_DO_PADRAO
+    return nomes[0] if len(nomes) == 1 else ", ".join(nomes[:-1]) + " e " + nomes[-1]

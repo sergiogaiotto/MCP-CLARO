@@ -24,22 +24,24 @@ dele aparece para as pessoas, e nada ha a conferir). A base e ``revisoes_servido
   so vale contra a revisao comparada (critica B1): se outra copia das rotinas ja pos em quarentena, ou se o ADMIN
   concluiu uma revisao nova no meio da rodada, nada muda. Impressao diferente com a lista da revisao igual, nome a
   nome, ao que o servidor declara (revisao gravada fora da receita; o banco nao confere uma contra a outra) tambem
-  vai a quarentena, com zero ferramentas mudadas: sem saber o que o ADMIN aprovou, fica o lado seguro;
+  vai a quarentena, com zero ferramentas mudadas: sem saber o que o ADMIN aprovou, fica o lado seguro. O aviso ao
+  ADMIN, nesse caso, e o proprio (``sistema_em_quarentena_revisao_inconsistente``);
 - sem resposta a conferencia (critica A5): soma ``sistemas.conferencias_sem_resposta``; na segunda rodada seguida, o
   servidor vai a quarentena com o motivo "nao respondeu a conferencia" (``MOTIVO_SEM_RESPOSTA``) e o ADMIN recebe
   aviso. Uma resposta no meio zera a contagem. Uma rodada em que a conferencia nem aconteceu por um problema do
-  MCP-CLARO (``ConferenciaNaoFeita``) nao conta nem zera: a culpa nao e do servidor. Hoje isso vale para o
-  despachante fora do ar (sem conexao, 503, 404) e para os motivos de ``rotinas.despachante.MOTIVOS_DO_MCP_CLARO``.
-  A sala de visitas fora e a chave que o cofre nao abriu ainda chegam como 502 ``declaracoes_indisponiveis``, igual
-  a um servidor que nao entregou, e contam como rodada sem resposta (o lado seguro), ate o despachante responder
-  com motivo proprio (pedido ao G3a).
+  MCP-CLARO (``ConferenciaNaoFeita``) nao conta nem zera: a culpa nao e do servidor. Isso vale para o despachante
+  fora do ar (sem conexao, 503, 404) e para os motivos de ``rotinas.despachante.MOTIVOS_DO_MCP_CLARO``, como a sala
+  de visitas fora (``sala_fora``) e a chave das declaracoes que o cofre nao abriu (``chave_indisponivel``). So o
+  servidor que nao entregou as declaracoes (por exemplo, 502 ``declaracoes_indisponiveis``) conta.
 
 Os nomes das ferramentas de um terceiro sao texto do fornecedor: vao so ao extrato (``dados.ferramentas``, com os
 escondidos marcados, por ``por_em_quarentena``), nunca ao log nem ao aviso do ADMIN.
 
 As rodadas seguidas sao as da tarefa ``mudou_parou``, que o agendador roda uma de cada vez na instalacao. Com duas
-copias das rotinas no ar, cada uma no seu intervalo, duas rodadas podem cair mais perto uma da outra que o
-intervalo.
+copias das rotinas no ar, cada uma no seu intervalo, duas rodadas podem cair a segundos uma da outra. Por isso a
+soma guarda a hora (do banco) em ``sistemas.conferencia_sem_resposta_em``, e uma rodada sem resposta so soma quando
+a ultima soma tem mais de metade do intervalo do mudou-parou (ou quando nao ha soma na contagem de agora): duas
+rodadas perto uma da outra contam uma vez so.
 """
 
 from __future__ import annotations
@@ -208,10 +210,12 @@ async def conferir_sistema(
 
 
 def _contar_quarentena(feita: Quarentena, motivo: str) -> None:
-    """Depois do commit: a quarentena (``mudou`` ou ``sem_resposta``) e as acoes que ela cancelou."""
+    """Depois do commit: a quarentena (``mudou`` ou ``sem_resposta``) e as acoes que ela cancelou. ``acoes_paradas``
+    leva o mesmo rotulo que a porta de saida usa para a acao parada pela mesma causa (``MOTIVO_PARADA``): o painel
+    "Acoes paradas antes de sair, por motivo" mostra uma serie so para a quarentena."""
     CONTADORES.somar("mudou_parou_quarentenas", motivo=motivo)
     if feita.paradas:
-        CONTADORES.somar("acoes_paradas", valor=len(feita.paradas), motivo="quarentena")
+        CONTADORES.somar("acoes_paradas", valor=len(feita.paradas), motivo=cadastro_quarentena.MOTIVO_PARADA)
 
 
 def _corpo_do_aviso(texto: str, feita: Quarentena, revisao_id: uuid.UUID, **mais: Any) -> dict[str, Any]:
@@ -229,15 +233,30 @@ def _corpo_do_aviso(texto: str, feita: Quarentena, revisao_id: uuid.UUID, **mais
 
 
 async def _zerar_sem_resposta(engine: AsyncEngine, sistema_id: uuid.UUID, revisao_id: uuid.UUID) -> None:
-    """O servidor respondeu: a contagem de rodadas seguidas sem resposta volta a zero (so contra a revisao lida)."""
+    """O servidor respondeu: a contagem de rodadas seguidas sem resposta volta a zero, e a hora da ultima soma
+    tambem (so contra a revisao lida)."""
     async with engine.begin() as c:
         await c.execute(
             text(
-                "UPDATE sistemas SET conferencias_sem_resposta = 0"
-                " WHERE id = :i AND revisao_servidor_id = :b AND conferencias_sem_resposta > 0"
+                "UPDATE sistemas SET conferencias_sem_resposta = 0, conferencia_sem_resposta_em = NULL"
+                " WHERE id = :i AND revisao_servidor_id = :b"
+                " AND (conferencias_sem_resposta > 0 OR conferencia_sem_resposta_em IS NOT NULL)"
             ),
             {"i": sistema_id, "b": revisao_id},
         )
+
+
+SQL_SOMAR_SEM_RESPOSTA: Final = (
+    "UPDATE sistemas SET conferencias_sem_resposta = conferencias_sem_resposta + 1,"
+    " conferencia_sem_resposta_em = now()"
+    " WHERE id = :i AND situacao = 'ativo' AND revisao_servidor_id = :b"
+    " AND (conferencia_sem_resposta_em IS NULL"
+    " OR conferencia_sem_resposta_em < now() - make_interval(secs => :meio))"
+    " RETURNING conferencias_sem_resposta"
+)
+"""Uma rodada sem resposta, so contra a revisao lida, com o servidor ``ativo`` e com a ultima soma a mais de metade
+do intervalo (``:meio``, em segundos). A hora e a do banco: as copias das rotinas comparam o mesmo relogio. Duas
+copias que somam ao mesmo tempo esperam uma pela outra na linha, e a segunda ja ve a hora da primeira."""
 
 
 async def _sem_resposta_de_terceiro(
@@ -247,22 +266,21 @@ async def _sem_resposta_de_terceiro(
     revisao_id: uuid.UUID,
     emails_admin: Sequence[str],
     resultado: ResultadoMudouParou,
+    *,
+    intervalo: float,
 ) -> None:
     """Uma rodada sem resposta a conferencia; na ``RODADAS_SEM_RESPOSTA``-esima seguida, a quarentena (critica A5).
 
     A contagem so sobe contra a revisao lida e com o servidor ``ativo``: uma conclusao nova no meio zera a conta
-    (a guarda do banco zera quando a revisao vigente muda) e a quarentena nao vale (``base``)."""
+    (a guarda do banco zera quando a revisao vigente muda) e a quarentena nao vale (``base``). E so sobe quando a
+    ultima soma tem mais de metade de ``intervalo`` (o do mudou-parou, em segundos): a rodada de outra copia das
+    rotinas, logo depois, nao conta de novo (``SQL_SOMAR_SEM_RESPOSTA``)."""
     resultado.sem_resposta.append(sistema_nome)
     CONTADORES.somar("mudou_parou_sem_resposta")
     async with engine.begin() as c:
         rodadas = (
             await c.execute(
-                text(
-                    "UPDATE sistemas SET conferencias_sem_resposta = conferencias_sem_resposta + 1"
-                    " WHERE id = :i AND situacao = 'ativo' AND revisao_servidor_id = :b"
-                    " RETURNING conferencias_sem_resposta"
-                ),
-                {"i": sistema_id, "b": revisao_id},
+                text(SQL_SOMAR_SEM_RESPOSTA), {"i": sistema_id, "b": revisao_id, "meio": max(0.0, intervalo) / 2}
             )
         ).scalar_one_or_none()
     if rodadas is None or int(rodadas) < RODADAS_SEM_RESPOSTA:
@@ -295,8 +313,11 @@ async def conferir_terceiro(
     revisao_id: uuid.UUID,
     emails_admin: Sequence[str],
     resultado: ResultadoMudouParou,
+    *,
+    intervalo: float,
 ) -> None:
-    """Mudou-parou de um servidor de terceiros revisado: o servidor inteiro contra a revisao vigente ``revisao_id``."""
+    """Mudou-parou de um servidor de terceiros revisado: o servidor inteiro contra a revisao vigente ``revisao_id``.
+    ``intervalo``: o do mudou-parou, em segundos (ver ``_sem_resposta_de_terceiro``)."""
     async with engine.connect() as c:
         revisao = (
             await c.execute(
@@ -315,7 +336,9 @@ async def conferir_terceiro(
         return
     except Exception as erro:  # noqa: BLE001 - o servidor que nao entregou conta uma rodada sem resposta
         log.warning("mudou_parou_sem_resposta", sistema=sistema_nome, erro=type(erro).__name__)
-        await _sem_resposta_de_terceiro(engine, sistema_id, sistema_nome, revisao_id, emails_admin, resultado)
+        await _sem_resposta_de_terceiro(
+            engine, sistema_id, sistema_nome, revisao_id, emails_admin, resultado, intervalo=intervalo
+        )
         return
     agora = cadastro_quarentena.declaradas(definicoes)
     nova = impressao_servidor((d["nome"], d["impressao"]) for d in agora)
@@ -324,20 +347,25 @@ async def conferir_terceiro(
         return
     base: Mapping[str, str] = cadastro_quarentena.base_da_revisao(revisao.declaradas)
     achadas = cadastro_quarentena.diferencas(base, {d["nome"]: d["impressao"] for d in agora})
+    evento = "sistema_em_quarentena"
     if not achadas:
         # A lista da revisao bate nome a nome com o que o servidor declara, mas a impressao gravada nao e a dela: a
         # revisao nao foi gravada pela receita, e nao se sabe o que o ADMIN aprovou. Quarentena do mesmo jeito (o
-        # lado seguro), com zero ferramentas mudadas; o log avisa a equipe.
+        # lado seguro), com zero ferramentas mudadas e aviso proprio; o log avisa a equipe.
+        evento = "sistema_em_quarentena_revisao_inconsistente"
         log.warning("revisao_do_servidor_sem_a_impressao_da_lista", sistema=sistema_nome)
     async with engine.begin() as c:
         feita = await por_em_quarentena(c, sistema_id=sistema_id, base=revisao_id, papel="rotinas", diferencas=achadas)
         if feita is None:
             return  # outra copia ja pos em quarentena, ou o ADMIN concluiu uma revisao nova no meio (critica B1)
-        assunto, texto = aviso_admin("sistema_em_quarentena", sistema=feita.nome, quantas=len(achadas))
+        if achadas:
+            assunto, texto = aviso_admin(evento, sistema=feita.nome, quantas=len(achadas))
+        else:
+            assunto, texto = aviso_admin(evento, sistema=feita.nome)
         mudancas = {tipo: sum(1 for d in achadas if d.tipo == tipo) for tipo in ("mudou", "nova", "sumiu")}
         await avisar_admin(
             c,
-            "sistema_em_quarentena",
+            evento,
             assunto,
             _corpo_do_aviso(
                 texto,
@@ -348,7 +376,7 @@ async def conferir_terceiro(
                 impressao_revisada=str(revisao.impressao),
                 impressao_nova=nova,
             ),
-            f"sistema_em_quarentena:{sistema_id}:{revisao_id}:{nova}",
+            f"{evento}:{sistema_id}:{revisao_id}:{nova}",
             emails_admin,
         )
     resultado.quarentenas.append(sistema_nome)
@@ -357,10 +385,12 @@ async def conferir_terceiro(
 
 
 async def conferir_sistemas(
-    engine: AsyncEngine, fonte: FonteDeclaracoes, emails_admin: Sequence[str]
+    engine: AsyncEngine, fonte: FonteDeclaracoes, emails_admin: Sequence[str], *, intervalo: float
 ) -> ResultadoMudouParou:
     """Uma rodada do mudou-parou: sistemas proprios ativos e servidores de terceiros ativos com revisao do servidor
-    vigente. Um sistema que nao responde nao segura os outros."""
+    vigente. Um sistema que nao responde nao segura os outros. ``intervalo``: o da tarefa ``mudou_parou``, em
+    segundos (``ConfigRotinas.intervalo_mudou_parou``); uma rodada sem resposta de um terceiro so soma quando a
+    ultima soma tem mais de metade dele."""
     resultado = ResultadoMudouParou()
     async with engine.connect() as c:
         sistemas = (
@@ -380,7 +410,9 @@ async def conferir_sistemas(
                 await conferir_sistema(engine, fonte, sistema_id, nome, emails_admin, resultado)
             else:
                 revisao_id = uuid.UUID(str(s.revisao_servidor_id))
-                await conferir_terceiro(engine, fonte, sistema_id, nome, revisao_id, emails_admin, resultado)
+                await conferir_terceiro(
+                    engine, fonte, sistema_id, nome, revisao_id, emails_admin, resultado, intervalo=intervalo
+                )
         except Exception as erro:  # noqa: BLE001 - um sistema mudo nao para o mudou-parou dos outros
             if nome not in resultado.sem_resposta:
                 resultado.sem_resposta.append(nome)

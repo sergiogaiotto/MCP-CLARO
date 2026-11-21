@@ -8,7 +8,9 @@ A escolha sai do contexto do Transit, que sempre comeca por ``mcp-claro|{sistema
 ``autorizacao.contexto_segredo_cliente`` e ``autorizacao.contexto_pendente``): quem chama ``chaves.guardar`` e
 ``chaves.abrir`` nao muda nada. A origem de cada sistema e lida uma vez no banco e guardada em memoria: ela nunca
 muda (guarda da migracao 0006, D8). Contexto sem sistema, ou de sistema que nao existe, e recusado: nada e cifrado
-nem decifrado com a chave errada.
+nem decifrado com a chave errada. A busca que falha (banco fora, conexao recusada, prazo) tambem e recusada
+(``OrigemIndisponivel``, um ``ContextoSemSistema``), sem guardar nada: quem chama a trata como o cofre que nao abriu
+a chave (a leitura recusa com ``chave_indisponivel``, a porta da "nao saiu"), e a proxima chamada busca de novo.
 
 Quem chama a cifra quase sempre segura uma conexao do pool do despachante (a leitura, a renovacao com trava, a porta
 de saida). Por isso a busca da origem nunca pede conexao a esse pool: na partida, ``carregar`` le a origem de todos
@@ -28,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from typing import Final, Protocol
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -51,6 +54,14 @@ class ContextoSemSistema(ValueError):
     """O contexto do Transit nao diz de que sistema e a chave, ou o sistema nao existe: nada e cifrado."""
 
 
+class OrigemIndisponivel(ContextoSemSistema):
+    """A busca da origem do sistema no banco falhou (rede, conexao, prazo, erro do banco): nada e cifrado nem
+    guardado; a proxima chamada busca de novo."""
+
+
+_BUSCA_FALHOU: Final = (OSError, TimeoutError, SQLAlchemyError)
+
+
 def sistema_do_contexto(contexto: bytes) -> uuid.UUID:
     """O ``sistema_id`` de um contexto ``mcp-claro|{sistema_id}|...``. Levanta ``ContextoSemSistema``."""
     if not contexto.startswith(PREFIXO_CONTEXTO):
@@ -67,8 +78,19 @@ def engine_sem_pool(engine: AsyncEngine) -> AsyncEngine:
     uso abre e fecha a sua conexao, sem nunca esperar por uma conexao do pool de ``engine``.
 
     Usa o criador de conexoes do pool de ``engine`` (o SQLAlchemy o guarda em ``Pool._creator``), para nao copiar
-    parametros de conexao. O dialeto do engine novo prepara cada conexao como o de ``engine``."""
-    criador = engine.sync_engine.pool._creator
+    parametros de conexao. O dialeto do engine novo prepara cada conexao como o de ``engine``.
+
+    Por que o atributo interno, e nao um engine montado pela mesma funcao (``db.engine.criar_engine``): ela sempre
+    passa ``pool_size`` e ``max_overflow``, que o ``NullPool`` recusa (``TypeError``); e montar a partir dos
+    ``Parametros`` copiaria os argumentos de conexao dela (TLS pela funcao interna ``_contexto_ssl``, nome da
+    aplicacao) e, nos testes, conectaria com o usuario da URL, e nao com o do papel (``SET ROLE`` na partida da
+    conexao do engine dado), perdendo a prova dos GRANTs. Se o SQLAlchemy deixar de ter o atributo, a partida
+    recusa com a frase abaixo (e ``test_chave_separada`` falha antes)."""
+    criador = getattr(engine.sync_engine.pool, "_creator", None)
+    if not callable(criador):
+        raise ConfiguracaoInvalida(
+            ["O SQLAlchemy desta versao nao expoe o criador de conexoes do pool (Pool._creator); confira cifra_origem."]
+        )
     return create_async_engine(engine.url, poolclass=NullPool, creator=criador)
 
 
@@ -143,7 +165,11 @@ class CifraPorOrigem:
             await self._fechar()
 
     async def _buscar(self, sistema_id: uuid.UUID) -> str | None:
-        lida = await self._origem_de(sistema_id)
+        try:
+            lida = await self._origem_de(sistema_id)
+        except _BUSCA_FALHOU as erro:
+            log.warning("origem_indisponivel", erro=type(erro).__name__)
+            raise OrigemIndisponivel("a origem do sistema nao foi lida agora") from erro
         if lida is not None:
             self._origens[sistema_id] = lida
         return lida
@@ -156,7 +182,8 @@ class CifraPorOrigem:
 
     async def origem(self, sistema_id: uuid.UUID) -> str:
         """Origem do sistema, lida uma vez (uma busca so por sistema, para todos os que pedem ao mesmo tempo).
-        Sistema que nao existe levanta ``ContextoSemSistema`` (sem guardar)."""
+        Sistema que nao existe levanta ``ContextoSemSistema``, e a busca que falha ``OrigemIndisponivel`` (sem
+        guardar, nos dois casos)."""
         guardada = self._origens.get(sistema_id)
         if guardada is not None:
             return guardada

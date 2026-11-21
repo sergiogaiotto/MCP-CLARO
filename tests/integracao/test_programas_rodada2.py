@@ -69,10 +69,12 @@ async def test_acao_pedida_e_repetida_de_programa_dizem_programa_e_responsavel(p
     assert ferramenta is not None
     pedidos = Pedidos(prog.amb.p, prog.amb.entrada_db)
     argumentos = {"id": f"CH-{prog.sufixo}"}
-    op, repetida = await pedidos.pedir(Pedido(prog.conta_id, robo, ferramenta, argumentos, None))
+    op, repetida = await pedidos.pedir(Pedido(prog.conta_id, robo, ferramenta, argumentos, None, terceiros=False))
     try:
         assert repetida is False
-        igual, repetida = await pedidos.pedir(Pedido(prog.conta_id, robo, ferramenta, argumentos, None))
+        igual, repetida = await pedidos.pedir(
+            Pedido(prog.conta_id, robo, ferramenta, argumentos, None, terceiros=False)
+        )
         assert (igual.id, repetida) == (op.id, True)
         async with prog.amb.admin.connect() as c:
             linhas = (

@@ -8,7 +8,7 @@ Blocos, nesta ordem (cada um com comentario de abertura e "Fim do bloco"):
 - ESTRANHOS: marca "traz texto de fora" e definicao declarada nas ferramentas revisadas;
 - TRES_SINAIS: tabela ``sinais`` e retrato do alerta na ficha;
 - PEDIDOS: indice das linhas de pedido barrado, para a tela do ADMIN;
-- CONFERENCIA: rodadas seguidas sem resposta ao mudou-parou (critica A5);
+- CONFERENCIA: rodadas seguidas sem resposta ao mudou-parou (critica A5) e a hora da ultima soma;
 - GUARDA_SISTEMAS: nova versao de ``sistemas_guarda`` (origem fixa, endereco e autorizacao de terceiro fixos,
   revisao vigente so com o servidor ativo e so na transacao que a grava, quarentena que so sai pela nova revisao do
   servidor);
@@ -300,6 +300,11 @@ SQL_CONFERENCIA = r"""
 -- de sistemas zera a contagem quando a revisao vigente muda (nova conclusao, quarentena, endereco ou chave).
 ALTER TABLE sistemas ADD COLUMN conferencias_sem_resposta integer NOT NULL DEFAULT 0
   CONSTRAINT sistemas_conferencias_sem_resposta_check CHECK (conferencias_sem_resposta >= 0);
+-- Hora (do banco) da ultima rodada somada na contagem de agora; nula sem soma. Com duas copias das rotinas no ar,
+-- cada uma no seu intervalo, as rotinas so somam outra rodada quando a ultima soma tem mais de metade do intervalo
+-- do mudou-parou: duas rodadas a segundos uma da outra contam uma vez so. As rotinas a apagam junto com a contagem
+-- quando o servidor responde; a guarda de sistemas, quando a revisao vigente muda.
+ALTER TABLE sistemas ADD COLUMN conferencia_sem_resposta_em timestamptz;
 -- Fim do bloco CONFERENCIA.
 """
 
@@ -321,7 +326,7 @@ SQL_GUARDA_SISTEMAS = r"""
 -- 6. quarentena so sai para 'ativo', pelo despachante, com a versao 2026-07-28 e revisao nova no mesmo UPDATE (a
 --    conclusao da revisao do servidor), ou para 'desativado', pela entrada ou pelo dono (D27);
 -- 7. as regras da 0002: entrada e rotinas nao poem 'ativo'; a entrada so poe 'desativado' ou 'pendente';
--- 8. a contagem de rodadas sem resposta zera quando a revisao vigente muda.
+-- 8. a contagem de rodadas sem resposta zera quando a revisao vigente muda, e a hora da ultima soma tambem.
 -- Mudancas feitas pela guarda nao pedem GRANT de coluna (o mesmo padrao da 0002 com versao_mcp).
 CREATE OR REPLACE FUNCTION sistemas_guarda() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
@@ -388,6 +393,7 @@ BEGIN
   END IF;
   IF NEW.revisao_servidor_id IS DISTINCT FROM OLD.revisao_servidor_id THEN
     NEW.conferencias_sem_resposta := 0;
+    NEW.conferencia_sem_resposta_em := NULL;
   END IF;
   RETURN NEW;
 END $$;
@@ -469,8 +475,8 @@ GRANT INSERT ON revisoes_servidor TO mcp_claro_despachante;
 -- Conclusao da revisao e sondagem (despachante). A entrada e as rotinas nao tem UPDATE em revisao_servidor_id: so
 -- a guarda o apaga (quarentena, endereco, tipo de chave).
 GRANT UPDATE (revisao_servidor_id, sondagem_desfecho, versoes_anunciadas) ON sistemas TO mcp_claro_despachante;
--- Rodadas sem resposta ao mudou-parou (A5): so as rotinas contam.
-GRANT UPDATE (conferencias_sem_resposta) ON sistemas TO mcp_claro_rotinas;
+-- Rodadas sem resposta ao mudou-parou (A5): so as rotinas contam, com a hora da ultima soma.
+GRANT UPDATE (conferencias_sem_resposta, conferencia_sem_resposta_em) ON sistemas TO mcp_claro_rotinas;
 -- Tres sinais: a entrada grava e le (leitura, acao, alerta no pedido); as rotinas so apagam os velhos (o DELETE
 -- com WHERE le id e visto_em). O despachante nao tem acesso. A identidade de sinais nao pede GRANT de sequencia.
 GRANT SELECT, INSERT ON sinais TO mcp_claro_entrada;

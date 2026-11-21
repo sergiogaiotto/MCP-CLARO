@@ -21,11 +21,15 @@ de se isolar (nem importa ``mcp_claro.__main__``).
 O banco usa a imagem oficial do PostgreSQL com os scripts do repositorio montados, sem o pgBackRest (que so muda o
 backup), para a prova nao depender do repositorio apt do PGDG. A imagem do gateway e construida aqui, com uma
 etiqueta so desta rodada, salvo se ``MCP_CLARO_IMAGEM`` apontar uma imagem pronta (feita do mesmo codigo). Sem rede
-para construir a imagem (uma linha de erro de rede no log), a prova e pulada numa maquina comum, mas falha no CI
-(variavel ``CI`` ligada), com o fim do log: no CI, ela nunca some em silencio. Qualquer outra falha de construcao (um
-certificado recusado no pip, no uv ou no apt, um uv.lock ou um Dockerfile quebrado) falha a prova, no CI ou fora
-dele. O fixture ``projeto`` e a funcao ``montar_projeto``, sem nada no meio: os testes de construir ou pular rodam esse
-mesmo caminho com um projeto falso.
+para construir a imagem (uma linha de erro de rede no passo que falhou ou no bloco final do log), a prova e pulada
+numa maquina comum, mas falha no CI (variavel ``CI`` ligada), com o fim do log: no CI, ela nunca some em silencio. Um
+aviso de rede num passo que deu certo (o pip que tentou de novo e instalou, o apt que so avisou), ou num passo que o
+BuildKit cancelou porque outro falhou, nao conta. Qualquer outra falha de construcao (um certificado recusado no pip, no
+uv ou no apt, um uv.lock ou um Dockerfile quebrado, ou um log sem passo que falhou nem bloco final) falha a prova, no CI
+ou fora dele. O log junta a saida e o erro do Compose, nessa ordem: o Compose v5 escreve o progresso do BuildKit na
+saida e o fim no erro, e o ``docker build`` escreve tudo no erro; os testes rodam os dois jeitos. O fixture ``projeto``
+e a funcao ``montar_projeto``, sem nada no meio: os testes de construir ou pular rodam esse mesmo caminho com um projeto
+falso.
 """
 
 from __future__ import annotations
@@ -61,20 +65,31 @@ COPIAR = (
     "uv.lock",
     "README.md",
 )
-# Erros de rede na construcao da imagem (curl, apt, pip, uv e o BuildKit), casados linha a linha. Nao contam as
-# linhas em que o BuildKit repete o Dockerfile: o cabecalho de cada passo (``#6 [construcao 2/7] RUN ... pip install
-# ...``, impresso em todo log, ate do cache), o passo que falhou (`` > [construcao 5/7] RUN ...``), o trecho do
-# Dockerfile (``  11 | >>> RUN ...``) e o comando que falhou (``process "/bin/sh -c ..."``), no fim. O ``Failed to
-# fetch`` sozinho tambem nao conta: o uv e o apt o escrevem em toda falha de download, ate num certificado recusado
-# (``cause: invalid peer certificate: UnknownIssuer``, ``certificate verify failed``); numa falta de rede de verdade,
-# eles escrevem tambem a causa (``failed to lookup address information``, ``Temporary failure resolving``), e e ela
-# que conta. O Go do BuildKit escreve ``network is unreachable`` em minusculas.
+# Erros de rede na construcao da imagem (curl, apt, pip, uv e o BuildKit), casados linha a linha, so nas linhas que
+# dizem por que a construcao falhou (``linhas_da_falha``): as do passo que falhou e as do bloco final. Um aviso de rede
+# num passo que deu certo nao explica a falha de outro passo. Nao contam as linhas em que o BuildKit repete o
+# Dockerfile: o cabecalho de cada passo (``#6 [construcao 2/7] RUN ... pip install ...``, impresso em todo log, ate do
+# cache), o passo que falhou (`` > [construcao 5/7] RUN ...``), o trecho do Dockerfile (``  11 | >>> RUN ...``) e o
+# comando que falhou (``process "/bin/sh -c ..."``), no fim. O ``Failed to fetch`` sozinho tambem nao conta: o uv e o
+# apt o escrevem em toda falha de download, ate num certificado recusado (``cause: invalid peer certificate:
+# UnknownIssuer``, ``certificate verify failed``); numa falta de rede de verdade, eles escrevem tambem a causa
+# (``failed to lookup address information``, ``Temporary failure resolving``), e e ela que conta. O Go do BuildKit
+# escreve ``network is unreachable`` em minusculas.
 SEM_REDE = re.compile(
     r"Could not resolve|Temporary failure in name resolution|Temporary failure resolving|Name or service not known"
     r"|(?i:network is unreachable)|failed to lookup address information"
     r"|Failed to establish a new connection|dial tcp: lookup \S+.*: no such host"
 )
 ECO_DO_DOCKERFILE = re.compile(r'^#\d+ \[[^\]]*\] |^\s*> \[[^\]]*\] |^\s*\d+ \| |process "/bin/sh -c ')
+# No log do BuildKit (``--progress plain``, como o Compose escreve sem terminal), cada linha de um passo comeca por
+# ``#N `` e o passo que falhou termina em ``#N ERROR: ...``. Os passos que ainda rodavam quando outro falhou terminam em
+# ``#N CANCELED``: nao sao os que falharam. Depois de todos os passos vem o bloco final, sem prefixo: ``------``, o fim
+# da saida do passo que falhou, ``------``, o trecho do Dockerfile e ``failed to solve: ...`` (so esta linha, quando a
+# falha nao e de um passo com saida, como buscar a imagem de base). O Compose v5 escreve na saida os passos e o bloco
+# final ate o segundo ``------``, e no erro o resto; o ``docker build`` escreve tudo no erro.
+LINHA_DE_PASSO = re.compile(r"#(\d+) ")
+PASSO_QUE_FALHOU = re.compile(r"#(\d+) ERROR:")
+INICIO_DO_BLOCO_FINAL = re.compile(r"^\s*-{6,}\s*$|failed to solve")
 IMAGEM_BANCO = "postgres:18.7@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc"
 
 # So para esta prova: o banco sem o pgBackRest (a imagem do produto o instala do apt do PGDG).
@@ -270,9 +285,33 @@ def _no_ci() -> bool:
     return os.environ.get("CI", "").strip().lower() not in {"", "0", "false", "no"}
 
 
+def linhas_da_falha(log: str) -> list[str]:
+    """As linhas do log da construcao que dizem por que ela falhou: as de cada passo que falhou (o ``#N`` que tem a
+    linha ``#N ERROR:``) e as sem prefixo do bloco final (da primeira ``------`` ou ``failed to solve`` ate o fim).
+    Ficam de fora os passos que deram certo (ou vieram do cache, ou que o BuildKit cancelou porque outro falhou) e as
+    linhas sem prefixo antes do bloco final. Num log sem passo que falhou nem bloco final, nenhuma: nada ali diz que
+    faltou rede."""
+    linhas = log.splitlines()
+    falharam = {m.group(1) for linha in linhas if (m := PASSO_QUE_FALHOU.match(linha))}
+    escolhidas: list[str] = []
+    no_bloco_final = False
+    for linha in linhas:
+        passo = LINHA_DE_PASSO.match(linha)
+        if passo is not None:
+            if passo.group(1) in falharam:
+                escolhidas.append(linha)
+            continue
+        no_bloco_final = no_bloco_final or INICIO_DO_BLOCO_FINAL.search(linha) is not None
+        if no_bloco_final:
+            escolhidas.append(linha)
+    return escolhidas
+
+
 def linhas_sem_rede(log: str) -> list[str]:
-    """As linhas do log da construcao que sao erro de rede (fora as que so repetem o Dockerfile)."""
-    return [linha for linha in log.splitlines() if SEM_REDE.search(linha) and not ECO_DO_DOCKERFILE.search(linha)]
+    """As linhas de erro de rede que explicam a falha da construcao: so entre as ``linhas_da_falha`` (um aviso de rede
+    num passo que deu certo, como o pip que tentou de novo e instalou, nao conta), fora as que so repetem o
+    Dockerfile."""
+    return [linha for linha in linhas_da_falha(log) if SEM_REDE.search(linha) and not ECO_DO_DOCKERFILE.search(linha)]
 
 
 def _sem_rede_para_construir(log: str) -> NoReturn:
@@ -348,12 +387,16 @@ class Projeto:
 
 
 def construir_imagem(p: Projeto) -> None:
-    """Constroi a imagem do gateway para a prova. Sem rede (alguma linha de erro de rede no log): pula fora do CI e
-    falha no CI. Qualquer outra falha de construcao falha a prova, no CI ou fora dele."""
+    """Constroi a imagem do gateway para a prova. Sem rede (alguma linha de erro de rede no passo que falhou ou no
+    bloco final do log, ``linhas_sem_rede``): pula fora do CI e falha no CI. Qualquer outra falha de construcao falha a
+    prova, no CI ou fora dele."""
     construcao = p.compose("build", "visitas", verificar=False, prazo=1800)
     if construcao.returncode == 0:
         return
-    log = construcao.stdout + construcao.stderr
+    # O Compose v5 escreve o progresso do BuildKit na saida e o fim (o trecho do Dockerfile, ``failed to solve``) no
+    # erro; o ``docker build`` escreve tudo no erro. Uma saida sem fim de linha nao gruda na primeira linha do erro (que
+    # perderia o prefixo ``#N``).
+    log = "\n".join((construcao.stdout, construcao.stderr))
     if linhas_sem_rede(log):
         _sem_rede_para_construir(log)
     raise AssertionError(
@@ -575,6 +618,26 @@ LOG_CERTIFICADO = "\n".join(
 )
 # O uv.lock quebrado: o passo do uv falha sem tocar a rede. O passo do pip rodou (fora do cache), e o aviso do pip
 # tambem diz "pip install".
+PASSO_DO_UV = "RUN --mount=type=secret,id=ca_corporativa,required=false ...; uv sync --frozen --no-dev"
+PROCESSO_DO_UV = 'process "/bin/sh -c uv sync --frozen --no-dev"'
+
+
+def _lock_quebrado(n: int) -> list[str]:
+    """O passo ``#n`` do uv que falha com o uv.lock quebrado, e o bloco final do BuildKit."""
+    return [
+        f"#{n} [construcao 5/7] {PASSO_DO_UV}",
+        f"#{n} 0.071 error: Failed to parse `uv.lock`",
+        f"#{n} 0.071   Caused by: TOML parse error at line 1, column 6",
+        f"#{n} ERROR: {PROCESSO_DO_UV} did not complete successfully: exit code: 2",
+        "------",
+        f" > [construcao 5/7] {PASSO_DO_UV}:",
+        "0.071 error: Failed to parse `uv.lock`",
+        "0.071   Caused by: TOML parse error at line 1, column 6",
+        "------",
+        f"failed to solve: {PROCESSO_DO_UV} did not complete successfully: exit code: 2",
+    ]
+
+
 LOG_LOCK_QUEBRADO = "\n".join(
     [
         f"#6 [construcao 2/7] {PASSO_DO_PIP}",
@@ -582,11 +645,7 @@ LOG_LOCK_QUEBRADO = "\n".join(
         "#6 4.0 [notice] To update, run: pip install --upgrade pip",
         "#6 DONE 4.4s",
         "",
-        "#9 [construcao 5/7] RUN --mount=type=secret,id=ca_corporativa,required=false ...; uv sync --frozen --no-dev",
-        "#9 0.071 error: Failed to parse `uv.lock`",
-        "#9 0.071   Caused by: TOML parse error at line 1, column 6",
-        '#9 ERROR: process "/bin/sh -c uv sync --frozen --no-dev" did not complete successfully: exit code: 2',
-        'failed to solve: process "/bin/sh -c uv sync --frozen --no-dev" did not complete successfully: exit code: 2',
+        *_lock_quebrado(9),
         "",
     ]
 )
@@ -611,15 +670,171 @@ LOG_SEM_REDE_UV = "\n".join(
         "",
     ]
 )
+APT_SEM_REDE = [
+    "#5 [estagio-1 2/7] RUN --mount=type=secret,id=ca_corporativa,required=false ...;     apt-get update  &&"
+    " apt-get upgrade -y --no-install-recommends ...",
+    "#5 0.3 Err:1 http://deb.debian.org/debian trixie InRelease",
+    "#5 0.3   Temporary failure resolving 'deb.debian.org'",
+    "#5 0.4 W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Temporary failure resolving"
+    " 'deb.debian.org'",
+    "#5 0.4 W: Some index files failed to download. They have been ignored, or old ones used instead.",
+]
+# O apt do trixie sem rede so avisa (``W:``) e o passo segue: os avisos ficam num passo que deu certo.
+LOG_APT_QUE_SO_AVISOU = "\n".join([*APT_SEM_REDE, "#5 DONE 0.6s", ""])
+# O apt que falha sem rede ao baixar um pacote (``E: Failed to fetch``, e sai com 100): a causa e do passo que falhou.
 LOG_SEM_REDE_APT = "\n".join(
     [
-        "#5 [estagio-1 2/7] RUN --mount=type=secret,id=ca_corporativa,required=false ...;     apt-get update  &&"
-        " apt-get upgrade -y --no-install-recommends ...",
-        "#5 0.3 Err:1 http://deb.debian.org/debian trixie InRelease",
-        "#5 0.3   Temporary failure resolving 'deb.debian.org'",
-        "#5 0.4 W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Temporary failure resolving"
+        *APT_SEM_REDE,
+        "#5 0.5 E: Failed to fetch http://deb.debian.org/debian/pool/main/o/openssl/libssl3t64_3.5.1-1_amd64.deb"
+        "  Temporary failure resolving 'deb.debian.org'",
+        "#5 0.5 E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?",
+        '#5 ERROR: process "/bin/sh -c ... apt-get update && apt-get upgrade -y" did not complete successfully:'
+        " exit code: 100",
+        "",
+    ]
+)
+# O pip 26 sem rede (as linhas do pip sao de verdade, ``docker run --network none``), com o prefixo do BuildKit no
+# passo que falhou e o bloco final.
+AVISO_DO_PIP = (
+    "WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken"
+    " by 'NameResolutionError(\"HTTPSConnection(host='pypi.org', port=443): Failed to resolve 'pypi.org' ([Errno -3]"
+    " Temporary failure in name resolution)\")': /simple/uv/"
+)
+LOG_SEM_REDE_PIP = "\n".join(
+    [
+        f"#6 [construcao 2/7] {PASSO_DO_PIP}",
+        f"#6 1.2 {AVISO_DO_PIP}",
+        "#6 9.1 ERROR: Could not find a version that satisfies the requirement uv==0.13.9 (from versions: none)",
+        "#6 9.1 ERROR: No matching distribution found for uv==0.13.9",
+        f"#6 ERROR: {PROCESSO_DO_PIP} did not complete successfully: exit code: 1",
+        "------",
+        f" > [construcao 2/7] {PASSO_DO_PIP}:",
+        f"1.2 {AVISO_DO_PIP}",
+        "9.1 ERROR: No matching distribution found for uv==0.13.9",
+        "------",
+        f"failed to solve: {PROCESSO_DO_PIP} did not complete successfully: exit code: 1",
+        "",
+    ]
+)
+# Sem rede: o apt so avisa e o passo dele segue (deu certo), e o pip falha.
+LOG_SEM_REDE = LOG_APT_QUE_SO_AVISOU + "\n" + LOG_SEM_REDE_PIP
+# Trechos de dois logs de verdade (``docker build --no-cache --progress plain``, Docker 29.10), com as linhas longas
+# cortadas. Sem rede (``--network none``): o pip falha no ``#7``, o apt do outro estagio e cancelado, e o Docker novo
+# escreve ``ERROR: failed to build: failed to solve: ...`` no fim.
+APT_DE_VERDADE = "#6 [stage-1 2/8] RUN --mount=type=secret,id=ca_corporativa,required=false ...;     apt-get update ..."
+LOG_SEM_REDE_DE_VERDADE = "\n".join(
+    [
+        APT_DE_VERDADE,
+        "#6 2.305 Ign:1 http://deb.debian.org/debian trixie InRelease",
+        "#6 ...",
+        "",
+        f"#7 [construcao 2/7] {PASSO_DO_PIP}",
+        f"#7 1.668 {AVISO_DO_PIP}",
+        "#7 9.176 ERROR: No matching distribution found for uv==0.13.9",
+        f"#7 ERROR: {PROCESSO_DO_PIP} did not complete successfully: exit code: 1",
+        "",
+        APT_DE_VERDADE,
+        "#6 CANCELED",
+        "------",
+        f" > [construcao 2/7] {PASSO_DO_PIP}:",
+        f"1.668 {AVISO_DO_PIP}",
+        "9.176 ERROR: No matching distribution found for uv==0.13.9",
+        "------",
+        f"ERROR: failed to build: failed to solve: {PROCESSO_DO_PIP} did not complete successfully: exit code: 1",
+        "",
+    ]
+)
+# Com rede para o pip, mas o apt atras de um proxy http que nao existe, e o uv.lock quebrado (numa copia, um ``RUN sleep
+# 60`` antes do uv deixou o apt terminar): o apt avisou e o passo ``#6`` deu certo; o uv falhou depois, no ``#12``.
+UV_DE_VERDADE = (
+    "RUN --mount=type=secret,id=ca_corporativa,required=false ...;     uv sync --frozen --no-dev --no-install-project"
+)
+LOG_APT_SEM_PROXY_E_LOCK_DE_VERDADE = "\n".join(
+    [
+        APT_DE_VERDADE,
+        "#6 7.120 Err:3 http://deb.debian.org/debian-security trixie-security InRelease",
+        "#6 7.120   Could not resolve 'proxy-que-nao-existe.invalid'",
+        "#6 7.328 W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Could not resolve"
+        " 'proxy-que-nao-existe.invalid'",
+        "#6 7.328 W: Some index files failed to download. They have been ignored, or old ones used instead.",
+        "#6 7.391 0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
+        "#6 DONE 9.7s",
+        "",
+        f"#12 [construcao 6/8] {UV_DE_VERDADE}",
+        "#12 0.098 error: Failed to parse `uv.lock`",
+        "#12 0.098   cause: TOML parse error at line 1, column 6",
+        '#12 ERROR: process "/bin/sh -c ... uv sync --frozen --no-dev --no-install-project" did not complete'
+        " successfully: exit code: 2",
+        "------",
+        f" > [construcao 6/8] {UV_DE_VERDADE}:",
+        "0.098 error: Failed to parse `uv.lock`",
+        "------",
+        "ERROR: failed to build: failed to solve: process"
+        ' "/bin/sh -c ... uv sync --frozen --no-dev --no-install-project" did not complete successfully: exit code: 2',
+        "",
+    ]
+)
+# Um passo que o BuildKit cancelou porque outro falhou (``#N CANCELED``) nao e o que falhou. Trechos de dois logs de
+# verdade (``docker compose build``, Compose v5.7.1, ``build.network: none``, dois estagios em paralelo; o do pip e do
+# verificador do R3br): o apt (ou o pip) de um estagio avisa sem rede e segue rodando, o outro estagio falha com um TOML
+# quebrado (como um uv.lock quebrado), e o BuildKit cancela o primeiro. No Dockerfile do produto, o apt (``stage-1``)
+# roda em paralelo com o pip e o uv: o apt que so avisou tende a aparecer assim, cancelado, e nao como ``DONE``.
+RUN_DO_TOML = "RUN sleep 15 && printf 'isto nao e toml [[[\\n' > /tmp/uv.lock && python -c ..."
+PROCESSO_DO_TOML = (
+    "process \"/bin/sh -c sleep 15 && printf 'isto nao e toml [[[\\\\n' > /tmp/uv.lock && python -c ...\""
+)
+ERRO_DO_TOML = "tomllib.TOMLDecodeError: Expected '=' after a key in a key/value pair (at line 1, column 6)"
+
+
+def _toml_quebrado(n: int, estagio: str, tempo: str, cancelados: list[str], linha: int) -> list[str]:
+    """O passo ``#n`` que falha com o TOML quebrado, os passos que o BuildKit cancelou e o bloco final."""
+    passo = f"[{estagio} 2/2] {RUN_DO_TOML}"
+    return [
+        f"#{n} {passo}",
+        f"#{n} {tempo} Traceback (most recent call last):",
+        f"#{n} {tempo} {ERRO_DO_TOML}",
+        f"#{n} ERROR: {PROCESSO_DO_TOML} did not complete successfully: exit code: 1",
+        "",
+        *cancelados,
+        "------",
+        f" > {passo}:",
+        f"{tempo} {ERRO_DO_TOML}",
+        "------",
+        f"Dockerfile:{linha}",
+        "--------------------",
+        f"   {linha} | >>> {RUN_DO_TOML}",
+        "--------------------",
+        f"failed to solve: {PROCESSO_DO_TOML} did not complete successfully: exit code: 1",
+    ]
+
+
+APT_CANCELADO = "#6 [stage-1 2/3] RUN apt-get update && sleep 40 && echo fim > /tmp/fim"
+LOG_APT_CANCELADO_E_TOML_DE_VERDADE = "\n".join(
+    [
+        APT_CANCELADO,
+        "#6 0.093 Ign:1 http://deb.debian.org/debian trixie InRelease",
+        "#6 7.097 Err:1 http://deb.debian.org/debian trixie InRelease",
+        "#6 7.097   Temporary failure resolving 'deb.debian.org'",
+        "#6 7.111 W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Temporary failure resolving"
         " 'deb.debian.org'",
-        "#5 0.4 W: Some index files failed to download. They have been ignored, or old ones used instead.",
+        "#6 7.111 W: Some index files failed to download. They have been ignored, or old ones used instead.",
+        "#6 ...",
+        "",
+        *_toml_quebrado(7, "construcao", "15.28", [APT_CANCELADO, "#6 CANCELED"], 2),
+        "",
+    ]
+)
+PIP_CANCELADO = (
+    "#6 [avisa 2/2] RUN pip download --no-cache-dir --retries 1 --timeout 2 -d /tmp/x uv==0.13.9 || true; sleep 40; ..."
+)
+LOG_PIP_CANCELADO_E_TOML_DE_VERDADE = "\n".join(
+    [
+        PIP_CANCELADO,
+        f"#6 1.591 {AVISO_DO_PIP.replace('total=4', 'total=0')}",
+        "#6 1.595 ERROR: No matching distribution found for uv==0.13.9",
+        "#6 ...",
+        "",
+        *_toml_quebrado(7, "quebra", "15.35", [PIP_CANCELADO, "#6 CANCELED"], 4),
         "",
     ]
 )
@@ -640,6 +855,10 @@ ERROS_DE_REDE = [
     # o Go do BuildKit, em minusculas
     'failed to solve: failed to do request: Head "https://registry-1.docker.io/v2/library/python/manifests/3.14-slim":'
     " dial tcp 104.16.0.1:443: connect: network is unreachable",
+    # o mesmo pelo docker build do Docker 29, que abre o bloco final por "ERROR: failed to build:", sem ``------``
+    "ERROR: failed to build: failed to solve: python:3.14-slim: failed to resolve source metadata for"
+    ' docker.io/library/python:3.14-slim: failed to do request: Head "https://registry-1.docker.io/v2/library/python/'
+    'manifests/3.14-slim": dial tcp 104.16.0.1:443: connect: network is unreachable',
     "failed to solve: failed to resolve source metadata for docker.io/library/python:3.14-slim: failed to do request:"
     ' Head "https://registry-1.docker.io/v2/library/python/manifests/3.14-slim": dial tcp: lookup registry-1.docker.io'
     " on 127.0.0.11:53: no such host",
@@ -695,24 +914,105 @@ LOG_CERTIFICADO_APT = "\n".join(
     ]
 )
 OUTRAS_FALHAS = [LOG_CERTIFICADO, LOG_CERTIFICADO_UV, LOG_CERTIFICADO_APT, LOG_LOCK_QUEBRADO]
-# O BuildKit repetindo um Dockerfile que tivesse as mesmas palavras: nao e erro de rede.
+# Um aviso de rede num passo que deu certo, e depois uma falha que nao e de rede (a prova do verificador, R3b): o pip
+# que tentou de novo e instalou, ou o apt que so avisou, e o uv.lock quebrado ou um certificado recusado no uv. O pip
+# tambem escreve ``ERROR:`` sem falhar (o aviso do resolvedor, e sai com 0): so o ``#N ERROR:`` do BuildKit diz que o
+# passo falhou.
+ERRO_DO_PIP_QUE_PASSA = (
+    "ERROR: pip's dependency resolver does not currently take into account all the packages that are installed."
+    " This behaviour is the source of the following dependency conflicts."
+)
+AVISOS_QUE_PASSARAM = {
+    "pip_e_lock": LOG_LOCK_QUEBRADO.replace(
+        "#6 3.9 Successfully installed uv-0.13.9", f"#6 1.2 {AVISO_DO_PIP}\n#6 3.9 Successfully installed uv-0.13.9"
+    ),
+    "pip_com_error_e_lock": LOG_LOCK_QUEBRADO.replace(
+        "#6 3.9 Successfully installed uv-0.13.9",
+        f"#6 1.2 {AVISO_DO_PIP}\n#6 3.8 {ERRO_DO_PIP_QUE_PASSA}\n#6 3.9 Successfully installed uv-0.13.9",
+    ),
+    "apt_e_lock": LOG_APT_QUE_SO_AVISOU + "\n" + LOG_LOCK_QUEBRADO,
+    "apt_e_certificado_do_uv": LOG_APT_QUE_SO_AVISOU + "\n" + LOG_CERTIFICADO_UV,
+    "apt_sem_proxy_e_lock_de_verdade": LOG_APT_SEM_PROXY_E_LOCK_DE_VERDADE,
+    # o passo que avisou foi cancelado (``#6 CANCELED``) quando o outro falhou
+    "apt_cancelado_e_toml_de_verdade": LOG_APT_CANCELADO_E_TOML_DE_VERDADE,
+    "pip_cancelado_e_toml_de_verdade": LOG_PIP_CANCELADO_E_TOML_DE_VERDADE,
+}
+# O BuildKit repetindo, no passo que falhou e no bloco final, um Dockerfile que tivesse as mesmas palavras: nao e erro
+# de rede.
 ECOS = [
     "#6 [construcao 2/7] RUN curl -fsS https://x.exemplo || echo 'Could not resolve'",
+    "#6 ERROR: process \"/bin/sh -c curl -fsS https://x.exemplo || echo 'Could not resolve'\" did not complete"
+    " successfully: exit code: 1",
+    "------",
     " > [construcao 2/7] RUN echo Network is unreachable:",
+    "------",
     "   8 | >>>     apt-get update || echo 'Failed to fetch'",
     'failed to solve: process "/bin/sh -c echo Temporary failure in name resolution" did not complete successfully',
 ]
 
 
+def _no_passo_que_falhou(linha: str) -> str:
+    """Um log em que ``linha`` explica a falha: com o prefixo ``#N``, o passo ``#N`` termina em ``#N ERROR:`` (a linha
+    do comando, que so repete o Dockerfile); sem prefixo (``failed to solve: ...``), ela ja abre o bloco final."""
+    passo = LINHA_DE_PASSO.match(linha)
+    if passo is None:
+        return "\n".join([CABECALHOS, linha, ""])
+    fim = f'#{passo.group(1)} ERROR: process "/bin/sh -c ..." did not complete successfully: exit code: 1'
+    return "\n".join([CABECALHOS, linha, fim, ""])
+
+
+def _num_passo_que_deu_certo(linha: str) -> str:
+    """Um log em que ``linha`` e de um passo que deu certo (``#N DONE``), e a construcao falha depois noutro passo, o
+    ``#40``, com o uv.lock quebrado."""
+    passo = LINHA_DE_PASSO.match(linha)
+    assert passo is not None
+    assert passo.group(1) != "40"
+    return "\n".join([CABECALHOS, linha, f"#{passo.group(1)} DONE 1.0s", "", *_lock_quebrado(40), ""])
+
+
 @pytest.mark.parametrize("linha", ERROS_DE_REDE)
-def test_linha_de_erro_de_rede_conta_como_sem_rede(linha: str) -> None:
-    assert linhas_sem_rede(CABECALHOS + linha + "\n") == [linha]
+def test_linha_de_erro_de_rede_no_passo_que_falhou_conta_como_sem_rede(linha: str) -> None:
+    assert linhas_sem_rede(_no_passo_que_falhou(linha)) == [linha]
+
+
+@pytest.mark.parametrize("linha", [linha for linha in ERROS_DE_REDE if LINHA_DE_PASSO.match(linha)])
+def test_linha_de_erro_de_rede_num_passo_que_deu_certo_nao_conta(linha: str) -> None:
+    """O pip que tentou de novo e instalou, o apt que so avisou: o aviso nao explica a falha de outro passo."""
+    log = _num_passo_que_deu_certo(linha)
+    assert linha in log.splitlines()
+    assert linhas_sem_rede(log) == []
+    assert linhas_sem_rede(_no_passo_que_falhou(linha)) == [linha]  # a mesma linha, no passo que falhou, conta
+
+
+def test_linhas_da_falha_sao_as_do_passo_que_falhou_e_as_do_bloco_final() -> None:
+    """Nem os passos que deram certo (o ``#6`` do pip), nem as linhas sem prefixo antes do bloco final (a linha em
+    branco entre os passos)."""
+    assert linhas_da_falha(LOG_LOCK_QUEBRADO) == _lock_quebrado(9)
+    assert linhas_da_falha(LOG_SEM_REDE) == LOG_SEM_REDE_PIP.splitlines()  # o apt que so avisou fica de fora
+    # O passo que o BuildKit cancelou (``#6``, o apt que avisou) fica de fora, ate a repeticao do cabecalho dele.
+    cancelado = LOG_APT_CANCELADO_E_TOML_DE_VERDADE.splitlines()
+    assert "#6 CANCELED" in cancelado
+    assert linhas_da_falha(LOG_APT_CANCELADO_E_TOML_DE_VERDADE) == [
+        *(linha for linha in cancelado if linha.startswith("#7 ")),
+        *cancelado[cancelado.index("------") :],
+    ]
+    # So a linha do fim, quando a falha nao e de um passo com saida (buscar a imagem de base).
+    assert linhas_da_falha(CABECALHOS + ERROS_DE_REDE[-1] + "\n") == [ERROS_DE_REDE[-1]]
+
+
+@pytest.mark.parametrize("log", ["error: Could not resolve host: pypi.org\n", CABECALHOS + ERROS_DE_REDE[0] + "\n"])
+def test_log_sem_passo_que_falhou_nem_bloco_final_nao_conta_como_sem_rede(log: str) -> None:
+    """Nada ali diz que foi a rede que faltou: a prova falha (nao pula), para nunca sumir em silencio."""
+    assert linhas_da_falha(log) == []
+    assert linhas_sem_rede(log) == []
 
 
 @pytest.mark.parametrize("linha", SO_FAILED_TO_FETCH)
 def test_failed_to_fetch_sozinho_nao_conta_como_sem_rede(linha: str) -> None:
     """O uv e o apt escrevem "Failed to fetch" em toda falha de download, ate num certificado recusado."""
-    assert linhas_sem_rede(CABECALHOS + linha + "\n") == []
+    log = _no_passo_que_falhou(linha)
+    assert linha in linhas_da_falha(log)
+    assert linhas_sem_rede(log) == []
 
 
 @pytest.mark.parametrize(
@@ -733,12 +1033,21 @@ def test_log_sem_rede_do_uv_e_do_apt_conta_pela_causa(log: str, causa: str) -> N
     assert not any("Failed to fetch" in linha and "Temporary failure" not in linha for linha in linhas), linhas
 
 
-@pytest.mark.parametrize("log", [CABECALHOS, *OUTRAS_FALHAS, "\n".join(ECOS)])
+@pytest.mark.parametrize("log", [CABECALHOS, *OUTRAS_FALHAS, *AVISOS_QUE_PASSARAM.values(), "\n".join(ECOS)])
 def test_falha_que_nao_e_de_rede_nao_conta_como_sem_rede(log: str) -> None:
-    """O ``pip install`` do cabecalho de passo, um certificado recusado (no pip, no uv e no apt), um uv.lock quebrado
-    e o eco do Dockerfile."""
+    """O ``pip install`` do cabecalho de passo, um certificado recusado (no pip, no uv e no apt), um uv.lock quebrado,
+    um aviso de rede num passo que deu certo e o eco do Dockerfile."""
     assert "pip install" in LOG_CERTIFICADO + LOG_LOCK_QUEBRADO  # o que o SEM_REDE antigo casava em todo log
     assert "Failed to fetch" in LOG_CERTIFICADO_UV + LOG_CERTIFICADO_APT  # o que o SEM_REDE da etapa 4 casava
+    assert linhas_sem_rede(log) == []
+
+
+def test_eco_do_dockerfile_no_passo_que_falhou_nao_conta() -> None:
+    """As linhas que repetem o Dockerfile estao entre as que explicam a falha; e o filtro do eco que as tira."""
+    log = "\n".join(ECOS)
+    com_palavras_de_rede = [linha for linha in ECOS if SEM_REDE.search(linha)]
+    assert len(com_palavras_de_rede) == 4
+    assert set(com_palavras_de_rede) <= set(linhas_da_falha(log))
     assert linhas_sem_rede(log) == []
 
 
@@ -767,6 +1076,83 @@ class _ProjetoFalso(Projeto):
         return self.resultado
 
 
+# De verdade (verificador do R3br): o Dockerfile e o Compose do repositorio, sem rede (``build.network: none``), pelo
+# Compose v5.7.1 (Docker 29.10), com as linhas longas cortadas. Na saida, os passos e o bloco final ate o segundo
+# ``------``; no erro, o resto, com uma linha em branco depois de cada uma. O apt avisou sem rede e foi cancelado
+# (``#7``); o pip falhou sem rede (``#8``).
+APT_DO_PRODUTO = "#7 [stage-1 2/8] RUN --mount=type=secret,id=ca_corporativa,required=false ...;     apt-get update ..."
+SAIDA_DO_COMPOSE_SEM_REDE = "\n".join(
+    [
+        "#5 [construcao 1/7] FROM docker.io/library/python:3.14-slim@sha256:9aaa474097d0...",
+        "#5 CACHED",
+        "",
+        APT_DO_PRODUTO,
+        "#7 7.484 Err:3 http://deb.debian.org/debian-security trixie-security InRelease",
+        "#7 7.484   Temporary failure resolving 'deb.debian.org'",
+        "#7 7.542 W: Failed to fetch http://deb.debian.org/debian/dists/trixie/InRelease  Temporary failure resolving"
+        " 'deb.debian.org'",
+        "#7 7.542 W: Some index files failed to download. They have been ignored, or old ones used instead.",
+        "#7 ...",
+        "",
+        f"#8 [construcao 2/7] {PASSO_DO_PIP}",
+        f"#8 1.763 {AVISO_DO_PIP}",
+        "#8 9.274 ERROR: No matching distribution found for uv==0.13.9",
+        f"#8 ERROR: {PROCESSO_DO_PIP} did not complete successfully: exit code: 1",
+        "",
+        APT_DO_PRODUTO,
+        "#7 CANCELED",
+        "------",
+        f" > [construcao 2/7] {PASSO_DO_PIP}:",
+        f"1.763 {AVISO_DO_PIP}",
+        "9.274 ERROR: No matching distribution found for uv==0.13.9",
+        "------",
+        "",
+    ]
+)
+ERRO_DO_COMPOSE_SEM_REDE = " Image mcp-claro:sala-falsa Building \n" + "".join(
+    f"{linha}\n\n"
+    for linha in [
+        "Dockerfile:6",
+        "--------------------",
+        "   6 | >>> RUN --mount=type=secret,id=ca_corporativa,required=false \\",
+        "   7 | >>>     if [ -s /run/secrets/ca_corporativa ]; then export PIP_CERT=...; fi; \\",
+        "   8 | >>>     pip install --no-cache-dir uv==0.13.9",
+        "   9 |     WORKDIR /app",
+        "--------------------",
+        f"failed to solve: {PROCESSO_DO_PIP} did not complete successfully: exit code: 1",
+    ]
+)
+# Os dois jeitos de verdade de escrever o log do BuildKit: o do Compose v5 (o de cima) e o do ``docker build`` (Docker
+# 29.10), que poe tudo no erro.
+COMO_ESCREVEM = ("compose", "docker_build")
+
+
+def _saidas(log: str, como: str) -> dict[str, str]:
+    """A saida e o erro de um ``docker compose build`` que falhou com o ``log`` do BuildKit, escritos ``como``
+    (``COMO_ESCREVEM``). No jeito do Compose, um log sem bloco final vai inteiro para a saida."""
+    if como == "docker_build":
+        return {"stdout": "", "stderr": log}
+    linhas = log.splitlines()
+    tracos = [i for i, linha in enumerate(linhas) if linha == "------"]
+    corte = tracos[1] + 1 if len(tracos) > 1 else len(linhas)
+    return {
+        "stdout": "".join(f"{linha}\n" for linha in linhas[:corte]),
+        "stderr": " Image mcp-claro:sala-falsa Building \n" + "".join(f"{linha}\n\n" for linha in linhas[corte:]),
+    }
+
+
+def _falso(log: str, como: str, returncode: int = 1) -> _ProjetoFalso:
+    return _ProjetoFalso(returncode, **_saidas(log, como))
+
+
+def test_saidas_no_jeito_do_compose_sao_as_de_verdade() -> None:
+    """O jeito do Compose de ``_saidas`` (usado nos testes abaixo) da a saida e o erro de verdade."""
+    erro = [linha for linha in ERRO_DO_COMPOSE_SEM_REDE.splitlines()[1:] if linha]
+    log = SAIDA_DO_COMPOSE_SEM_REDE + "".join(f"{linha}\n" for linha in erro)  # como o docker build escreveria
+    assert _saidas(log, "compose") == {"stdout": SAIDA_DO_COMPOSE_SEM_REDE, "stderr": ERRO_DO_COMPOSE_SEM_REDE}
+    assert _saidas(log, "docker_build") == {"stdout": "", "stderr": log}
+
+
 def _no_ci_ou_nao(monkeypatch: pytest.MonkeyPatch, ci: str | None) -> None:
     if ci is None:
         monkeypatch.delenv("CI", raising=False)
@@ -790,34 +1176,120 @@ def _desfecho(p: Projeto) -> tuple[str, str]:
     return "segue", ""
 
 
-def test_construir_imagem_sem_rede_falha_no_ci(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("como", COMO_ESCREVEM)
+def test_construir_imagem_sem_rede_falha_no_ci(monkeypatch: pytest.MonkeyPatch, como: str) -> None:
     _no_ci_ou_nao(monkeypatch, "true")
-    p = _ProjetoFalso(1, stdout=CABECALHOS, stderr="#9 2.1 curl: (6) Could not resolve host: pypi.org\n")
+    p = _falso(LOG_SEM_REDE, como)
     desfecho, texto = _desfecho(p)
     assert desfecho == "falhou"
     assert "nao construiu no CI" in texto
-    assert texto.endswith("Could not resolve host: pypi.org\n")  # o fim do log vai junto
+    assert f"#6 ERROR: {PROCESSO_DO_PIP}" in texto  # o passo que falhou, da saida ou do erro
+    assert texto.endswith(p.resultado.stderr[-200:])  # o fim do log (o do erro) vai junto
     assert p.chamadas == [("build", "visitas")]
 
 
-@pytest.mark.parametrize("ci", [None, "false"])
-@pytest.mark.parametrize("log", ["Could not resolve host", LOG_SEM_REDE_UV])
-def test_construir_imagem_sem_rede_pula_fora_do_ci(monkeypatch: pytest.MonkeyPatch, ci: str | None, log: str) -> None:
+@pytest.mark.parametrize(("ci", "esperado"), [(None, "pulou"), ("true", "falhou")])
+def test_construir_imagem_sem_rede_com_a_saida_e_o_erro_de_verdade_do_compose(
+    monkeypatch: pytest.MonkeyPatch, ci: str | None, esperado: str
+) -> None:
+    """De verdade (Compose v5.7.1, o Dockerfile e o Compose do repositorio, sem rede): as linhas de rede que contam (as
+    do passo que falhou e as do bloco final) estao so na saida; o erro sozinho nao diz que faltou rede. O apt que avisou
+    sem rede e foi cancelado (``#7``) nao conta."""
+    assert not [linha for linha in ERRO_DO_COMPOSE_SEM_REDE.splitlines() if LINHA_DE_PASSO.match(linha)]
+    assert linhas_sem_rede(ERRO_DO_COMPOSE_SEM_REDE) == []
+    log = "\n".join((SAIDA_DO_COMPOSE_SEM_REDE, ERRO_DO_COMPOSE_SEM_REDE))
+    assert linhas_sem_rede(log) == [f"#8 1.763 {AVISO_DO_PIP}", f"1.763 {AVISO_DO_PIP}"]
     _no_ci_ou_nao(monkeypatch, ci)
-    desfecho, texto = _desfecho(_ProjetoFalso(1, stderr=log))
+    p = _ProjetoFalso(1, stdout=SAIDA_DO_COMPOSE_SEM_REDE, stderr=ERRO_DO_COMPOSE_SEM_REDE)
+    desfecho, texto = _desfecho(p)
+    assert desfecho == esperado, texto
+    if esperado == "falhou":
+        assert texto.endswith(ERRO_DO_COMPOSE_SEM_REDE[-200:])  # o fim do log vai junto
+        assert f"#8 1.763 {AVISO_DO_PIP}" in texto
+
+
+# Sem rede para buscar a imagem de base: o passo do BuildKit que falhou e o bloco final, que termina so na linha do
+# ``failed to solve``.
+LOG_SEM_REDE_BASE = "\n".join(
+    [
+        "#2 [internal] load metadata for docker.io/library/python:3.14-slim",
+        '#2 ERROR: failed to do request: Head "https://registry-1.docker.io/v2/library/python/manifests/3.14-slim":'
+        " dial tcp: lookup registry-1.docker.io on 127.0.0.11:53: no such host",
+        "------",
+        " > [internal] load metadata for docker.io/library/python:3.14-slim:",
+        "------",
+        ERROS_DE_REDE[-1],
+        "",
+    ]
+)
+
+
+@pytest.mark.parametrize("como", COMO_ESCREVEM)
+@pytest.mark.parametrize("ci", [None, "false"])
+@pytest.mark.parametrize(
+    "log", [LOG_SEM_REDE, LOG_SEM_REDE_DE_VERDADE, LOG_SEM_REDE_PIP, LOG_SEM_REDE_UV, LOG_SEM_REDE_BASE]
+)
+def test_construir_imagem_sem_rede_pula_fora_do_ci(
+    monkeypatch: pytest.MonkeyPatch, ci: str | None, log: str, como: str
+) -> None:
+    _no_ci_ou_nao(monkeypatch, ci)
+    desfecho, texto = _desfecho(_falso(log, como))
     assert (desfecho, texto) == ("pulou", "a imagem do gateway nao constroi aqui (sem rede para as dependencias)")
 
 
+@pytest.mark.parametrize("como", COMO_ESCREVEM)
+@pytest.mark.parametrize("ci", [None, "true"])
+@pytest.mark.parametrize("log", AVISOS_QUE_PASSARAM.values(), ids=AVISOS_QUE_PASSARAM.keys())
+def test_construir_imagem_com_aviso_de_rede_que_passou_e_outra_falha_falha_a_prova_dentro_e_fora_do_ci(
+    monkeypatch: pytest.MonkeyPatch, ci: str | None, log: str, como: str
+) -> None:
+    """A prova do verificador (R3b): o pip tentou de novo e instalou (ou o apt so avisou, ou o passo que avisou foi
+    cancelado), e depois o uv.lock quebrado (ou um certificado recusado no uv) derrubou a construcao. Nao foi a rede: a
+    prova falha, nao pula."""
+    avisos = [linha for linha in log.splitlines() if SEM_REDE.search(linha) and not ECO_DO_DOCKERFILE.search(linha)]
+    assert avisos  # o log tem erro de rede, mas so num passo que nao e o que falhou
+    _no_ci_ou_nao(monkeypatch, ci)
+    desfecho, texto = _desfecho(_falso(log, como))
+    assert desfecho == "nao_construiu", texto
+    assert texto.startswith("a imagem nao construiu")
+    assert "sem rede" not in texto
+
+
+@pytest.mark.parametrize("como", COMO_ESCREVEM)
+@pytest.mark.parametrize("ci", [None, "true"])
+def test_construir_imagem_sem_passo_que_falhou_nem_bloco_final_falha_a_prova(
+    monkeypatch: pytest.MonkeyPatch, ci: str | None, como: str
+) -> None:
+    """Um log que nao e do BuildKit nao diz que foi a rede que faltou: a prova falha (nao pula)."""
+    _no_ci_ou_nao(monkeypatch, ci)
+    desfecho, texto = _desfecho(_falso("error: Could not resolve host: pypi.org\n", como))
+    assert desfecho == "nao_construiu", texto
+
+
+def test_construir_imagem_nao_gruda_uma_saida_sem_fim_de_linha_na_primeira_linha_do_erro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defesa: com o progresso no erro (como o ``docker build`` escreve) e uma saida sem fim de linha (aqui o `` Image
+    ... Building ``, que o Compose v5 escreve no erro, e com fim de linha), a saida nao gruda na primeira linha do erro,
+    que perderia o prefixo ``#2``. Nos dois jeitos de verdade (``COMO_ESCREVEM``), grudar nao mudaria o desfecho."""
+    _no_ci_ou_nao(monkeypatch, None)
+    erro = LOG_SEM_REDE_BASE.splitlines()[1] + "\n"  # so a linha #2 ERROR, com a causa
+    desfecho, _ = _desfecho(_ProjetoFalso(1, stdout=" Image mcp-claro:sala-falsa Building", stderr=erro))
+    assert desfecho == "pulou"
+
+
+@pytest.mark.parametrize("como", COMO_ESCREVEM)
 @pytest.mark.parametrize("ci", [None, "true"])
 @pytest.mark.parametrize("log", OUTRAS_FALHAS)
 def test_construir_imagem_com_outra_falha_falha_a_prova_dentro_e_fora_do_ci(
-    monkeypatch: pytest.MonkeyPatch, ci: str | None, log: str
+    monkeypatch: pytest.MonkeyPatch, ci: str | None, log: str, como: str
 ) -> None:
     _no_ci_ou_nao(monkeypatch, ci)
-    desfecho, texto = _desfecho(_ProjetoFalso(1, stderr=log))
+    p = _falso(log, como)
+    desfecho, texto = _desfecho(p)
     assert desfecho == "nao_construiu"
     assert texto.startswith("a imagem nao construiu")
-    assert texto.endswith(log[-200:])  # o fim do log vai junto
+    assert texto.endswith(p.resultado.stderr[-200:])  # o fim do log (o do erro) vai junto
     assert "MCP_CLARO_IMAGEM" in texto
 
 
@@ -866,7 +1338,7 @@ def test_fixture_sem_rede_falha_no_ci_e_derruba(monkeypatch: pytest.MonkeyPatch)
     """O fixture constroi a imagem por ``construir_imagem``: no CI, sem rede, a prova falha (nao pula)."""
     _no_ci_ou_nao(monkeypatch, "true")
     monkeypatch.delenv("MCP_CLARO_IMAGEM", raising=False)
-    falso = _ProjetoFalso(1, stderr=LOG_SEM_REDE_UV)
+    falso = _falso(LOG_SEM_REDE, "compose")
     desfecho, texto = _desfecho_do_fixture(falso)
     assert desfecho == "falhou", texto
     assert "nao construiu no CI" in texto
@@ -880,7 +1352,7 @@ def test_fixture_sem_rede_falha_no_ci_e_derruba(monkeypatch: pytest.MonkeyPatch)
 def test_fixture_sem_rede_pula_fora_do_ci(monkeypatch: pytest.MonkeyPatch, ci: str | None) -> None:
     _no_ci_ou_nao(monkeypatch, ci)
     monkeypatch.delenv("MCP_CLARO_IMAGEM", raising=False)
-    falso = _ProjetoFalso(1, stderr=LOG_SEM_REDE_UV)
+    falso = _falso(LOG_SEM_REDE_UV, "compose")
     assert _desfecho_do_fixture(falso) == (
         "pulou",
         "a imagem do gateway nao constroi aqui (sem rede para as dependencias)",
@@ -894,7 +1366,21 @@ def test_fixture_com_certificado_recusado_falha_dentro_e_fora_do_ci(
 ) -> None:
     _no_ci_ou_nao(monkeypatch, ci)
     monkeypatch.delenv("MCP_CLARO_IMAGEM", raising=False)
-    falso = _ProjetoFalso(1, stderr=LOG_CERTIFICADO_UV)
+    falso = _falso(LOG_CERTIFICADO_UV, "compose")
+    desfecho, texto = _desfecho_do_fixture(falso)
+    assert desfecho == "nao_construiu", texto
+    assert texto.startswith("a imagem nao construiu")
+    assert falso.chamadas == [("build", "visitas"), ("down", "-v", "--remove-orphans")]
+
+
+@pytest.mark.parametrize("caso", ["pip_e_lock", "apt_cancelado_e_toml_de_verdade"])
+@pytest.mark.parametrize("ci", [None, "true"])
+def test_fixture_com_aviso_de_rede_que_passou_e_lock_quebrado_falha_dentro_e_fora_do_ci(
+    monkeypatch: pytest.MonkeyPatch, ci: str | None, caso: str
+) -> None:
+    _no_ci_ou_nao(monkeypatch, ci)
+    monkeypatch.delenv("MCP_CLARO_IMAGEM", raising=False)
+    falso = _falso(AVISOS_QUE_PASSARAM[caso], "compose")
     desfecho, texto = _desfecho_do_fixture(falso)
     assert desfecho == "nao_construiu", texto
     assert texto.startswith("a imagem nao construiu")
@@ -918,7 +1404,7 @@ def test_fixture_que_construiu_sobe_entrega_e_derruba(monkeypatch: pytest.Monkey
 def test_fixture_com_imagem_pronta_nao_constroi_nem_apaga_a_imagem(monkeypatch: pytest.MonkeyPatch) -> None:
     _no_ci_ou_nao(monkeypatch, "true")
     monkeypatch.setenv("MCP_CLARO_IMAGEM", "mcp-claro:pronta")
-    falso = _ProjetoFalso(1, stderr=LOG_SEM_REDE_UV)  # o build daria errado, mas nao roda
+    falso = _falso(LOG_SEM_REDE_UV, "compose")  # o build daria errado, mas nao roda
     assert _desfecho_do_fixture(falso) == ("segue", "")
     assert falso.imagem == "mcp-claro:pronta"
     assert falso.chamadas == [("up", "-d", "--wait", "despachante", "visitas"), ("down", "-v", "--remove-orphans")]

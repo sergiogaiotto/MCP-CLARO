@@ -4,6 +4,8 @@ Um POST por chamada, sem reenvio (``retries=0``), sem seguir desvio, sem proxy d
 mais uma folga (a sala ainda confere o endereco e espera o terceiro). Classificacao:
 
 - conexao com a sala recusada ou sem completar (TCP ou TLS): ``nao_enviado`` (``SalaFora``);
+- pedido que o escritor de JSON nao consegue montar (argumentos com 256 niveis ou mais, um dentro do outro):
+  ``nao_enviado`` (``PEDIDO_FUNDO_DEMAIS``), antes de abrir conexao com a sala;
 - qualquer outra falha, prazo, status que nao seja 200 ou corpo fora do contrato: ``duvida``;
 - 200 com corpo do contrato: a classificacao que a sala deu.
 
@@ -20,7 +22,7 @@ import anyio
 import httpx2
 from pydantic import SecretStr, ValidationError
 
-from mcp_claro.ligacao.cliente import TETO_RESPOSTA_PADRAO, Resposta, Segredo, Sondagem
+from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, TETO_RESPOSTA_PADRAO, Resposta, Segredo, Sondagem
 from mcp_claro.ligacao.sala_contrato import (
     MOTIVO_PEDIDO_FORA,
     PEDIDO_FORA_DO_CONTRATO,
@@ -124,7 +126,12 @@ class ClienteSala:
             )
         except ValidationError:
             return Resposta("nao_enviado", excecao=PEDIDO_FORA_DO_CONTRATO)
-        saida = await self._postar(ROTA_CHAMAR, pedido.para_json(), prazo + self._folga)
+        try:
+            corpo = pedido.para_json()
+        except ValueError, RecursionError:
+            # O escritor do pydantic para em 256 niveis (PydanticSerializationError, um ValueError): nada saiu.
+            return Resposta("nao_enviado", excecao=PEDIDO_FUNDO_DEMAIS)
+        saida = await self._postar(ROTA_CHAMAR, corpo, prazo + self._folga)
         return resposta_sala_fora() if saida is None else ler_resposta_chamar(*saida)
 
     async def listar_ferramentas(

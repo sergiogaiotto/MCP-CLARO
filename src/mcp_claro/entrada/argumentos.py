@@ -39,10 +39,10 @@ de ``enum`` e ``const``) vezes o tamanho do pedido. Por isso, duas barreiras, ca
    ``required``, ``properties`` e as outras de ``_PELO_ESQUEMA``) ou das partes do pedido (``items``,
    ``contains``, ``additionalProperties``, ``propertyNames`` e as outras de ``_PELO_PEDIDO``). ``enum`` e ``const``
    comparam listas e objetos parte por parte, e cada par de partes comparado conta mais um passo (``_igual``, com
-   o mesmo veredito da biblioteca). ``$ref`` le o texto inteiro da referencia a cada vez que a segue, e conta mais
-   um passo a cada ``LETRAS_POR_PASSO`` letras dele (``_REFERENCIAS``; ``$dynamicRef`` tambem, por defesa). Cada
-   erro achado conta, em cada palavra por onde passa, ``PASSOS_POR_ERRO`` e
-   mais um a cada ``LETRAS_POR_PASSO`` letras da mensagem (a mensagem repete o valor conferido, e ``anyOf``/``oneOf``
+   o mesmo veredito da biblioteca). ``$ref`` le o texto inteiro da referencia a cada vez que a segue: conta
+   ``PASSOS_POR_REFERENCIA`` passos a mais e mais um a cada ``LETRAS_POR_PASSO`` letras dele (``_REFERENCIAS``;
+   ``$dynamicRef`` tambem, por defesa). Cada erro achado conta, em cada palavra por onde passa, ``PASSOS_POR_ERRO``
+   e mais um a cada ``LETRAS_POR_PASSO`` letras da mensagem (a mensagem repete o valor conferido, e ``anyOf``/``oneOf``
    guardam os erros de todos os ramos). Um esquema ``false`` num ramo de ``anyOf``/``oneOf`` ou em ``not``, ``if`` e
    ``contains`` e conferido como ``{"not": {}}``, o mesmo veredito, para o erro dele tambem contar: sem isso, a
    biblioteca escreveria o pedido inteiro numa mensagem que ninguem conta. Passou do orcamento, a conferencia para e
@@ -55,9 +55,10 @@ conferencia gasta em Python. Ficam fora da conta, presos so pelos tetos do pedid
 ``REFERENCIA_MAXIMA`` letras em cada ``$ref`` e em cada nome de definicao), duas coisas: o que a biblioteca faz de
 uma vez sobre um valor so (comparar dois textos ou dois numeros, escrever o valor na mensagem de um erro antes de o
 erro ser contado) e a primeira conferencia de cada esquema (``check_schema``), que fica guardada. Os passos nao
-custam todos o mesmo: seguir uma referencia, mesmo curta, custa mais que a media (50 mil passos so de referencias,
-uns 0,3 s de CPU nesta maquina). Um esquema caro pode recusar ate pedido valido; quem simplifica e o fornecedor.
-Nada disso e garantia.
+custam todos o mesmo. Seguir uma referencia, mesmo curta, custa uns 7 microssegundos de CPU nesta maquina, contra 1 a
+3 de um passo comum; por isso cada referencia seguida conta ``PASSOS_POR_REFERENCIA`` passos a mais (sem eles, 50 mil
+passos so de referencias levavam de 0,3 a 0,5 s de CPU; com eles, uns 0,1 s, perto dos outros casos). Um esquema caro
+pode recusar ate pedido valido; quem simplifica e o fornecedor. Nada disso e garantia.
 """
 
 from __future__ import annotations
@@ -120,7 +121,14 @@ PASSOS_POR_ERRO: Final = 4
 """Passos de cada erro achado na conferencia de um terceiro, alem das letras da mensagem: cada erro guardado (com os
 caminhos e o contexto) ocupa de 1,5 a 3 KB, e ``anyOf``/``oneOf`` guardam os erros de todos os ramos."""
 LETRAS_POR_PASSO: Final = 100
-"""Cada erro achado na conferencia de um terceiro conta mais um passo a cada tantas letras da mensagem."""
+"""Cada erro achado na conferencia de um terceiro conta mais um passo a cada tantas letras da mensagem. Vale tambem
+para cada ``$ref`` (e ``$dynamicRef``, por defesa): cada vez que a conferencia segue a referencia, conta mais um passo a
+cada tantas letras do texto dela (``_passos``)."""
+PASSOS_POR_REFERENCIA: Final = 3
+"""Passos fixos a mais por referencia seguida (``$ref``, e ``$dynamicRef`` por defesa) na conferencia de um terceiro,
+alem do passo da palavra e das letras do texto (``LETRAS_POR_PASSO``). Seguir uma referencia, mesmo curta, custa uns
+7 microssegundos de CPU nesta maquina, contra 1 a 3 de um passo comum: com 3 a mais, um passo de referencia custa
+perto dos outros. Um pedido que gasta ate um quarto do orcamento com a conta sem este custo continua cabendo nele."""
 RECUSA_ORCAMENTO: Final = "O esquema deste servidor ficou caro demais para conferir este pedido. Nada foi enviado."
 PROBLEMA_FUNDO: Final = "(raiz): aninhamento fundo demais para conferir com o esquema"
 """Problema da frase quando a conferencia estoura a pilha do Python (``RecursionError``)."""
@@ -293,17 +301,18 @@ e ``unevaluated*`` sao recusadas na revisao de terceiro e ficam aqui so por defe
 
 _REFERENCIAS: Final = frozenset({"$ref", "$dynamicRef"})
 """Palavras que buscam a parte citada a cada chamada, lendo o texto da referencia inteiro (``referencing``: decodifica,
-corta e procura cada pedaco): um passo a mais a cada ``LETRAS_POR_PASSO`` letras. ``$dynamicRef`` e recusada na
-revisao de terceiro e fica aqui so por defesa."""
+corta e procura cada pedaco, e monta um novo resolvedor): ``PASSOS_POR_REFERENCIA`` passos a mais, e mais um a cada
+``LETRAS_POR_PASSO`` letras. ``$dynamicRef`` e recusada na revisao de terceiro e fica aqui so por defesa."""
 
 
 def _passos(nome: str, valor: Any, instancia: Any) -> int:
     """Passos de uma chamada da palavra ``nome``: um, e mais um por item que ela percorre (``_PELO_ESQUEMA`` e
     ``_PELO_PEDIDO``). ``dependentRequired`` percorre tambem a lista de nomes de cada campo, e ``$ref`` (como
-    ``$dynamicRef``) le o texto da referencia (``_REFERENCIAS``)."""
+    ``$dynamicRef``) segue a referencia: ``PASSOS_POR_REFERENCIA`` a mais, e as letras do texto dela
+    (``_REFERENCIAS``)."""
     passos = 1
     if nome in _REFERENCIAS and isinstance(valor, str):
-        passos += len(valor) // LETRAS_POR_PASSO
+        passos += PASSOS_POR_REFERENCIA + len(valor) // LETRAS_POR_PASSO
     if nome in _PELO_ESQUEMA and isinstance(valor, list | dict):
         tipo = _PELO_ESQUEMA[nome]
         if tipo is None or isinstance(instancia, tipo):

@@ -27,8 +27,15 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.db.engine import criar_engine
 from mcp_claro.despachante import chaves
 from mcp_claro.despachante.app import criar_app_despachante
-from mcp_claro.despachante.servico import TETO_NOME_NO_EXTRATO, DeclaracoesIndisponiveis, Despachante, RevisaoRecusada
+from mcp_claro.despachante.servico import (
+    TETO_NOME_NO_EXTRATO,
+    DeclaracoesIndisponiveis,
+    DeclaracoesNaoConferidas,
+    Despachante,
+    RevisaoRecusada,
+)
 from mcp_claro.ligacao import sala_contrato
+from mcp_claro.ligacao.sala_cliente import ClienteSala
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.versao import VERSAO_MCP
 from tests import apoio_g3a as g
@@ -485,8 +492,9 @@ async def test_cofre_que_nao_abre_a_chave_das_declaracoes(terceiro: Terceiro, ba
     with pytest.raises(RevisaoRecusada) as recusa:
         await fora.revisar_servidor(t.sistema_id, publicar=["consultar_pedido"], fornecedor="Fornecedor", quem="ana")
     assert recusa.value.motivo == "chave_indisponivel"
-    with pytest.raises(DeclaracoesIndisponiveis):
+    with pytest.raises(DeclaracoesNaoConferidas) as nao_conferidas:
         await fora.ler_declaracoes(t.sistema_id, None)
+    assert nao_conferidas.value.motivo == "chave_indisponivel"
     app = criar_app_despachante(
         banco_migrado.model_copy(update={"APP_ENV": "teste"}),
         t.desp_db,
@@ -496,8 +504,9 @@ async def test_cofre_que_nao_abre_a_chave_das_declaracoes(terceiro: Terceiro, ba
     transporte = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transporte, base_url="http://despachante") as http:
         r = await http.post("/interno/declaracoes", json={"sistema_id": str(t.sistema_id)})
-    assert r.status_code == 502
-    assert r.json()["motivo"] == "declaracoes_indisponiveis"
+    # A falha e do MCP-CLARO, nao do servidor (critica A5): 503 com motivo proprio, que as rotinas nao contam.
+    assert r.status_code == 503
+    assert r.json()["motivo"] == "chave_indisponivel"
     assert t.app.posts == 0  # sem a chave aberta, nada vai ao servidor
     assert await t.revisoes() == []
 
@@ -576,11 +585,10 @@ async def test_declaracao_que_o_banco_nao_guarda_e_recusada_sem_erro_interno(
 
 
 class _FalhaComStatus(sala_contrato.FalhaNaSala):
-    """A listagem pela sala recusada com um 3xx, no contrato pedido ao G1 (``FalhaNaSala`` com ``status_http``)."""
+    """A listagem pela sala recusada com um 3xx (``FalhaNaSala`` com ``status_http``, do contrato)."""
 
     def __init__(self) -> None:
-        super().__init__("recusado_http", "desvio")
-        self.status_http = (307,)
+        super().__init__("recusado_http", "desvio", status_http=(307,))
 
 
 class _ListagemQueFalha:
@@ -598,8 +606,9 @@ async def test_listagem_de_terceiro_sem_sala_ou_desviada_vai_ao_extrato_e_conta(
     t = terceiro
     fora_antes = _medidas("sala_fora", onde="declaracoes")
     t.app.zerar()
-    with pytest.raises(DeclaracoesIndisponiveis):
+    with pytest.raises(DeclaracoesNaoConferidas) as sem_sala:
         await g.despachante(t.desp_db, t.cifra, local=False).ler_declaracoes(t.sistema_id, None)
+    assert sem_sala.value.motivo == "sala_fora"
     assert t.app.posts == 0
     assert await g.tipos_no_extrato(t.dono, t.sistema_id) == ["sala_fora"]
     assert _medidas("sala_fora", onde="declaracoes") == fora_antes + 1
@@ -614,3 +623,99 @@ async def test_listagem_de_terceiro_sem_sala_ou_desviada_vai_ao_extrato_e_conta(
     with pytest.raises(DeclaracoesIndisponiveis):
         await kit.ler_declaracoes(t.sistema_id, None)
     assert await g.tipos_no_extrato(t.dono, t.sistema_id) == ["sala_fora", "sala_desvio_recusado"]
+
+
+# --- G3r (etapa 4r) ----------------------------------------------------------------------------------------------
+
+
+async def test_desvio_na_listagem_de_terceiro_pelo_caminho_de_verdade_vai_ao_extrato_e_conta(
+    terceiro: Terceiro,
+) -> None:
+    """O servidor responde 307 ao ``tools/list``: pelo cliente local (so em teste) e pela sala (o mesmo contrato que
+    o filho da sala roda), a listagem e recusada com ``sala_desvio_recusado`` e o contador, sem seguir o desvio."""
+    t = terceiro
+    await t.modo("redireciona")
+    antes = _medidas("sala_desvio_recusado", onde="declaracoes")
+    with pytest.raises(DeclaracoesIndisponiveis) as local:
+        await t.desp.ler_declaracoes(t.sistema_id, None)
+    assert not isinstance(local.value, DeclaracoesNaoConferidas)  # foi o servidor: conta para as rotinas
+    async with servidor(g.sala_em_processo()) as sala:
+        pela_sala = g.despachante(t.desp_db, t.cifra, sala=ClienteSala(sala, tls=None), local=False)
+        with pytest.raises(DeclaracoesIndisponiveis) as pela:
+            await pela_sala.ler_declaracoes(t.sistema_id, None)
+    assert not isinstance(pela.value, DeclaracoesNaoConferidas)
+    assert await g.tipos_no_extrato(t.dono, t.sistema_id) == ["sala_desvio_recusado", "sala_desvio_recusado"]
+    assert _medidas("sala_desvio_recusado", onde="declaracoes") == antes + 2
+    assert t.app.app.state.contagem.chamadas.get("http307") == 2  # dois POSTs, nenhum seguido
+
+
+async def test_listagem_que_pede_chave_nao_e_desvio(terceiro: Terceiro) -> None:
+    t = terceiro
+    await t.modo("recusa_chave")
+    with pytest.raises(DeclaracoesIndisponiveis):
+        await t.desp.ler_declaracoes(t.sistema_id, None)
+    assert await g.tipos_no_extrato(t.dono, t.sistema_id) == []
+
+
+@pytest.mark.parametrize("estranho", ["\x00", "\ud800"], ids=["nulo", "surrogate"])
+@pytest.mark.parametrize("campo", ["fornecedor", "quem", "publicar"])
+async def test_caractere_nulo_no_texto_do_admin_e_pedido_invalido_sem_erro_interno(
+    terceiro: Terceiro, banco_migrado: Parametros, campo: str, estranho: str
+) -> None:
+    """Texto que o banco nao guarda: o caractere nulo (U+0000) e um pedaco de par UTF-16 sozinho (``\\ud800``, que o
+    JSON aceita e o UTF-8 nao escreve). Os dois davam erro 500 depois de o servidor ja ter sido lido."""
+    t = terceiro
+    await t.revisar("consultar_pedido")
+    p = banco_migrado.model_copy(update={"APP_ENV": "teste"})
+    app = criar_app_despachante(p, t.desp_db, t.cifra, local_para_terceiro=g.LOCAL_DE_TESTE, liberar_locais=True)
+    corpo: dict[str, Any] = {
+        "sistema_id": str(t.sistema_id),
+        "publicar": ["consultar_pedido"],
+        "fornecedor": "Fornecedor de fora",
+        "quem": "admin-ana",
+    }
+    corpo[campo] = ["consultar_pedido", f"con{estranho}sultar"] if campo == "publicar" else f"Forne{estranho}cedor"
+    t.app.zerar()
+    async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://despachante") as http:
+        # json.dumps escreve o pedaco sozinho como o escape \ud800 (ASCII), como um cliente qualquer mandaria.
+        r = await http.post(
+            "/interno/revisao_servidor", content=json.dumps(corpo), headers={"content-type": "application/json"}
+        )
+    assert (r.status_code, r.json()["motivo"]) == (400, "pedido_invalido")
+    assert t.app.posts == 0
+    assert await t.revisoes() == []
+    assert await g.tipos_no_extrato(t.dono, t.sistema_id) == []
+
+
+async def test_versao_que_cai_entre_a_leitura_e_a_trava_recusa_sem_gravar(terceiro: Terceiro) -> None:
+    """Em quarentena, a sondagem recusada por versao apaga ``versao_mcp`` e mantem a situacao e o motivo. Se isso
+    acontece entre a leitura fresca e a trava, a conclusao e recusada (``situacao_mudou``), nunca erro interno."""
+    t = terceiro
+    await t.revisar("consultar_pedido")
+    assert (await t.concluir("consultar_pedido"))["revisado"] is True
+    async with t.dono.begin() as c:
+        await t3.por_em_quarentena(c, t.sistema_id, "mudou, parou: teste")
+    revisoes_antes = len(await t.revisoes())
+
+    class VersaoCaiNoMeio:
+        def __init__(self, sistema: Any) -> None:
+            self.sistema = sistema
+
+        async def listar_ferramentas(self, *a: Any, **k: Any) -> list[dict[str, Any]]:
+            lidas = await g.LOCAL_DE_TESTE.listar_ferramentas(*a, **k)
+            async with t.dono.begin() as c:
+                await c.execute(text("UPDATE sistemas SET versao_mcp = NULL WHERE id = :s"), {"s": t.sistema_id})
+            return lidas
+
+    t.desp._ligacao = VersaoCaiNoMeio  # type: ignore[assignment]
+    with pytest.raises(RevisaoRecusada) as recusa:
+        await t.concluir("consultar_pedido")
+    assert recusa.value.motivo == "situacao_mudou"
+    sistema = await t.sistema()
+    assert (sistema.situacao, sistema.motivo, sistema.revisao_servidor_id) == (
+        "quarentena",
+        "mudou, parou: teste",
+        None,
+    )
+    assert len(await t.revisoes()) == revisoes_antes
+    assert (await g.tipos_no_extrato(t.dono, t.sistema_id))[-1] == "admin_servidor_revisao_recusada"

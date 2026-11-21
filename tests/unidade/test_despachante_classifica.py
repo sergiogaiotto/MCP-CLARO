@@ -98,7 +98,8 @@ def porta() -> PortaDeSaida:
 
 
 async def classificar(resposta: cliente.Resposta, aberta: Any = None) -> tuple[Estado, Any, str]:
-    return await porta()._classificar(OP, FERRAMENTA, resposta, aberta)
+    estado, corpo, desfecho, _ = await porta()._classificar(OP, FERRAMENTA, resposta, aberta)
+    return estado, corpo, desfecho
 
 
 async def test_resultado_vira_enviada_sem_o_meta_do_sistema(vencidas: list[dict[str, Any]]) -> None:
@@ -227,7 +228,7 @@ async def test_excecao_no_envio_vira_nao_confirmada(monkeypatch: pytest.MonkeyPa
         return "segredo", None, None
 
     monkeypatch.setattr(p, "_chave", chave)
-    estado, corpo, desfecho = await p._enviar(OP, FERRAMENTA, None, None)
+    estado, corpo, desfecho, _ = await p._enviar(OP, FERRAMENTA, None, None)
     assert estado == Estado.NAO_CONFIRMADA
     assert corpo is None
     assert desfecho == "falha inesperada durante o envio"
@@ -247,7 +248,7 @@ async def test_sem_chave_nao_sai_e_nao_chama_o_sistema(monkeypatch: pytest.Monke
         return None, None, "a pessoa ainda nao autorizou o sistema"
 
     monkeypatch.setattr(p, "_chave", chave)
-    estado, _, desfecho = await p._enviar(OP, FERRAMENTA, None, None)
+    estado, _, desfecho, _ = await p._enviar(OP, FERRAMENTA, None, None)
     assert (estado, desfecho) == (Estado.NAO_SAIU, "a pessoa ainda nao autorizou o sistema")
     assert chamadas == []
 
@@ -288,8 +289,8 @@ TEXTOS_DO_SISTEMA = (mal_comportado.PHISH, mal_comportado.TEXTO_SENHA, "Entre aq
 @pytest.mark.parametrize(
     ("modo", "o_que"),
     [
-        ("pede_link", "um link"),
-        ("pede_dados", "dados num formulario"),
+        ("pede_link", "que a pessoa abrisse um link"),
+        ("pede_dados", "dados por formulario"),
         ("pede_amostragem", "uma resposta da IA do aplicativo"),
         ("pede_raizes", "a lista de pastas do aplicativo"),
         ("pede_so_estado", "uma nova volta"),
@@ -318,7 +319,7 @@ async def test_resultado_normal_com_pedido_barrado_saiu_e_o_desfecho_conta_o_ped
     assert estado == Estado.ENVIADA
     assert corpo is not None
     assert corpo["content"] == [{"type": "text", "text": "Pedido em transito."}]
-    assert desfecho == "o sistema respondeu; antes pediu dados pelo fio antigo e o MCP-CLARO recusou"
+    assert desfecho == "o sistema respondeu; antes pediu algo fora do padrao 2026-07-28 e o MCP-CLARO recusou"
     assert ("pedidos_do_sistema_barrados", {"tipo": "fio_antigo:elicitation/create", "onde": "acao"}) in contados
 
 
@@ -326,10 +327,8 @@ async def test_resultado_com_erro_e_pedido_barrado_continua_enviada() -> None:
     resultado = types.CallToolResult(content=[types.TextContent(type="text", text="falhou")], isError=True)
     estado, _, desfecho = await classificar(_com_pedidos(resultado, "ping", "nao-sei"))
     assert estado == Estado.ENVIADA
-    assert desfecho == (
-        "o sistema respondeu com erro; antes pediu um pedido desconhecido pelo fio antigo e um sinal de vida"
-        " pelo fio antigo e o MCP-CLARO recusou"
-    )
+    # Pelo fio antigo, qualquer metodo (conhecido ou nao) e o mesmo texto, uma vez so.
+    assert desfecho == "o sistema respondeu com erro; antes pediu algo fora do padrao 2026-07-28 e o MCP-CLARO recusou"
 
 
 async def test_link_pelo_codigo_antigo_continua_nao_confirmada_sem_o_link(vencidas: list[dict[str, Any]]) -> None:
@@ -348,7 +347,7 @@ async def test_link_pelo_codigo_antigo_continua_nao_confirmada_sem_o_link(vencid
     assert (estado, corpo) == (Estado.NAO_CONFIRMADA, None)
     assert desfecho == (
         f"o sistema devolveu erro depois de receber (codigo {types.URL_ELICITATION_REQUIRED}); o sistema pediu"
-        " um link (pelo codigo antigo) e o MCP-CLARO recusou"
+        " que a pessoa abrisse um link e o MCP-CLARO recusou"
     )
     assert mal_comportado.PHISH not in desfecho
     assert vencidas == []
@@ -456,7 +455,7 @@ async def test_resposta_da_sala_so_e_nao_saiu_com_200_no_contrato(
 ) -> None:
     # Critica B6: um 500 da sala ou um corpo fora do contrato e duvida (a sala pode ter chamado o terceiro).
     resposta = sala_contrato.ler_resposta_chamar(status, corpo)
-    final, _, _ = await porta()._classificar(OP, FERRAMENTA_T, resposta, ABERTA)
+    final, _, _, _ = await porta()._classificar(OP, FERRAMENTA_T, resposta, ABERTA)
     assert final == estado
     assert vencidas == []
 
@@ -470,21 +469,25 @@ async def test_sala_que_nao_atende_e_nao_saiu() -> None:
 
     resposta = await sala.chamar_ferramenta("https://t.exemplo/mcp", obter, None, "criar_chamado", {}, prazo=2.0)
     assert (resposta.tipo, resposta.excecao) == ("nao_enviado", sala_contrato.SALA_FORA)
-    final, _, _ = await porta()._classificar(OP, FERRAMENTA_T, resposta, None)
+    final, _, _, _ = await porta()._classificar(OP, FERRAMENTA_T, resposta, None)
     assert final == Estado.NAO_SAIU
 
 
 def test_pedidos_legiveis_so_com_o_nosso_vocabulario() -> None:
-    assert pedidos_legiveis([]) == "dados"
-    assert pedidos_legiveis(["link", "link"]) == "um link"
+    # O mesmo vocabulario da leitura (``ligacao.ponto``): a porta e o despachante dizem o mesmo.
+    from mcp_claro.despachante import servico
+    from mcp_claro.ligacao import ponto
+
+    assert pedidos_legiveis is ponto.pedidos_legiveis is servico.pedidos_legiveis
+    assert linha_da_sala is ponto.linha_da_sala is servico.linha_da_sala
+    assert pedidos_legiveis([]) == "algo fora do padrao 2026-07-28"
+    assert pedidos_legiveis(["link", "link", "link_codigo_antigo"]) == "que a pessoa abrisse um link"
     assert pedidos_legiveis(["formulario", "link", "raizes"]) == (
-        "dados num formulario, um link e a lista de pastas do aplicativo"
+        "dados por formulario, que a pessoa abrisse um link e a lista de pastas do aplicativo"
     )
-    assert pedidos_legiveis(["fio_antigo:roots/list"]) == "a lista de pastas do aplicativo pelo fio antigo"
+    assert pedidos_legiveis(["fio_antigo:roots/list", "fio_antigo:ping"]) == "algo fora do padrao 2026-07-28"
     # Categoria fora do vocabulario (nunca deveria chegar) nao e repetida no texto.
-    assert pedidos_legiveis(["<a href=x>clique</a>", "fio_antigo:<b>"]) == (
-        "um pedido desconhecido e um pedido desconhecido pelo fio antigo"
-    )
+    assert pedidos_legiveis(["<a href=x>clique</a>", "fio_antigo:<b>"]) == "algo fora do padrao 2026-07-28"
 
 
 @pytest.mark.parametrize(
@@ -572,8 +575,12 @@ def _com_chave(p: PortaDeSaida, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(p, "_chave", chave)
 
 
+@pytest.mark.parametrize("ferramenta", [FERRAMENTA, FERRAMENTA_T], ids=["proprio", "terceiro"])
 async def test_envio_sai_pela_ligacao_do_sistema_e_nunca_pelo_cliente_local(
-    monkeypatch: pytest.MonkeyPatch, sem_cliente_local: list[str], linhas: list[dict[str, Any]]
+    monkeypatch: pytest.MonkeyPatch,
+    sem_cliente_local: list[str],
+    linhas: list[dict[str, Any]],
+    ferramenta: FerramentaVitrine,
 ) -> None:
     falsa = LigacaoFalsa(cliente.Resposta("resultado", resultado=types.CallToolResult(content=[])))
     pedidas: list[Sistema] = []
@@ -584,12 +591,72 @@ async def test_envio_sai_pela_ligacao_do_sistema_e_nunca_pelo_cliente_local(
 
     p = PortaDeSaida(engine=None, cifra=None, ligacao=ligacao)  # type: ignore[arg-type]
     _com_chave(p, monkeypatch)
-    estado, _, _ = await p._enviar(OP, FERRAMENTA_T, None, None)
+    estado, _, _, _ = await p._enviar(OP, ferramenta, None, None)
     assert estado == Estado.ENVIADA
-    assert pedidas == [TERCEIRO]
-    assert falsa.chamadas == [("https://t.exemplo/mcp", "criar_chamado", "chave-ana")]
+    assert pedidas == [ferramenta.sistema]
+    assert falsa.chamadas == [(ferramenta.sistema.endereco, "criar_chamado", "chave-ana")]
     assert sem_cliente_local == []
     assert linhas == []
+
+
+async def test_os_pedidos_do_sistema_vao_do_envio_ao_fim_gravado(
+    monkeypatch: pytest.MonkeyPatch, sem_cliente_local: list[str], linhas: list[dict[str, Any]]
+) -> None:
+    resposta = cliente.Resposta(
+        "resultado", resultado=types.CallToolResult(content=[]), pedidos=("fio_antigo:elicitation/create",)
+    )
+    p = PortaDeSaida(engine=EngineFalso(), cifra=None, ligacao=lambda _s: LigacaoFalsa(resposta))  # type: ignore[arg-type]
+    _com_chave(p, monkeypatch)
+    estado, corpo, desfecho, pedidos = await p._enviar(OP, FERRAMENTA_T, None, None)
+    assert (estado, pedidos) == (Estado.ENVIADA, ("fio_antigo:elicitation/create",))
+    gravados: list[tuple[Estado, tuple[str, ...]]] = []
+
+    async def finalizar(_c: Any, _op: Any, estado: Estado, *_: Any, pedidos: Any = ()) -> bool:
+        gravados.append((estado, tuple(pedidos)))
+        return True
+
+    monkeypatch.setattr(porta_de_saida.fila, "finalizar", finalizar)
+    await p._gravar_fim(OP, estado, corpo, desfecho, pedidos=pedidos)
+    assert gravados == [(Estado.ENVIADA, ("fio_antigo:elicitation/create",))]
+
+
+@pytest.mark.parametrize(
+    ("ambiente", "liberar_locais"), [("producao", False), ("teste", True)], ids=["padrao", "teste"]
+)
+async def test_renovacao_da_chave_por_pessoa_leva_o_ambiente_da_porta(
+    monkeypatch: pytest.MonkeyPatch, ambiente: str, liberar_locais: bool
+) -> None:
+    pedidos: list[dict[str, Any]] = []
+
+    async def chave_pronta(_engine: Any, _cifra: Any, **kw: Any) -> Any:
+        pedidos.append(kw)
+        return SimpleNamespace(segredo="chave-ana", cifrada="vault:v1:x")
+
+    monkeypatch.setattr(porta_de_saida.renovacao, "chave_pronta", chave_pronta)
+    extra = {} if ambiente == "producao" else {"ambiente": ambiente, "liberar_locais": liberar_locais}
+    p = PortaDeSaida(engine=None, cifra=None, **extra)  # type: ignore[arg-type]
+    segredo, _, sem_chave = await p._chave(OP, FERRAMENTA_T)
+    assert (segredo, sem_chave) == ("chave-ana", None)
+    assert [(k["ambiente"], k["liberar_locais"]) for k in pedidos] == [(ambiente, liberar_locais)]
+
+
+async def test_origem_que_nao_se_le_e_nao_saiu_com_a_frase_da_chave(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mcp_claro.despachante.cifra_origem import CifraPorOrigem, OrigemIndisponivel
+
+    async def falha(_: Any) -> str | None:
+        raise OSError("sem conexao nova")
+
+    cifra = CifraPorOrigem(propria=None, terceiros=None, origem_de=falha)  # type: ignore[arg-type]
+
+    async def chave_pronta(_engine: Any, c: Any, **kw: Any) -> Any:
+        await c.decifrar("vault:v1:x", b"mcp-claro|" + str(kw["sistema_id"]).encode() + b"|p:x")
+        raise AssertionError("nao chega aqui")
+
+    monkeypatch.setattr(porta_de_saida.renovacao, "chave_pronta", chave_pronta)
+    p = PortaDeSaida(engine=None, cifra=cifra)  # type: ignore[arg-type]
+    with pytest.raises(OrigemIndisponivel):
+        await cifra.origem(uuid.uuid4())
+    assert await p._chave(OP, FERRAMENTA_T) == (None, None, "nao deu para abrir a chave no cofre")
 
 
 async def test_sem_a_ligacao_do_app_o_terceiro_fica_sem_sala_e_nada_sai(
@@ -601,7 +668,7 @@ async def test_sem_a_ligacao_do_app_o_terceiro_fica_sem_sala_e_nada_sai(
     engine = EngineFalso()
     p = PortaDeSaida(engine=engine, cifra=None)  # type: ignore[arg-type]
     _com_chave(p, monkeypatch)
-    estado, corpo, desfecho = await p._enviar(OP, FERRAMENTA_T, None, None)
+    estado, corpo, desfecho, _ = await p._enviar(OP, FERRAMENTA_T, None, None)
     assert (estado, corpo) == (Estado.NAO_SAIU, None)
     assert "sala de visitas" in desfecho
     assert sem_cliente_local == []  # nunca o cliente local para um terceiro
@@ -617,7 +684,7 @@ async def test_sem_a_ligacao_do_app_o_proprio_vai_pelo_cliente_fixado(
 ) -> None:
     p = PortaDeSaida(engine=None, cifra=None)  # type: ignore[arg-type]
     _com_chave(p, monkeypatch)
-    estado, _, _ = await p._enviar(OP, FERRAMENTA, None, None)
+    estado, _, _, _ = await p._enviar(OP, FERRAMENTA, None, None)
     assert estado == Estado.ENVIADA
     assert sem_cliente_local == [SISTEMA.endereco]
     assert linhas == []
@@ -634,7 +701,7 @@ async def test_desvio_de_terceiro_grava_a_linha_da_sala_antes_do_fim(
     falsa = LigacaoFalsa(cliente.Resposta("recusado_http", status_http=(307,)))
     p = PortaDeSaida(engine=EngineFalso(), cifra=None, ligacao=lambda _s: falsa)  # type: ignore[arg-type]
     _com_chave(p, monkeypatch)
-    estado, _, desfecho = await p._enviar(OP, FERRAMENTA_T, None, None)
+    estado, _, desfecho, _ = await p._enviar(OP, FERRAMENTA_T, None, None)
     assert (estado, desfecho) == (Estado.NAO_SAIU, "o sistema recusou na porta (HTTP 307)")
     assert [linha["tipo"] for linha in linhas] == ["sala_desvio_recusado"]
     assert linhas[0]["dados"] == {"onde": "acao", "status_http": [307]}
@@ -648,7 +715,7 @@ async def test_linha_da_sala_que_nao_grava_nao_muda_o_fim(monkeypatch: pytest.Mo
     falsa = LigacaoFalsa(cliente.Resposta("nao_enviado", excecao=cliente.ENDERECO_RECUSADO))
     p = PortaDeSaida(engine=EngineFalso(), cifra=None, ligacao=lambda _s: falsa)  # type: ignore[arg-type]
     _com_chave(p, monkeypatch)
-    estado, _, _ = await p._enviar(OP, FERRAMENTA_T, None, None)
+    estado, _, _, _ = await p._enviar(OP, FERRAMENTA_T, None, None)
     assert estado == Estado.NAO_SAIU
 
 
@@ -671,7 +738,7 @@ async def test_resultado_fundo_demais_saiu_sem_resultado_e_nunca_vira_erro_inter
     resultado = types.CallToolResult(
         content=[types.TextContent(type="text", text="ok")], structured_content=_fundo(300)
     )
-    estado, corpo, desfecho = await porta()._classificar(
+    estado, corpo, desfecho, _ = await porta()._classificar(
         OP, ferramenta, cliente.Resposta("resultado", resultado=resultado), ABERTA
     )
     assert (estado, corpo, desfecho) == (Estado.ENVIADA, None, porta_de_saida.RESULTADO_FUNDO_DEMAIS)
@@ -695,8 +762,10 @@ async def test_annotations_de_bloco_so_ficam_para_sistema_proprio() -> None:
     resultado = types.CallToolResult(
         content=[types.TextContent(type="text", text="ok", annotations=types.Annotations(audience=["assistant"]))]
     )
-    _, proprio, _ = await porta()._classificar(OP, FERRAMENTA, cliente.Resposta("resultado", resultado=resultado), None)
-    _, terceiro, _ = await porta()._classificar(
+    _, proprio, _, _ = await porta()._classificar(
+        OP, FERRAMENTA, cliente.Resposta("resultado", resultado=resultado), None
+    )
+    _, terceiro, _, _ = await porta()._classificar(
         OP, FERRAMENTA_T, cliente.Resposta("resultado", resultado=resultado), None
     )
     assert proprio is not None
@@ -717,7 +786,10 @@ async def test_pedido_que_a_resposta_nao_listou_e_lido_do_proprio_resultado() ->
     resposta = cliente.Resposta("resultado", resultado=_resultado("pede_link"), status_http=(200,))
     assert resposta.pedidos == ()
     estado, _, desfecho = await classificar(resposta)
-    assert (estado, desfecho) == (Estado.SISTEMA_PEDIU_DADOS, "o sistema pediu um link no meio da acao")
+    assert (estado, desfecho) == (
+        Estado.SISTEMA_PEDIU_DADOS,
+        "o sistema pediu que a pessoa abrisse um link no meio da acao",
+    )
 
 
 @pytest.mark.parametrize(("folga", "guardado"), [(0, True), (1, False)])
@@ -805,7 +877,7 @@ async def test_pedido_com_niveis_demais_nao_chama_a_ligacao_nem_abre_a_chave(
     p = PortaDeSaida(engine=EngineFalso(), cifra=None, ligacao=lambda _s: falsa)  # type: ignore[arg-type]
     abertas = _chave_contada(p, monkeypatch)
     op = _op_com(_argumentos_com_niveis(porta_de_saida.TETO_NIVEIS_PEDIDO + folga))
-    estado, corpo, desfecho = await p._enviar(op, FERRAMENTA_T, None, None)
+    estado, corpo, desfecho, _ = await p._enviar(op, FERRAMENTA_T, None, None)
     if chamada:
         assert estado == Estado.ENVIADA
         assert len(falsa.chamadas) == len(abertas) == 1
@@ -833,7 +905,7 @@ async def test_pedido_com_niveis_demais_e_nao_saiu_pelo_cliente_fixado_e_pela_sa
         ligacao=lambda s: ponto.ligacao_para(s, ambiente="producao", sala=sala),
     )
     abertas = _chave_contada(p, monkeypatch)
-    estado, corpo, desfecho = await p._enviar(_op_com(_argumentos_com_niveis(300)), ferramenta, None, None)
+    estado, corpo, desfecho, _ = await p._enviar(_op_com(_argumentos_com_niveis(300)), ferramenta, None, None)
     assert (estado, corpo, desfecho) == (Estado.NAO_SAIU, None, FUNDO_DEMAIS)
     assert abertas == []
     assert linhas == []

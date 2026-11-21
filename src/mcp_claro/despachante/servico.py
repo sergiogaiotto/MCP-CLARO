@@ -23,6 +23,8 @@ Fase 3 (servidores de terceiros):
 - resultado fundo demais (partes demais umas dentro das outras) vira erro nosso legivel, nunca erro interno;
 - a revisao do servidor (``revisar_servidor``) le o servidor de novo, com a chave de leitura das declaracoes
   guardada, e so publica o que foi revisto e nao mudou;
+- nas declaracoes, a falha que e do MCP-CLARO (sala de visitas fora, cofre que nao abre a chave) e
+  ``DeclaracoesNaoConferidas``, com motivo proprio: as rotinas nao a contam como "sem resposta" do servidor;
 - a sondagem separa o desfecho: so "versao" conta como versao antiga, e um terceiro ativo e revisado que deixa de
   falar a 2026-07-28 vai a quarentena (D29).
 """
@@ -49,9 +51,16 @@ from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.despachante.cifra_origem import ContextoSemSistema
 from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente
-from mcp_claro.ligacao.cliente import ENDERECO_RECUSADO, Resposta, Sondagem
-from mcp_claro.ligacao.ponto import Ligacao, ligacao_para
-from mcp_claro.ligacao.sala_contrato import SALA_FORA, FalhaNaSala
+from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, Resposta, Sondagem, TipoResultado
+from mcp_claro.ligacao.ponto import (
+    LINHA_SALA_FORA,
+    Ligacao,
+    ligacao_para,
+    linha_da_sala,
+    pedidos_da_resposta,
+    pedidos_legiveis,
+)
+from mcp_claro.ligacao.sala_contrato import FalhaNaSala
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios, estado, estranhos, programas
@@ -72,25 +81,11 @@ TETO_NIVEIS_RESPOSTA: Final = 199
 """Niveis de listas e objetos, um dentro do outro, que um resultado pode ter ao voltar a entrada. E o que o leitor
 de JSON do kit aceita numa mensagem (200 niveis, contando o envelope): mais fundo, nem o aplicativo leria."""
 
-PEDIDO_FUNDO_DEMAIS: Final = "pedido_fundo_demais"
-"""``Resposta.excecao`` do cliente fixado quando o kit nao consegue escrever os argumentos (nada foi enviado)."""
-
 MOTIVO_QUARENTENA_VERSAO: Final = (
     "mudou, parou: o servidor de terceiros deixou de falar a versao 2026-07-28 na sondagem; precisa de nova sondagem"
     " e de nova revisao do ADMIN"
 )
 """``sistemas.motivo`` do terceiro ativo e revisado que a sondagem recusou por versao (D29)."""
-
-PEDIDOS_LEGIVEIS: Final[dict[str, str]] = {
-    cliente.PEDIDO_FORMULARIO: "dados por formulario",
-    cliente.PEDIDO_LINK: "que a pessoa abrisse um link",
-    cliente.PEDIDO_AMOSTRAGEM: "uma resposta da IA do aplicativo",
-    cliente.PEDIDO_RAIZES: "a lista de pastas do aplicativo",
-    cliente.PEDIDO_SO_ESTADO: "uma nova volta",
-    cliente.PEDIDO_LINK_CODIGO_ANTIGO: "que a pessoa abrisse um link",
-}
-FORA_DO_PADRAO: Final = "algo fora do padrao 2026-07-28"
-"""Pedido pelo fio antigo (``fio_antigo:<metodo>``), em qualquer metodo."""
 
 MENSAGEM_CHAVE_INDISPONIVEL: Final = (
     "Nao deu para abrir a chave deste sistema no cofre agora. Nada foi enviado. Tente de novo em instantes."
@@ -106,7 +101,17 @@ TETO_FERRAMENTAS_NO_EXTRATO: Final = 50
 
 
 class DeclaracoesIndisponiveis(Exception):
-    """O sistema nao respondeu a listagem (sem chave, fora do ar ou resposta invalida)."""
+    """O sistema nao entregou as declaracoes (fora do ar, recusou, resposta invalida): 502 na porta interna."""
+
+
+class DeclaracoesNaoConferidas(DeclaracoesIndisponiveis):
+    """A falha e do MCP-CLARO, nao do sistema: a sala de visitas fora (``sala_fora``) ou o cofre que nao abriu a
+    chave das declaracoes (``chave_indisponivel``). A porta interna responde 503 com ``motivo``, e as rotinas nao
+    contam a rodada como "sem resposta" do servidor (critica A5)."""
+
+    def __init__(self, motivo: str, mensagem: str) -> None:
+        super().__init__(mensagem)
+        self.motivo = motivo
 
 
 class LeituraRecusada(Exception):
@@ -150,51 +155,32 @@ def _resultado_de_erro(texto: str, motivo: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": texto}], "isError": True, "_meta": {MOTIVO: motivo}}
 
 
-def pedidos_legiveis(pedidos: Iterable[str]) -> str:
-    """Os pedidos do sistema em palavras nossas, sem repeticao (vai a frase do extrato e ao texto ao aplicativo)."""
-    textos: list[str] = []
-    for pedido in pedidos:
-        legivel = PEDIDOS_LEGIVEIS.get(pedido, FORA_DO_PADRAO)
-        if legivel not in textos:
-            textos.append(legivel)
-    return ", ".join(textos) or FORA_DO_PADRAO
-
-
-def pedidos_da_resposta(resposta: Resposta) -> tuple[str, ...]:
-    """O que o sistema pediu no meio da chamada: o que o cliente (ou a sala) contou e o que o proprio resultado ou
-    erro mostra (conferido de novo aqui: uma resposta da sala sem a lista nao passa um ``InputRequiredResult``)."""
-    proprios = cliente.pedidos_do_sistema(resposta.resultado, resposta.erro, ())
-    return tuple(sorted(set(resposta.pedidos) | set(proprios)))
-
-
-def linha_da_sala(resposta: Resposta | Sondagem, sistema: Sistema) -> str | None:
-    """A linha do extrato da sala de visitas para esta resposta de um terceiro (``sala_*``), ou None."""
-    if not sistema.de_terceiro:
-        return None
-    if resposta.excecao == SALA_FORA:
-        return "sala_fora"
-    if resposta.excecao == ENDERECO_RECUSADO:
-        return "sala_endereco_recusado"
-    desvio = (
-        resposta.desfecho == "desvio"
-        if isinstance(resposta, Sondagem)
-        else resposta.tipo == "recusado_http" and bool(resposta.status_http) and 300 <= resposta.status_http[-1] < 400
-    )
-    return "sala_desvio_recusado" if desvio else None
+_TIPOS_DA_LISTAGEM: Final[dict[str, TipoResultado]] = {
+    "nao_enviado": "nao_enviado",
+    "duvida": "duvida",
+    "recusado_http": "recusado_http",
+}
 
 
 def resposta_da_listagem(erro: Exception) -> Resposta:
     """A falha da listagem de um sistema como ``Resposta``, para achar a linha ``sala_*`` (``linha_da_sala``).
 
-    A sala diz o que houve em ``FalhaNaSala`` (``tipo`` e ``excecao``); o cliente local levanta a propria excecao
-    (``EnderecoRecusado``, por exemplo). Um desvio 3xx so e reconhecido quando a falha traz ``status_http`` (o
-    contrato pedido ao G1 para ``FalhaNaSala`` e para a excecao do cliente local); sem ele, a listagem segue
-    recusada, sem a linha ``sala_desvio_recusado``."""
+    A sala diz o que houve em ``FalhaNaSala`` (``tipo``, ``excecao`` e, num desvio ou numa chave recusada,
+    ``status_http``). O cliente local levanta a propria excecao: ``EnderecoRecusado`` (ou o nome que nao resolve)
+    antes de enviar, ``ListagemRecusada`` com o ``status_http`` quando o sistema recusou (3xx, 401, 403), e o resto
+    depois de enviar (duvida). Com o ultimo status de recusa, o tipo e ``recusado_http`` (um 3xx e desvio)."""
     status = getattr(erro, "status_http", ())
     status_http = tuple(s for s in status if isinstance(s, int)) if isinstance(status, tuple) else ()
-    excecao = erro.excecao if isinstance(erro, FalhaNaSala) else type(erro).__name__
-    # So a linha da sala le esta Resposta: com status, o sistema respondeu e recusou (um 3xx e desvio).
-    return Resposta("recusado_http" if status_http else "nao_enviado", excecao=excecao, status_http=status_http)
+    tipo: TipoResultado
+    if isinstance(erro, FalhaNaSala):
+        tipo, excecao = _TIPOS_DA_LISTAGEM.get(erro.tipo, "duvida"), erro.excecao
+    else:
+        tipo = "nao_enviado" if isinstance(erro, cliente.EnderecoRecusado | OSError) else "duvida"
+        excecao = type(erro).__name__
+    if status_http and cliente.recusado_por_status(status_http[-1]):
+        tipo = "recusado_http"
+    # So a linha da sala le esta Resposta.
+    return Resposta(tipo, excecao=excecao, status_http=status_http)
 
 
 _FALHAS: Final[dict[str, str]] = {
@@ -651,8 +637,9 @@ class Despachante:
         - ``aceito``: pendente e recusado ficam ativos; quarentena e desativado continuam como estao (em quarentena,
           a versao volta a valer, mas so a conclusao da revisao do servidor tira de la);
         - ``versao`` (so este conta como versao antiga): recusado, salvo desativado e quarentena. Um terceiro ativo e
-          revisado vai a quarentena antes (D29): extrato, fila e limites. A contagem vai depois do commit, com
-          ``cadastro_terceiro`` ou ``cadastro``;
+          revisado vai a quarentena antes (D29): extrato, fila e limites. Ativo e revisado e lido sob a trava
+          exclusiva do sistema, na transacao da gravacao, e nao antes da sondagem. A contagem vai depois do commit,
+          com ``cadastro_terceiro`` ou ``cadastro``;
         - ``desvio``, ``nao_mcp``, ``sem_acesso`` e ``inalcancavel``: a situacao nao muda, so o motivo (sem veredito);
           em quarentena, nem o motivo (continua o da quarentena).
         """
@@ -683,15 +670,25 @@ class Despachante:
                 )
             elif sondagem.desfecho == "versao":
                 recusa_versao = True
-                if sistema.de_terceiro and sistema.situacao == "ativo" and sistema.revisao_servidor_id is not None:
-                    # D29, antes de qualquer outro UPDATE: trava do sistema, linha, limites e fila, nesta ordem.
-                    quarentena = await por_em_quarentena(
-                        c,
-                        sistema_id=sistema_id,
-                        base=sistema.revisao_servidor_id,
-                        papel="despachante",
-                        motivo=MOTIVO_QUARENTENA_VERSAO,
-                    )
+                if sistema.de_terceiro:
+                    # D29, antes de qualquer outro UPDATE: trava do sistema, linha, limites e fila, nesta ordem. A
+                    # situacao e a revisao vigente sao lidas de novo sob a trava: o ADMIN pode ter concluido uma
+                    # revisao (ou as rotinas posto em quarentena) enquanto a sondagem falava com o servidor.
+                    await travas.exclusiva(c, travas.chaves_do_alcance("sistema", sistema_id=sistema_id))
+                    agora = (
+                        await c.execute(
+                            text("SELECT situacao, revisao_servidor_id FROM sistemas WHERE id = :i FOR UPDATE"),
+                            {"i": sistema_id},
+                        )
+                    ).first()
+                    if agora is not None and agora.situacao == "ativo" and agora.revisao_servidor_id is not None:
+                        quarentena = await por_em_quarentena(
+                            c,
+                            sistema_id=sistema_id,
+                            base=uuid.UUID(str(agora.revisao_servidor_id)),
+                            papel="despachante",
+                            motivo=MOTIVO_QUARENTENA_VERSAO,
+                        )
                 await c.execute(
                     text(
                         "UPDATE sistemas SET situacao = CASE WHEN situacao IN ('desativado', 'quarentena') THEN"
@@ -741,7 +738,8 @@ class Despachante:
     async def _chave_das_declaracoes(self, sistema: Sistema) -> str | None:
         """A chave propria de leitura das declaracoes, guardada pelo ADMIN; num sistema de chave compartilhada, a
         propria chave compartilhada. None quando nao ha nenhuma (as rotinas e a revisao do servidor usam esta).
-        O cofre que nao abre a chave levanta ``DeclaracoesIndisponiveis``."""
+        O cofre que nao abre a chave (ou a cifra que nao acha a origem do sistema) levanta
+        ``DeclaracoesNaoConferidas`` com ``chave_indisponivel``: a falha e do MCP-CLARO, nao do servidor."""
         async with self.engine.connect() as c:
             for tipo in ("declaracoes", "acesso") if sistema.tipo_chave == "compartilhada" else ("declaracoes",):
                 try:
@@ -749,11 +747,17 @@ class Despachante:
                 except chaves.ChaveAusente:
                     continue
                 except _COFRE_FALHOU as erro:
-                    raise DeclaracoesIndisponiveis(f"a chave das declaracoes de {sistema.nome} nao abriu") from erro
+                    log.warning("chave_indisponivel", sistema=sistema.nome, erro=type(erro).__name__)
+                    raise DeclaracoesNaoConferidas(
+                        "chave_indisponivel", f"a chave das declaracoes de {sistema.nome} nao abriu"
+                    ) from erro
         return None
 
     async def _listar(self, sistema: Sistema, segredo: str | None, discover_json: Any) -> list[dict[str, Any]]:
-        """O que o sistema declara agora, pela ligacao dele, e guardado em ``ferramentas_vistas``."""
+        """O que o sistema declara agora, pela ligacao dele, e guardado em ``ferramentas_vistas``.
+
+        Sala de visitas fora: ``DeclaracoesNaoConferidas`` com ``sala_fora`` (nada chegou ao servidor). Qualquer
+        outra falha da listagem: ``DeclaracoesIndisponiveis`` (o servidor nao entregou)."""
 
         async def obter() -> str | None:
             return segredo
@@ -767,6 +771,10 @@ class Despachante:
                 async with self.engine.begin() as c:
                     await self._registrar_sala(c, sistema, linha)
                 CONTADORES.somar(linha, onde="declaracoes")
+            if linha == LINHA_SALA_FORA:
+                raise DeclaracoesNaoConferidas(
+                    "sala_fora", f"a sala de visitas nao atendeu; nada foi pedido ao sistema {sistema.nome}"
+                ) from erro
             raise DeclaracoesIndisponiveis(f"o sistema {sistema.nome} nao entregou as declaracoes") from erro
         if _declaracao_invalida(ferramentas):
             raise DeclaracoesIndisponiveis(f"o sistema {sistema.nome} declarou uma ferramenta sem nome valido")

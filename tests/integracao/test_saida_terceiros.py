@@ -632,13 +632,41 @@ async def test_link_pedido_no_meio_da_acao_nao_chega_ao_desfecho_nem_ao_extrato(
         op = await liberada_em(m, t, {"pedido": "P-1"})
         fim = await ate_o_fim(m, porta(m, Ligacoes({t.sistema_id: local_de_teste}), terceiros_ligados=True), op)
     assert fim.estado == Estado.SISTEMA_PEDIU_DADOS
-    assert fim.desfecho == "o sistema pediu um link no meio da acao"
+    assert fim.desfecho == "o sistema pediu que a pessoa abrisse um link no meio da acao"
     assert fim.resultado is None
     assert app.state.contagem.chamadas.get("consultar_pedido") == 1
     [linha] = await linhas(m, "acao_sistema_pediu_dados", op.protocolo)
+    # As categorias (nosso vocabulario) vao a dados.pedidos, para a tela de pedidos recusados do ADMIN.
+    assert dados(linha)["pedidos"] == ["link"]
     tudo = json.dumps([linha.frase, linha.dados, fim.desfecho], default=str)
     for estranho in (mal_comportado.PHISH, "Entre aqui", "volta-link", "phish"):
         assert estranho not in tudo
+
+
+@pytest.mark.parametrize(
+    ("pedidos", "esperados"),
+    [
+        ((), []),
+        (("fio_antigo:elicitation/create", "fio_antigo:ping"), ["fio_antigo:elicitation/create", "fio_antigo:ping"]),
+    ],
+)
+async def test_acao_enviada_guarda_os_pedidos_barrados_no_extrato(
+    mundo: Mundo, pedidos: tuple[str, ...], esperados: list[str]
+) -> None:
+    m = mundo
+    await guardar_chave(m, m.terceiro_id, "ana", "chave-ana")
+    op = await liberada(m, "ana", "t_enviar", {"texto": "com pedido barrado"})
+    resposta = cliente.Resposta(
+        "resultado",
+        resultado=types.CallToolResult(content=[types.TextContent(type="text", text="Feito.")]),
+        status_http=(200,),
+        pedidos=pedidos,
+    )
+    fim = await ate_o_fim(m, porta(m, Ligacoes({m.terceiro_id: LigacaoFalsa(resposta)}), terceiros_ligados=True), op)
+    assert fim.estado == Estado.ENVIADA
+    [linha] = await linhas(m, "acao_enviada", op.protocolo)
+    assert dados(linha)["pedidos"] == esperados
+    assert ("antes pediu" in fim.desfecho) is bool(pedidos)
 
 
 async def test_resposta_funda_demais_de_um_proprio_fica_enviada_sem_resultado_e_a_consulta_responde(

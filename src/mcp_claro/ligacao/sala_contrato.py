@@ -11,12 +11,16 @@ Classificacao do salto, do lado do despachante (critica B6):
 - qualquer outra coisa que nao seja HTTP 200 com corpo valido deste contrato (500, corpo cortado, versao trocada,
   campo a mais, queda ou prazo depois de enviar): ``duvida``, porque a sala pode ter chamado o terceiro;
 - 200 com corpo valido: vale a classificacao da sala, que e a do cliente fixado (``resultado``, ``nao_enviado``,
-  ``duvida``, ``erro_rpc``, ``recusado_http``), com ``status_http`` e ``pedidos`` do terceiro.
+  ``duvida``, ``erro_rpc``, ``recusado_http``), com ``status_http`` e ``pedidos`` do terceiro. Na listagem, a
+  recusa pelo status (desvio 3xx, 401, 403) volta como ``recusado_http`` com o ``status_http``, e o despachante
+  a recebe em ``FalhaNaSala.status_http`` (um desvio grava ``sala_desvio_recusado``).
 
 A resposta da sala e conferida como dado nao confiavel: so categorias de pedido, nomes de excecao, versoes e
 motivos do nosso vocabulario passam; o resultado precisa ser um ``CallToolResult`` ou ``InputRequiredResult``, cada
 ferramenta da listagem um ``Tool``, e o tipo combina com o que vem junto (``resultado`` so com resultado,
-``erro_rpc`` com erro, ``recusado_http`` com o status da recusa).
+``erro_rpc`` com erro, ``recusado_http`` com o status da recusa). Os nomes que so o despachante da (``SalaFora``,
+``SalaRespostaInvalida`` e os motivos de sondagem deles, ``EXCECOES_DO_DESPACHANTE`` e ``MOTIVOS_DO_DESPACHANTE``)
+ficam fora do contrato na resposta da sala: a sala que respondeu nunca esta fora.
 
 Do lado da sala, ``atender`` sempre devolve (status, corpo) do contrato: o que o terceiro mandou e nao cabe no
 contrato (status HTTP fora de 100 a 599, codigo fora de 32 bits, ferramentas demais, corpo regravado acima de
@@ -63,6 +67,16 @@ MOTIVO_SALA_INVALIDA = "a sala de visitas nao deu uma resposta valida"
 MOTIVO_PEDIDO_FORA = "pedido fora do contrato da sala de visitas; nada foi enviado"
 MOTIVO_RESPOSTA_FORA = "a resposta do servidor de terceiros nao cabe no contrato da sala de visitas"
 
+EXCECOES_DO_DESPACHANTE: Final = frozenset({SALA_FORA, SALA_RESPOSTA_INVALIDA})
+"""Nomes de excecao que so o lado do despachante da (``ClienteSala``, ``SemSala`` e os ``ler_resposta_*``): a
+conexao com a sala nao se fez, ou a sala respondeu fora do contrato. Uma sala que respondeu nunca esta fora, e
+quem responde nao julga a propria resposta. Na resposta da sala (de um filho que o terceiro pode ter tomado), esses
+nomes ficam fora do contrato e viram a reserva (``duvida`` com ``SalaRespostaInvalida``): senao, um filho tomado
+que dissesse ``SalaFora`` na listagem escaparia da regra das rodadas sem resposta (critica A5), e na leitura e na
+acao viraria "nada foi enviado"."""
+MOTIVOS_DO_DESPACHANTE: Final = frozenset({MOTIVO_SALA_FORA, MOTIVO_SALA_INVALIDA})
+"""Os motivos de sondagem que so o lado do despachante da, pela mesma regra de ``EXCECOES_DO_DESPACHANTE``."""
+
 TETO_ENDERECO = 2048
 TETO_DISCOVER = 1024 * 1024
 TETO_SALTO = 2 * cliente.TETO_RESPOSTA_PADRAO + 64 * 1024  # corpo da resposta da sala (JSON com escapes)
@@ -105,6 +119,8 @@ TETO_FERRAMENTAS = 5000
 def _excecao(v: str | None) -> str | None:
     if v is not None and not _EXCECAO.fullmatch(v):
         raise ValueError("excecao fora do vocabulario")
+    if v in EXCECOES_DO_DESPACHANTE:
+        raise ValueError("excecao que so o despachante da")
     return v
 
 
@@ -123,6 +139,8 @@ def _versoes(v: tuple[str, ...]) -> tuple[str, ...]:
 def _motivo(v: str) -> str:
     if v not in _MOTIVOS_FIXOS and not any(m.fullmatch(v) for m in _MOTIVOS_COM_STATUS):
         raise ValueError("motivo fora do vocabulario")
+    if v in MOTIVOS_DO_DESPACHANTE:
+        raise ValueError("motivo que so o despachante da")
     return v
 
 
@@ -218,9 +236,19 @@ class RespostaChamar(_Modelo):
 
 
 class RespostaListar(_Modelo):
-    tipo: Literal["resultado", "nao_enviado", "duvida"]
+    tipo: Literal["resultado", "nao_enviado", "duvida", "recusado_http"]
     ferramentas: Annotated[list[dict[str, Any]], Field(max_length=TETO_FERRAMENTAS)] = Field(default_factory=list)
     excecao: Excecao = None
+    status_http: StatusHttp = ()
+
+    @model_validator(mode="after")
+    def _tipo_combina(self) -> Self:
+        # So "recusado_http" leva status, e sempre com o da recusa (3xx, 401 ou 403) no fim.
+        if (self.tipo == "recusado_http") != bool(self.status_http):
+            raise ValueError("status_http so com o tipo recusado_http")
+        if self.status_http and not cliente.recusado_por_status(self.status_http[-1]):
+            raise ValueError("recusado_http sem o status da recusa")
+        return self
 
 
 class RespostaSondar(_Modelo):
@@ -271,12 +299,14 @@ class RespostaSondar(_Modelo):
 
 
 class FalhaNaSala(RuntimeError):
-    """A listagem pela sala nao trouxe as declaracoes (``tipo`` diz se algo chegou ao terceiro)."""
+    """A listagem pela sala nao trouxe as declaracoes (``tipo`` diz se algo chegou ao terceiro; ``status_http``,
+    na recusa pelo status, o de cada POST, com o da recusa no fim)."""
 
-    def __init__(self, tipo: str, excecao: str | None) -> None:
+    def __init__(self, tipo: str, excecao: str | None, *, status_http: tuple[int, ...] = ()) -> None:
         super().__init__(f"listagem pela sala de visitas: {tipo} ({excecao or 'sem detalhe'})")
         self.tipo = tipo
         self.excecao = excecao
+        self.status_http = status_http
 
 
 # Lado do despachante -------------------------------------------------------------------------------------------
@@ -322,7 +352,7 @@ def ler_resposta_listar(status: int, corpo: bytes) -> list[dict[str, Any]]:
     try:
         resposta = RespostaListar.model_validate_json(corpo)
         if resposta.tipo != "resultado":
-            raise FalhaNaSala(resposta.tipo, resposta.excecao)
+            raise FalhaNaSala(resposta.tipo, resposta.excecao, status_http=resposta.status_http)
         ferramentas = _FERRAMENTAS.validate_python(resposta.ferramentas)
     except ValidationError, ValueError:
         raise FalhaNaSala("duvida", SALA_RESPOSTA_INVALIDA) from None
@@ -384,6 +414,12 @@ async def atender(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: boo
             ferramentas = await cliente.listar_ferramentas(pl.endereco, pl.segredo, pl.discover_json, **regras)
         except cliente.EnderecoRecusado:
             return 200, RespostaListar(tipo="nao_enviado", excecao=cliente.ENDERECO_RECUSADO).para_json()
+        except cliente.ListagemRecusada as erro:
+            status = erro.status_http  # do terceiro: o modelo confere (fora de 100 a 599, a reserva)
+            return 200, _no_contrato(
+                lambda: RespostaListar(tipo="recusado_http", excecao=cliente.LISTAGEM_RECUSADA, status_http=status),
+                reserva_listar,
+            )
         except OSError:
             return 200, RespostaListar(tipo="nao_enviado", excecao=cliente.NOME_NAO_RESOLVIDO).para_json()
         except Exception as erro:  # noqa: BLE001 - a listagem que falha volta como classificacao, nunca como 500

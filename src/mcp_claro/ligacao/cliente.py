@@ -25,6 +25,8 @@ Regras do plano, provadas por teste:
   terceiros, so https e so IP publico (``conferir_endereco_terceiro``, que confere o
   mesmo nome que o cliente HTTP conecta, na forma IDNA), com nome e versao genericos,
   e do ``server/discover`` guarda so uma lista do que fica (``discover_para_guardar``);
+- o log nao leva nada do sistema: nos registradores do kit, so a mensagem fixa e o tipo
+  da excecao (``mcp_claro.logs.calar_o_kit``);
 - separa "falha comprovada antes do envio" (conexao recusada) de "duvida"
   (qualquer falha depois disso): so a primeira pode virar "nao saiu". O JSON do
   pedido e montado antes de abrir conexao: pedido que o kit nao consegue escrever
@@ -55,8 +57,11 @@ from opentelemetry import context as otel_context
 from opentelemetry import propagate
 from pydantic import TypeAdapter, ValidationError
 
-from mcp_claro import __version__
+from mcp_claro import __version__, logs
 from mcp_claro.versao import VERSAO_MCP
+
+# O kit escreve no log pedacos do que o sistema mandou: so o fato fica (``mcp_claro.logs``).
+logs.calar_o_kit()
 
 Segredo = Callable[[], Awaitable[str | None]]
 Fase = Literal["nao_enviado", "duvida"]
@@ -91,6 +96,7 @@ PREFIXO_FIO_ANTIGO = "fio_antigo:"
 PEDIDO_A_MAIS = "PedidoAMais"
 ENDERECO_RECUSADO = "EnderecoRecusado"
 NOME_NAO_RESOLVIDO = "NomeNaoResolvido"
+LISTAGEM_RECUSADA = "ListagemRecusada"
 PEDIDO_FUNDO_DEMAIS = "pedido_fundo_demais"
 """O kit nao consegue escrever o pedido (``_pedido_que_sai``): nada foi enviado. Com ``nao_enviado``."""
 
@@ -162,6 +168,16 @@ class RespostaGrandeDemais(httpx2.StreamError):
 
 class EnderecoRecusado(ValueError):
     """Endereco de servidor de terceiros fora do combinado (https, sem usuario nem fragmento, IP publico)."""
+
+
+class ListagemRecusada(Exception):
+    """O sistema recusou a listagem pelo status HTTP (desvio 3xx que o MCP-CLARO nao segue, 401 ou 403).
+
+    ``status_http`` e o de cada POST da listagem, com o da recusa no fim; a mensagem so leva o numero."""
+
+    def __init__(self, status_http: tuple[int, ...]) -> None:
+        super().__init__(f"listagem recusada pelo sistema (HTTP {status_http[-1] if status_http else '?'})")
+        self.status_http = status_http
 
 
 class _CorpoVigiado(httpx2.AsyncByteStream):
@@ -796,6 +812,8 @@ async def listar_ferramentas(
 
     Num terceiro, endereco fora do combinado levanta ``EnderecoRecusado`` (nome que nao resolve, ``OSError``; a
     conferencia do nome tem o prazo fixo ``PRAZO_CONEXAO`` e, esgotado, levanta ``TimeoutError``, que e ``OSError``).
+    Listagem que falha com o ultimo status de recusa (``recusado_por_status``: desvio 3xx nao seguido, 401 ou 403)
+    levanta ``ListagemRecusada`` com o ``status_http``, a partir do erro do kit; as outras falhas sobem como vieram.
     """
     if terceiro:
         with anyio.fail_after(PRAZO_CONEXAO):
@@ -822,6 +840,12 @@ async def listar_ferramentas(
                 cursor = pagina.next_cursor
                 if not cursor:
                     break
+    except Exception as erro:
+        # O kit so diz "Redirect ... not followed" ou um ExceptionGroup; o status da recusa fica na Tentativa.
+        status = tuple(tentativa.status_http)
+        if status and recusado_por_status(status[-1]):
+            raise ListagemRecusada(status) from erro
+        raise
     finally:
         otel_context.detach(vazio)
         _TENTATIVA.reset(marca)

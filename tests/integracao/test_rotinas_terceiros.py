@@ -25,10 +25,11 @@ import pytest
 from mcp.shared.exceptions import MCPError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from structlog.testing import capture_logs
 
 from exemplos import mal_comportado
 from mcp_claro.cadastro import repositorio
-from mcp_claro.cadastro.quarentena import MOTIVO_QUARENTENA
+from mcp_claro.cadastro.quarentena import MOTIVO_PARADA, MOTIVO_QUARENTENA
 from mcp_claro.config.settings import Parametros
 from mcp_claro.db.engine import criar_engine
 from mcp_claro.despachante import chaves
@@ -61,6 +62,9 @@ CHAVE = "chave-compartilhada"  # nas chaves padrao do duble, vale para todos
 PUBLICO = "https://mcp-claro.teste"
 RECURSO = f"{PUBLICO}/mcp"
 DUAS = ("consultar_entrega", "consultar_pedido")
+SEGUIDAS = 0.0
+"""Intervalo do mudou-parou nos testes que rodam as rodadas uma atras da outra: com zero, cada rodada sem resposta
+soma (em producao, as rodadas de uma copia das rotinas ficam um intervalo inteiro uma da outra)."""
 
 
 @dataclass
@@ -170,8 +174,8 @@ class Cena:
         corpo: dict[str, Any] = r.json()
         return corpo
 
-    async def conferir(self, fonte: FonteDeclaracoes | None = None) -> ResultadoMudouParou:
-        return await conferir_sistemas(self.rotinas_db, fonte or self.fonte, [ADMIN])
+    async def conferir(self, fonte: FonteDeclaracoes | None = None, intervalo: float = SEGUIDAS) -> ResultadoMudouParou:
+        return await conferir_sistemas(self.rotinas_db, fonte or self.fonte, [ADMIN], intervalo=intervalo)
 
     async def listar(self) -> list[str]:
         async with cliente_mcp(f"{self.entrada_url}/mcp", self.cracha()) as c:
@@ -192,8 +196,8 @@ class Cena:
             return (
                 await c.execute(
                     text(
-                        "SELECT situacao, motivo, revisao_servidor_id, conferencias_sem_resposta FROM sistemas"
-                        " WHERE id = :s"
+                        "SELECT situacao, motivo, revisao_servidor_id, conferencias_sem_resposta,"
+                        " conferencia_sem_resposta_em FROM sistemas WHERE id = :s"
                     ),
                     {"s": self.sistema_id},
                 )
@@ -508,10 +512,13 @@ async def test_terceiro_que_nao_responde_em_duas_rodadas_seguidas_sai_da_vitrine
 async def test_resposta_no_meio_zera_as_rodadas_sem_resposta(cena: Cena) -> None:
     await cena.modo("erro500")
     await cena.conferir()
-    assert (await cena.sistema()).conferencias_sem_resposta == 1
+    primeira = await cena.sistema()
+    assert primeira.conferencias_sem_resposta == 1
+    assert primeira.conferencia_sem_resposta_em is not None
     await cena.modo("normal")
     await cena.conferir()
-    assert (await cena.sistema()).conferencias_sem_resposta == 0
+    respondeu = await cena.sistema()
+    assert (respondeu.conferencias_sem_resposta, respondeu.conferencia_sem_resposta_em) == (0, None)
     await cena.modo("erro500")
     resultado = await cena.conferir()
     assert cena.nome not in resultado.quarentenas
@@ -582,8 +589,8 @@ async def test_duas_copias_das_rotinas_uma_linha_um_aviso_um_update(
     outra = g.engine_do_papel(cena.p, "mcp_claro_rotinas")
     try:
         a, b = await asyncio.gather(
-            conferir_sistemas(cena.rotinas_db, FonteJunta(), [ADMIN]),
-            conferir_sistemas(outra, FonteJunta(), [ADMIN]),
+            conferir_sistemas(cena.rotinas_db, FonteJunta(), [ADMIN], intervalo=SEGUIDAS),
+            conferir_sistemas(outra, FonteJunta(), [ADMIN], intervalo=SEGUIDAS),
         )
     finally:
         await outra.dispose()
@@ -616,11 +623,14 @@ class Revisado:
     definicoes: list[dict[str, Any]]
 
 
-async def _terceiro_revisado(dono: AsyncEngine, *, revisar_servidor: bool = True) -> Revisado:
-    """Terceiro ativo com duas ferramentas revisadas e, com ``revisar_servidor``, a revisao do servidor vigente."""
+async def _terceiro_revisado(
+    dono: AsyncEngine, *, revisar_servidor: bool = True, definicoes: list[dict[str, Any]] | None = None
+) -> Revisado:
+    """Terceiro ativo com duas ferramentas revisadas (ou as ``definicoes`` dadas) e, com ``revisar_servidor``, a
+    revisao do servidor vigente."""
     sufixo = uuid.uuid4().hex[:8]
     nome = f"g5-falso-{sufixo}"
-    definicoes = [
+    definicoes = definicoes or [
         t3.definicao("ler_caixa", "Le a caixa de mensagens."),
         t3.definicao("ver_agenda", "Mostra a agenda.", esquema={"type": "object", "properties": {"dia": {}}}),
     ]
@@ -637,8 +647,8 @@ async def _situacao(dono: AsyncEngine, sistema_id: uuid.UUID) -> Any:
         return (
             await c.execute(
                 text(
-                    "SELECT situacao, motivo, revisao_servidor_id, conferencias_sem_resposta FROM sistemas"
-                    " WHERE id = :s"
+                    "SELECT situacao, motivo, revisao_servidor_id, conferencias_sem_resposta,"
+                    " conferencia_sem_resposta_em FROM sistemas WHERE id = :s"
                 ),
                 {"s": sistema_id},
             )
@@ -694,7 +704,7 @@ async def test_ferramenta_sumida_e_ferramenta_nova_levam_a_quarentena(
             igual.sistema_id: list(reversed(igual.definicoes)),  # mesma definicao em outra ordem: nada
         }
     )
-    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN])
+    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
     assert sorted(resultado.quarentenas) == sorted([sumiu.nome, nova.nome])
     assert (await _situacao(dono, sumiu.sistema_id)).situacao == "quarentena"
     assert (await _situacao(dono, nova.sistema_id)).situacao == "quarentena"
@@ -717,7 +727,7 @@ async def test_ferramenta_sumida_e_ferramenta_nova_levam_a_quarentena(
 async def test_terceiro_sem_revisao_do_servidor_nao_e_conferido(dono: AsyncEngine, rotinas_db: AsyncEngine) -> None:
     sem = await _terceiro_revisado(dono, revisar_servidor=False)
     fonte = FonteFalsa({sem.sistema_id: []})  # se fosse conferido, "todas sumiram" daria quarentena
-    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN])
+    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
     assert fonte.chamadas == []
     assert sem.nome not in resultado.quarentenas + resultado.sem_resposta
     assert (await _situacao(dono, sem.sistema_id)).situacao == "ativo"
@@ -736,7 +746,9 @@ async def test_conclusao_nova_no_meio_da_rodada_nao_vira_quarentena(dono: AsyncE
             nova_revisao.append(await t3.gravar_revisao_do_servidor(c, t.sistema_id))
         return [mudada, t.definicoes[1]]
 
-    resultado = await conferir_sistemas(rotinas_db, FonteFalsa({t.sistema_id: concluir_no_meio}), [ADMIN])
+    resultado = await conferir_sistemas(
+        rotinas_db, FonteFalsa({t.sistema_id: concluir_no_meio}), [ADMIN], intervalo=SEGUIDAS
+    )
     assert t.nome not in resultado.quarentenas
     situacao = await _situacao(dono, t.sistema_id)
     assert (situacao.situacao, situacao.revisao_servidor_id) == ("ativo", nova_revisao[0])
@@ -744,7 +756,9 @@ async def test_conclusao_nova_no_meio_da_rodada_nao_vira_quarentena(dono: AsyncE
     assert await avisos_do_sistema(dono, t.sistema_id, "sistema_em_quarentena") == []
 
     # Na rodada seguinte, contra N+1, nada mudou.
-    resultado = await conferir_sistemas(rotinas_db, FonteFalsa({t.sistema_id: [mudada, t.definicoes[1]]}), [ADMIN])
+    resultado = await conferir_sistemas(
+        rotinas_db, FonteFalsa({t.sistema_id: [mudada, t.definicoes[1]]}), [ADMIN], intervalo=SEGUIDAS
+    )
     assert t.nome not in resultado.quarentenas
     assert (await _situacao(dono, t.sistema_id)).situacao == "ativo"
 
@@ -761,7 +775,9 @@ async def test_rodada_sem_resposta_contra_revisao_velha_nao_conta(dono: AsyncEng
             await t3.gravar_revisao_do_servidor(c, t.sistema_id)
         raise RuntimeError("o servidor nao entregou")
 
-    resultado = await conferir_sistemas(rotinas_db, FonteFalsa({t.sistema_id: concluir_e_falhar}), [ADMIN])
+    resultado = await conferir_sistemas(
+        rotinas_db, FonteFalsa({t.sistema_id: concluir_e_falhar}), [ADMIN], intervalo=SEGUIDAS
+    )
     assert t.nome not in resultado.quarentenas
     async with dono.connect() as c:
         situacao, rodadas = (
@@ -780,7 +796,9 @@ async def test_servidor_que_vai_e_volta_avisa_o_admin_a_cada_quarentena(
     t = await _terceiro_revisado(dono)
     a, b = t.definicoes[0], dict(t.definicoes[0], description="Le a caixa (texto B).")
     for atual, proxima in ((a, b), (b, a), (a, b)):
-        resultado = await conferir_sistemas(rotinas_db, FonteFalsa({t.sistema_id: [proxima, t.definicoes[1]]}), [ADMIN])
+        resultado = await conferir_sistemas(
+            rotinas_db, FonteFalsa({t.sistema_id: [proxima, t.definicoes[1]]}), [ADMIN], intervalo=SEGUIDAS
+        )
         assert resultado.quarentenas == [t.nome], atual
         async with dono.begin() as c:  # o ADMIN revisa a mudanca e conclui de novo
             await t3.revisar_ferramenta(c, t.sistema_id, proxima)
@@ -791,19 +809,19 @@ async def test_servidor_que_vai_e_volta_avisa_o_admin_a_cada_quarentena(
     assert len(await _linhas(dono, t.sistema_id, "sistema_em_quarentena")) == 3
 
 
-async def test_revisao_com_impressao_fora_da_receita_vai_a_quarentena(
-    dono: AsyncEngine, rotinas_db: AsyncEngine
-) -> None:
-    """Uma revisao gravada fora da receita (a impressao do servidor gravada nao e a da lista dela; o banco nao confere
-    uma contra a outra) nao serve de base: mesmo com a lista igual, nome a nome, ao que o servidor declara, ele vai a
-    quarentena (o lado seguro), com zero ferramentas mudadas, e o ADMIN recebe o aviso."""
-    sufixo = uuid.uuid4().hex[:8]
-    nome = f"g5-receita-{sufixo}"
-    definicoes = [t3.definicao("ler_caixa", "Le a caixa.")]
-    errada = "sha256:" + "0" * 64
+IMPRESSAO_ERRADA = "sha256:" + "0" * 64
+
+
+async def _revisao_fora_da_receita(
+    dono: AsyncEngine, definicoes: list[dict[str, Any]]
+) -> tuple[uuid.UUID, str, uuid.UUID]:
+    """Terceiro ativo com as ``definicoes`` revisadas e uma revisao do servidor vigente gravada fora da receita: a
+    lista dela e a das revisadas, mas a impressao gravada (``IMPRESSAO_ERRADA``) nao e a dessa lista."""
+    nome = f"g5-receita-{uuid.uuid4().hex[:8]}"
     async with dono.begin() as c:
         sistema_id = await t3.cadastrar_terceiro(c, nome=nome)
-        await t3.revisar_ferramenta(c, sistema_id, definicoes[0])
+        for d in definicoes:
+            await t3.revisar_ferramenta(c, sistema_id, d)
         lista = await t3.declaradas_revisadas(c, sistema_id)
         revisao = (
             await c.execute(
@@ -813,21 +831,43 @@ async def test_revisao_com_impressao_fora_da_receita_vai_a_quarentena(
                     " ARRAY(SELECT id FROM ferramentas_revisadas WHERE sistema_id = :s AND situacao = 'ativa'),"
                     " 'Fornecedor', 'admin-teste') RETURNING id"
                 ),
-                {"s": sistema_id, "i": errada, "d": json.dumps(lista)},
+                {"s": sistema_id, "i": IMPRESSAO_ERRADA, "d": json.dumps(lista)},
             )
         ).scalar_one()
         await c.execute(
             text("UPDATE sistemas SET revisao_servidor_id = :r WHERE id = :s"), {"r": revisao, "s": sistema_id}
         )
-    resultado = await conferir_sistemas(rotinas_db, FonteFalsa({sistema_id: definicoes}), [ADMIN])
+    return sistema_id, nome, uuid.UUID(str(revisao))
+
+
+async def test_revisao_com_impressao_fora_da_receita_vai_a_quarentena(
+    dono: AsyncEngine, rotinas_db: AsyncEngine
+) -> None:
+    """Uma revisao gravada fora da receita (a impressao do servidor gravada nao e a da lista dela; o banco nao confere
+    uma contra a outra) nao serve de base: mesmo com a lista igual, nome a nome, ao que o servidor declara, ele vai a
+    quarentena (o lado seguro), com zero ferramentas mudadas, e o ADMIN recebe o aviso proprio desse caso (revisao
+    que nao confere), nao o de "mudou 0 ferramentas"."""
+    definicoes = [t3.definicao("ler_caixa", "Le a caixa.")]
+    sistema_id, nome, revisao = await _revisao_fora_da_receita(dono, definicoes)
+    resultado = await conferir_sistemas(rotinas_db, FonteFalsa({sistema_id: definicoes}), [ADMIN], intervalo=SEGUIDAS)
     assert resultado.quarentenas == [nome]
     situacao = await _situacao(dono, sistema_id)
     assert (situacao.situacao, situacao.motivo, situacao.revisao_servidor_id) == ("quarentena", MOTIVO_QUARENTENA, None)
     ((dados,),) = await _linhas(dono, sistema_id, "sistema_em_quarentena")
     assert (dados["revisao"], dados["mudancas"], dados["ferramentas"]) == (str(revisao), 0, [])
-    (aviso,) = await _emails(dono, sistema_id, "sistema_em_quarentena")
-    assert (aviso.corpo["quantas"], aviso.corpo["impressao_revisada"]) == (0, errada)
+    assert await avisos_do_sistema(dono, sistema_id, "sistema_em_quarentena") == []
+    (aviso,) = await _emails(dono, sistema_id, "sistema_em_quarentena_revisao_inconsistente")
+    assert aviso.assunto == "MCP-CLARO: servidor de terceiros em quarentena (revisao que nao confere)"
+    assert aviso.corpo["texto"] == (
+        f"A revisao do servidor de terceiros {nome} guardada no MCP-CLARO nao confere com a lista de ferramentas dela."
+        " Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi cancelado e os limites das"
+        " pessoas com ele foram suspensos. Leia as ferramentas e conclua a revisao do servidor de novo nas telas do"
+        " ADMIN; se acontecer outra vez, fale com a equipe do MCP-CLARO."
+    )
+    assert (aviso.corpo["quantas"], aviso.corpo["impressao_revisada"]) == (0, IMPRESSAO_ERRADA)
     assert aviso.corpo["mudancas"] == {"mudou": 0, "nova": 0, "sumiu": 0}
+    assert aviso.chave_unica.startswith(f"sistema_em_quarentena_revisao_inconsistente:{sistema_id}:{revisao}:")
+    assert "ler_caixa" not in json.dumps(aviso.corpo)  # o nome da ferramenta e texto do fornecedor
 
 
 # --- Contagem das rodadas sem resposta, contadores e transacao ----------------------------------------------------
@@ -851,13 +891,222 @@ async def test_rodada_nao_feita_no_meio_nao_conta_nem_zera(dono: AsyncEngine, ro
     fonte = FonteFalsa({t.sistema_id: proxima})
     vistas = []
     for _ in range(3):
-        resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN])
+        resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
         situacao = await _situacao(dono, t.sistema_id)
         vistas.append((situacao.situacao, situacao.conferencias_sem_resposta, t.nome in resultado.quarentenas))
     assert vistas == [("ativo", 1, False), ("ativo", 1, False), ("quarentena", 0, True)]
     assert (await _situacao(dono, t.sistema_id)).motivo == MOTIVO_SEM_RESPOSTA
     ((dados,),) = await _linhas(dono, t.sistema_id, "sistema_em_quarentena_sem_resposta")
     assert dados["revisao"] == str(t.revisao_id)
+
+
+# --- Duas copias das rotinas: a hora da ultima soma sem resposta --------------------------------------------------
+
+INTERVALO = 900.0
+"""O intervalo padrao do mudou-parou (``TOOL_DRIFT_CHECK_SECONDS``): a metade e 450 s."""
+
+FOLGA = 60.0
+"""Folga do caso "ainda nao soma": a rodada compara com a hora da propria transacao, que vem depois da hora gravada
+pelo teste. Uma maquina lenta so faz a ultima soma parecer mais velha, entao o caso "soma" (metade mais 1 s) nao
+precisa de folga; o caso "nao soma" precisa, para nao falhar num CI carregado."""
+
+
+async def _ultima_soma_ha(dono: AsyncEngine, sistema_id: uuid.UUID, segundos: float) -> None:
+    """Poe a ultima soma sem resposta ``segundos`` antes de agora, no relogio do banco (o que as rotinas comparam)."""
+    async with dono.begin() as c:
+        await c.execute(
+            text("UPDATE sistemas SET conferencia_sem_resposta_em = now() - make_interval(secs => :n) WHERE id = :s"),
+            {"n": float(segundos), "s": sistema_id},
+        )
+
+
+async def test_duas_rodadas_sem_resposta_a_segundos_uma_da_outra_somam_uma(
+    dono: AsyncEngine, rotinas_db: AsyncEngine, contados: Contados
+) -> None:
+    """Duas copias das rotinas, cada uma no seu intervalo, podem rodar a segundos uma da outra: o servidor que nao
+    respondeu nas duas soma uma rodada so, e nao vai a quarentena por um instante fora do ar."""
+    t = await _terceiro_revisado(dono)
+    fonte = FonteFalsa({t.sistema_id: RuntimeError("o servidor nao entregou")})
+    for _ in range(RODADAS_SEM_RESPOSTA):
+        resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=INTERVALO)
+        assert t.nome in resultado.sem_resposta  # a rodada viu o servidor mudo, mesmo sem somar
+        assert t.nome not in resultado.quarentenas
+    assert len(fonte.chamadas) == RODADAS_SEM_RESPOSTA
+    situacao = await _situacao(dono, t.sistema_id)
+    assert (situacao.situacao, situacao.conferencias_sem_resposta) == ("ativo", 1)
+    assert situacao.conferencia_sem_resposta_em is not None
+    assert await _linhas(dono, t.sistema_id, "sistema_em_quarentena_sem_resposta") == []
+    assert contados.de("mudou_parou_quarentenas") == 0
+
+    # Uma resposta zera a contagem e apaga a hora da ultima soma: a proxima rodada sem resposta conta logo.
+    fonte.respostas[t.sistema_id] = t.definicoes
+    await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=INTERVALO)
+    situacao = await _situacao(dono, t.sistema_id)
+    assert (situacao.conferencias_sem_resposta, situacao.conferencia_sem_resposta_em) == (0, None)
+    fonte.respostas[t.sistema_id] = RuntimeError("o servidor nao entregou")
+    await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=INTERVALO)
+    situacao = await _situacao(dono, t.sistema_id)
+    assert (situacao.situacao, situacao.conferencias_sem_resposta) == ("ativo", 1)
+
+
+async def test_rodadas_sem_resposta_com_mais_de_metade_do_intervalo_somam_duas(
+    dono: AsyncEngine, rotinas_db: AsyncEngine, contados: Contados
+) -> None:
+    """A rodada sem resposta soma quando a ultima soma tem mais de metade do intervalo: com 390 s (metade menos a
+    ``FOLGA``), nao; com 451 s, soma a segunda seguida, e o servidor vai a quarentena ("nao respondeu a
+    conferencia")."""
+    t = await _terceiro_revisado(dono)
+    fonte = FonteFalsa({t.sistema_id: RuntimeError("o servidor nao entregou")})
+    await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=INTERVALO)
+    assert (await _situacao(dono, t.sistema_id)).conferencias_sem_resposta == 1
+
+    await _ultima_soma_ha(dono, t.sistema_id, INTERVALO / 2 - FOLGA)
+    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=INTERVALO)
+    assert t.nome not in resultado.quarentenas
+    assert (await _situacao(dono, t.sistema_id)).conferencias_sem_resposta == 1
+
+    await _ultima_soma_ha(dono, t.sistema_id, INTERVALO / 2 + 1)
+    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=INTERVALO)
+    assert resultado.quarentenas == [t.nome]
+    situacao = await _situacao(dono, t.sistema_id)
+    assert (situacao.situacao, situacao.motivo, situacao.revisao_servidor_id) == (
+        "quarentena",
+        MOTIVO_SEM_RESPOSTA,
+        None,
+    )
+    # A guarda zera a contagem e apaga a hora da ultima soma quando a revisao vigente cai.
+    assert (situacao.conferencias_sem_resposta, situacao.conferencia_sem_resposta_em) == (0, None)
+    ((dados,),) = await _linhas(dono, t.sistema_id, "sistema_em_quarentena_sem_resposta")
+    assert dados["revisao"] == str(t.revisao_id)
+    (aviso,) = await _emails(dono, t.sistema_id, "sistema_em_quarentena_sem_resposta")
+    assert aviso.corpo["rodadas"] == RODADAS_SEM_RESPOSTA
+    assert contados.de("mudou_parou_quarentenas", motivo="sem_resposta") == 1
+
+
+async def test_soma_sem_resposta_compara_com_a_metade_do_intervalo_no_mesmo_relogio(
+    dono: AsyncEngine, rotinas_db: AsyncEngine
+) -> None:
+    """A regra da metade, sem depender da velocidade da maquina: numa transacao so, ``now()`` e o mesmo instante, e
+    a hora gravada fica a um numero exato de segundos dele. Com 449 s, a soma de ``SQL_SOMAR_SEM_RESPOSTA`` nao
+    acontece; com 451 s, acontece. Nada fica gravado (a transacao volta)."""
+    t = await _terceiro_revisado(dono)
+    vistas: list[Any] = []
+    async with rotinas_db.connect() as c:  # uma transacao so, ate o rollback
+        for segundos in (INTERVALO / 2 - 1, INTERVALO / 2 + 1):
+            await c.execute(
+                text(
+                    "UPDATE sistemas SET conferencias_sem_resposta = 1,"
+                    " conferencia_sem_resposta_em = now() - make_interval(secs => :n) WHERE id = :s"
+                ),
+                {"n": segundos, "s": t.sistema_id},
+            )
+            soma = await c.execute(
+                text(mudou_parou.SQL_SOMAR_SEM_RESPOSTA), {"i": t.sistema_id, "b": t.revisao_id, "meio": INTERVALO / 2}
+            )
+            vistas.append(soma.scalar_one_or_none())
+        await c.rollback()
+    assert vistas == [None, 2]
+    situacao = await _situacao(dono, t.sistema_id)
+    assert (situacao.conferencias_sem_resposta, situacao.conferencia_sem_resposta_em) == (0, None)
+
+
+async def test_duas_copias_sem_resposta_ao_mesmo_tempo_somam_uma(
+    banco_migrado: Parametros, dono: AsyncEngine, rotinas_db: AsyncEngine
+) -> None:
+    """As duas copias acham o servidor mudo no mesmo instante e somam ao mesmo tempo: uma espera a outra na linha e
+    ja ve a hora da primeira soma; a contagem fica em 1."""
+    t = await _terceiro_revisado(dono)
+    juntas = asyncio.Barrier(2)
+
+    async def mudo() -> list[dict[str, Any]]:
+        await juntas.wait()  # as duas copias falham juntas
+        raise RuntimeError("o servidor nao entregou")
+
+    outra = g.engine_do_papel(banco_migrado, "mcp_claro_rotinas")
+    try:
+        a, b = await asyncio.gather(
+            conferir_sistemas(rotinas_db, FonteFalsa({t.sistema_id: mudo}), [ADMIN], intervalo=INTERVALO),
+            conferir_sistemas(outra, FonteFalsa({t.sistema_id: mudo}), [ADMIN], intervalo=INTERVALO),
+        )
+    finally:
+        await outra.dispose()
+    assert t.nome in a.sem_resposta
+    assert t.nome in b.sem_resposta
+    assert t.nome not in a.quarentenas + b.quarentenas
+    situacao = await _situacao(dono, t.sistema_id)
+    assert (situacao.situacao, situacao.conferencias_sem_resposta) == ("ativo", 1)
+
+
+# --- Log sem texto do servidor ----------------------------------------------------------------------------------
+
+
+async def test_log_do_mudou_parou_de_terceiro_sem_nome_nem_texto_do_servidor(
+    dono: AsyncEngine, rotinas_db: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nada do texto de um servidor de terceiros chega ao log das rotinas: nem o nome de uma ferramenta (mudada, nova
+    ou sumida), nem a descricao, nem a mensagem de erro de um servidor que nao entregou, nem a de um erro que vem
+    depois da leitura (a quarentena que falha: o erro do banco leva os parametros do SQL, e neles vao os nomes das
+    ferramentas). O log leva o nome do cadastro (escrito pelo ADMIN), o tipo do erro e numeros."""
+    marca = uuid.uuid4().hex[:12]
+
+    def marcada(letra: str, mais: str = "") -> dict[str, Any]:
+        return t3.definicao(f"ferramenta_{letra}_{marca}", f"Texto do fornecedor {letra} {marca}{mais}")
+
+    mudou = await _terceiro_revisado(dono, definicoes=[marcada("a"), marcada("b")])
+    nova = await _terceiro_revisado(dono, definicoes=[marcada("c")])
+    sumiu = await _terceiro_revisado(dono, definicoes=[marcada("d"), marcada("e")])
+    mudo = await _terceiro_revisado(dono, definicoes=[marcada("f")])
+    nao_feita = await _terceiro_revisado(dono, definicoes=[marcada("g")])
+    receita_id, receita, _ = await _revisao_fora_da_receita(dono, [marcada("h")])
+    quebra = await _terceiro_revisado(dono, definicoes=[marcada("j")])
+    fonte = FonteFalsa(
+        {
+            mudou.sistema_id: [marcada("a", " (texto novo)"), marcada("b")],
+            nova.sistema_id: [marcada("c"), marcada("i")],
+            sumiu.sistema_id: [marcada("d")],
+            mudo.sistema_id: RuntimeError(f"o servidor respondeu {marca}"),
+            nao_feita.sistema_id: ConferenciaNaoFeita(f"o despachante disse {marca}"),
+            receita_id: [marcada("h")],
+            quebra.sistema_id: [marcada("j", " (texto novo)")],
+        }
+    )
+    original = mudou_parou.por_em_quarentena
+
+    async def quarentena_que_quebra(*args: Any, **kwargs: Any) -> Any:
+        """So para ``quebra``: o erro sai depois da leitura, fora do ``try`` da fonte, com o texto do servidor."""
+        if kwargs.get("sistema_id") == quebra.sistema_id:
+            nomes = [d.nome_original for d in kwargs.get("diferencas", ())]
+            raise RuntimeError(f"a quarentena nao gravou: {nomes} {marca}")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(mudou_parou, "por_em_quarentena", quarentena_que_quebra)
+    quarentenas: list[str] = []
+    with capture_logs() as linhas:
+        for _ in range(RODADAS_SEM_RESPOSTA):
+            resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
+            quarentenas += resultado.quarentenas
+            assert quebra.nome in resultado.sem_resposta
+    assert sorted(quarentenas) == sorted([mudou.nome, nova.nome, sumiu.nome, mudo.nome, receita])
+    eventos = {linha["event"] for linha in linhas}
+    assert {
+        "sistema_em_quarentena",
+        "revisao_do_servidor_sem_a_impressao_da_lista",
+        "mudou_parou_sem_resposta",
+        "sistema_em_quarentena_sem_resposta",
+        "mudou_parou_nao_conferido",
+    } <= eventos, eventos
+    # O erro de ``quebra`` passou pelo log da rodada (o ``except`` de ``conferir_sistemas``), so com o tipo.
+    assert [
+        linha["erro"]
+        for linha in linhas
+        if (linha["event"], linha.get("sistema")) == ("mudou_parou_sem_resposta", quebra.nome)
+    ] == ["RuntimeError"] * RODADAS_SEM_RESPOSTA
+    assert (await _situacao(dono, quebra.sistema_id)).situacao == "ativo"
+    bruto = json.dumps(linhas, default=str, ensure_ascii=False)
+    assert marca not in bruto
+    # O que o log leva: o nome do cadastro e o numero de mudancas.
+    por_sistema = {linha["sistema"]: linha["mudancas"] for linha in linhas if linha["event"] == "sistema_em_quarentena"}
+    assert por_sistema == {mudou.nome: 1, nova.nome: 1, sumiu.nome: 1, receita: 0}
 
 
 async def test_mudo_de_novo_depois_de_nova_revisao_avisa_o_admin_de_novo(
@@ -870,7 +1119,7 @@ async def test_mudo_de_novo_depois_de_nova_revisao_avisa_o_admin_de_novo(
     revisoes = [t.revisao_id]
     for vez in range(2):
         for _ in range(RODADAS_SEM_RESPOSTA):
-            resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN])
+            resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
         assert resultado.quarentenas == [t.nome], vez
         async with dono.begin() as c:  # o ADMIN confere com o fornecedor e conclui de novo
             revisoes.append(await t3.gravar_revisao_do_servidor(c, t.sistema_id))
@@ -893,14 +1142,14 @@ async def test_aviso_que_falha_desfaz_a_quarentena_e_nada_e_contado(
         raise RuntimeError("a fila de avisos nao gravou")
 
     monkeypatch.setattr(mudou_parou, "avisar_admin", aviso_que_falha)
-    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN])
+    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
     assert t.nome not in resultado.quarentenas
     assert (await _situacao(dono, t.sistema_id)).situacao == "ativo"
     assert await _linhas(dono, t.sistema_id, "sistema_em_quarentena") == []
     assert contados.de("mudou_parou_quarentenas") == 0
 
     monkeypatch.setattr(mudou_parou, "avisar_admin", original)
-    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN])
+    resultado = await conferir_sistemas(rotinas_db, fonte, [ADMIN], intervalo=SEGUIDAS)
     assert resultado.quarentenas == [t.nome]
     assert (await _situacao(dono, t.sistema_id)).situacao == "quarentena"
     assert len(await _linhas(dono, t.sistema_id, "sistema_em_quarentena")) == 1
@@ -912,15 +1161,16 @@ async def test_quarentena_do_mudou_parou_cancela_o_que_espera_e_conta(
     banco_migrado: Parametros, contados: Contados
 ) -> None:
     """Com uma acao esperando a ficha, a quarentena do mudou-parou a cancela e o painel conta: ``acoes_paradas``
-    com o motivo ``quarentena`` e ``mudou_parou_quarentenas`` com o motivo ``mudou``."""
+    com o mesmo motivo que a porta de saida usa para a acao parada pela quarentena (``MOTIVO_PARADA``: uma serie so
+    no painel) e ``mudou_parou_quarentenas`` com o motivo ``mudou``."""
     async with subir_mundo(banco_migrado) as m:
         espera = await m.chamar("ana", "t_enviar", {"destinatario": "fora", "texto": "espera a ficha"})
         op = await m.operacao(str((espera.meta or {})[PREFIXO_META + "protocolo"]))
         assert op.estado == Estado.AGUARDANDO_FICHA
-        resultado = await conferir_sistemas(m.rotinas_db, FonteFalsa({m.terceiro_id: []}), [ADMIN])
+        resultado = await conferir_sistemas(m.rotinas_db, FonteFalsa({m.terceiro_id: []}), [ADMIN], intervalo=SEGUIDAS)
         assert resultado.quarentenas == [m.terceiro_nome]
         assert (await m.operacao(op.protocolo)).estado == Estado.CANCELADA
-        assert contados.de("acoes_paradas", motivo="quarentena") == 1
+        assert contados.de("acoes_paradas", motivo=MOTIVO_PARADA) == 1
         assert contados.de("acoes_paradas") == 1
         assert contados.de("mudou_parou_quarentenas", motivo="mudou") == 1
         (aviso,) = await _emails(m.dono, m.terceiro_id, "sistema_em_quarentena")

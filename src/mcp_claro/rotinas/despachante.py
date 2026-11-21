@@ -8,13 +8,10 @@ terceiros exige, critica A5).
 Quando a falha e do MCP-CLARO e nao do sistema, ``declaracoes`` levanta ``ConferenciaNaoFeita``, e o
 mudou-parou nao conta uma rodada sem resposta do servidor: o pedido nem chegou ao despachante (conexao
 recusada, prazo da conexao, TLS), o despachante respondeu 503, disse que o sistema deixou de estar
-ativo (404) ou deu um dos motivos de ``MOTIVOS_DO_MCP_CLARO``. Qualquer outra falha conta: o despachante
-foi alcancado e o sistema nao entregou.
-
-Hoje o despachante ainda responde 502 ``declaracoes_indisponiveis`` tambem com a sala de visitas fora e com
-a chave das declaracoes que o cofre nao abriu; esses casos contam como rodada sem resposta (o lado seguro)
-ate ele responder 503 ou com o motivo ``sala_fora`` ou ``chave_indisponivel`` (pedido ao G3a). As rotinas
-ja tratam esses motivos como conferencia nao feita.
+ativo (404) ou deu um dos motivos de ``MOTIVOS_DO_MCP_CLARO``. A sala de visitas fora (``sala_fora``) e a
+chave das declaracoes que o cofre nao abriu (``chave_indisponivel``) chegam assim: 503 com motivo proprio.
+Qualquer outra falha conta: o despachante foi alcancado e o sistema nao entregou (por exemplo, 502
+``declaracoes_indisponiveis``).
 """
 
 from __future__ import annotations

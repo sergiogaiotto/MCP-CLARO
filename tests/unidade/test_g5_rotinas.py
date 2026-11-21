@@ -11,14 +11,20 @@ import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, cast
 
 import httpx2
 import pytest
 import yaml
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mcp_claro.config.settings import Parametros
+from mcp_claro.extrato.frases import AVISOS_ADMIN, aviso_admin
 from mcp_claro.regras.sinais import MAIOR_JANELA_MINUTOS
-from mcp_claro.rotinas import acoes
+from mcp_claro.rotinas import acoes, mudou_parou
+from mcp_claro.rotinas import app as app_rotinas
+from mcp_claro.rotinas import despachante as rotinas_despachante
+from mcp_claro.rotinas.config import ConfigRotinas
 from mcp_claro.rotinas.despachante import MOTIVOS_DO_MCP_CLARO, ClienteDespachante
 from mcp_claro.rotinas.mudou_parou import RODADAS_SEM_RESPOSTA, ConferenciaNaoFeita
 
@@ -54,6 +60,9 @@ async def test_declaracoes_devolve_a_lista_do_despachante() -> None:
     ("status", "corpo"),
     [
         (503, {"mensagem": "o despachante esta subindo"}),
+        # A sala de visitas fora e a chave que o cofre nao abriu: 503 com motivo proprio (o despachante, G3r).
+        (503, {"motivo": "sala_fora", "mensagem": "x"}),
+        (503, {"motivo": "chave_indisponivel", "mensagem": "x"}),
         (404, {"mensagem": "sistema inativo"}),
         *((502, {"motivo": m, "mensagem": "x"}) for m in sorted(MOTIVOS_DO_MCP_CLARO)),
         (500, {"motivo": "sala_fora"}),
@@ -145,3 +154,113 @@ def test_apelido_de_antes_da_fase_3_faz_a_rodada_inteira() -> None:
 
     assert mudou_parou.conferir_sistemas_proprios is mudou_parou.conferir_sistemas
     assert app.conferir_sistemas is mudou_parou.conferir_sistemas
+
+
+async def test_tarefa_do_mudou_parou_passa_o_proprio_intervalo(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A soma das rodadas sem resposta compara com a metade do intervalo da tarefa ``mudou_parou``: o app passa o
+    intervalo da configuracao (``TOOL_DRIFT_CHECK_SECONDS``), e nao outro."""
+    vistos: list[dict[str, Any]] = []
+
+    async def conferir(*args: Any, **kwargs: Any) -> None:
+        vistos.append({"args": args, **kwargs})
+
+    monkeypatch.setattr(app_rotinas, "conferir_sistemas", conferir)
+    cfg = ConfigRotinas(intervalo_mudou_parou=1234.0, intervalo_curto=7.0, emails_admin=("a@exemplo.teste",))
+    engine = cast(AsyncEngine, object())
+    (tarefa,) = (t for t in app_rotinas.montar_tarefas(engine, cfg, cast(Any, object())) if t.nome == "mudou_parou")
+    assert tarefa.intervalo == 1234.0
+    await tarefa.rodar()
+    ((visto,),) = [vistos]
+    assert visto["intervalo"] == 1234.0
+    assert visto["args"][0] is engine
+    assert visto["args"][2] == ("a@exemplo.teste",)
+
+
+def test_conferir_sistemas_exige_o_intervalo() -> None:
+    """Sem valor padrao: quem chama a rodada diz o intervalo (um esquecido daria soma a cada rodada de cada copia)."""
+    import inspect
+
+    parametro = inspect.signature(mudou_parou.conferir_sistemas).parameters["intervalo"]
+    assert parametro.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parametro.default is inspect.Parameter.empty
+    assert "make_interval(secs => :meio)" in mudou_parou.SQL_SOMAR_SEM_RESPOSTA
+    assert "conferencia_sem_resposta_em = now()" in mudou_parou.SQL_SOMAR_SEM_RESPOSTA
+
+
+def test_aviso_da_quarentena_por_revisao_que_nao_confere() -> None:
+    """Frase propria para a quarentena por revisao gravada fora da receita (no lugar de "mudou 0 ferramentas")."""
+    evento = "sistema_em_quarentena_revisao_inconsistente"
+    assert AVISOS_ADMIN[evento].campos() == {"sistema"}
+    assert aviso_admin(evento, sistema="Fornecedor CRM") == (
+        "MCP-CLARO: servidor de terceiros em quarentena (revisao que nao confere)",
+        "A revisao do servidor de terceiros Fornecedor CRM guardada no MCP-CLARO nao confere com a lista de"
+        " ferramentas dela. Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi"
+        " cancelado e os limites das pessoas com ele foram suspensos. Leia as ferramentas e conclua a revisao do"
+        " servidor de novo nas telas do ADMIN; se acontecer outra vez, fale com a equipe do MCP-CLARO.",
+    )
+
+
+def test_docstrings_das_rotinas_dizem_que_sala_fora_e_cofre_nao_contam() -> None:
+    """O despachante responde 503 com motivo proprio para a sala de visitas fora e para a chave que o cofre nao abriu
+    (G3r): as docstrings nao dizem mais que esses casos chegam como 502 e contam."""
+    for modulo in (mudou_parou, rotinas_despachante):
+        texto = " ".join((modulo.__doc__ or "").split())
+        assert "ainda chegam como 502" not in texto
+        assert "ainda responde 502" not in texto
+        assert "G3a" not in texto
+        assert "sala_fora" in texto
+        assert "chave_indisponivel" in texto
+
+
+# --- F4 (etapa 4f): a metade do intervalo, sem banco e sem relogio --------------------------------------------------
+
+
+class _Resultado:
+    def scalar_one_or_none(self) -> None:
+        return None  # nada somado: a rodada para aqui, sem quarentena
+
+
+class _Conexao:
+    def __init__(self, vistos: list[tuple[str, dict[str, Any]]]) -> None:
+        self.vistos = vistos
+
+    async def execute(self, sql: Any, params: dict[str, Any] | None = None) -> _Resultado:
+        self.vistos.append((str(sql), dict(params or {})))
+        return _Resultado()
+
+
+class _Transacao:
+    def __init__(self, vistos: list[tuple[str, dict[str, Any]]]) -> None:
+        self.vistos = vistos
+
+    async def __aenter__(self) -> _Conexao:
+        return _Conexao(self.vistos)
+
+    async def __aexit__(self, *_: object) -> bool:
+        return False
+
+
+class _EngineQueGrava:
+    """Engine falso: cada ``begin()`` da uma conexao que grava o SQL e os parametros de cada ``execute``."""
+
+    def __init__(self) -> None:
+        self.vistos: list[tuple[str, dict[str, Any]]] = []
+
+    def begin(self) -> _Transacao:
+        return _Transacao(self.vistos)
+
+
+@pytest.mark.parametrize("intervalo", [900.0, 60.0, 1234.0, 61.0])
+async def test_meio_passado_ao_sql_e_a_metade_exata_do_intervalo(intervalo: float) -> None:
+    """``_sem_resposta_de_terceiro`` passa ao SQL a metade exata do intervalo. Os testes com banco deixam folga
+    contra CI lento e nao veem fatores perto de 0,5 (0,45 ou 1/2,2); este ve, sem banco e sem relogio."""
+    engine = _EngineQueGrava()
+    resultado = mudou_parou.ResultadoMudouParou()
+    sistema_id, revisao_id = uuid.uuid4(), uuid.uuid4()
+    await mudou_parou._sem_resposta_de_terceiro(
+        cast(AsyncEngine, engine), sistema_id, "x", revisao_id, [], resultado, intervalo=intervalo
+    )
+    ((sql, params),) = engine.vistos
+    assert sql == mudou_parou.SQL_SOMAR_SEM_RESPOSTA
+    assert params == {"i": sistema_id, "b": revisao_id, "meio": intervalo / 2}
+    assert resultado.sem_resposta == ["x"]

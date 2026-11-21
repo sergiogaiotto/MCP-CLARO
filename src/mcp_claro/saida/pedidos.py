@@ -44,7 +44,7 @@ import asyncio
 import math
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
@@ -112,10 +112,12 @@ class Pedido:
     argumentos: dict[str, Any]
     aplicativo_diz: str | None
     trace_id: str | None = None
-    terceiros: bool = False
+    terceiros: bool = field(kw_only=True)
     """Servidores de terceiros valem para quem pede: chave da Fase 3 ligada ou pessoa de teste. Decide a
     releitura de uma ferramenta de terceiro e se o sinal "leu texto de fora" vindo de terceiro conta no alerta
-    dos tres sinais (o de ferramenta propria marcada conta sempre)."""
+    dos tres sinais (o de ferramenta propria marcada conta sempre). Obrigatorio e so por nome, sem valor padrao:
+    com ``False`` por padrao, quem esquecesse o campo faria o sinal de terceiro nao contar no alerta, o lado
+    inseguro. Cada chamador diz o valor (a entrada: ``terceiros_ligados``)."""
 
 
 RECUSA_NULO: Final = (

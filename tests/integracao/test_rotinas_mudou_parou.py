@@ -37,7 +37,7 @@ from tests.apoio import porta_livre, servidor
 from tests.cifra_falsa import CifraFalsa
 from tests.integracao import test_rotinas_apoio as apoio
 from tests.integracao.test_rotinas_apoio import cadastro_minimo
-from tests.integracao.test_rotinas_terceiros import FonteSo
+from tests.integracao.test_rotinas_terceiros import SEGUIDAS, FonteSo
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
@@ -147,13 +147,17 @@ async def test_ferramenta_que_passa_a_pedir_mais_e_suspensa(
         assert [f.nome_vitrine for f in antes] == [m.nome_vitrine]
 
         # Sem mudanca: nada acontece.
-        resultado = await conferir_sistemas(engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN])
+        resultado = await conferir_sistemas(
+            engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN], intervalo=SEGUIDAS
+        )
         assert m.nome_vitrine not in resultado.suspensas
         assert await _ferramenta(engine_rotinas, m.ferramenta_id) == ("ativa", None)
 
         # O sistema passa a pedir mais: mudou, parou.
         await _modo(m.sistema_url, "muda_definicao")
-        resultado = await conferir_sistemas(engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN])
+        resultado = await conferir_sistemas(
+            engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN], intervalo=SEGUIDAS
+        )
         assert resultado.suspensas == [m.nome_vitrine]
         situacao, motivo = await _ferramenta(engine_rotinas, m.ferramenta_id)
         assert situacao == "suspensa"
@@ -196,7 +200,7 @@ async def test_ferramenta_que_passa_a_pedir_mais_e_suspensa(
         assert "extra_0" in vista["inputSchema"]["properties"]  # o despachante guardou o que viu
 
         # Rodar de novo nao repete extrato nem aviso: a ferramenta ja esta suspensa.
-        await conferir_sistemas(engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN])
+        await conferir_sistemas(engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN], intervalo=SEGUIDAS)
         async with engine_dono.connect() as c:
             n_extrato = (
                 await c.execute(
@@ -219,7 +223,9 @@ async def test_mudanca_so_de_texto_em_sistema_proprio_so_registra(
 ) -> None:
     async with montar(banco_migrado, parametros_rotinas, engine_dono, monkeypatch) as m:
         await _modo(m.sistema_url, "muda_so_texto")
-        resultado = await conferir_sistemas(engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN])
+        resultado = await conferir_sistemas(
+            engine_rotinas, FonteSo(m.despachante, {m.sistema_id}), [ADMIN], intervalo=SEGUIDAS
+        )
         assert m.nome_vitrine in resultado.mudaram
         assert m.nome_vitrine not in resultado.suspensas
         assert await _ferramenta(engine_rotinas, m.ferramenta_id) == ("ativa", None)
@@ -274,12 +280,12 @@ async def test_sistema_que_nao_responde_nao_para_os_outros(
             )
         await _modo(m.sistema_url, "muda_definicao")
         fonte = FonteSo(m.despachante, {m.sistema_id, mudo_id})
-        resultado = await conferir_sistemas(engine_rotinas, fonte, [ADMIN])
+        resultado = await conferir_sistemas(engine_rotinas, fonte, [ADMIN], intervalo=SEGUIDAS)
         assert any(nome.startswith("aaa-mudo-") for nome in resultado.sem_resposta)
         assert m.nome_vitrine in resultado.suspensas
         # D28: sistema proprio mudo segue so em "sem resposta", rodada apos rodada, sem quarentena.
         for _ in range(2):
-            resultado = await conferir_sistemas(engine_rotinas, fonte, [ADMIN])
+            resultado = await conferir_sistemas(engine_rotinas, fonte, [ADMIN], intervalo=SEGUIDAS)
             assert any(nome.startswith("aaa-mudo-") for nome in resultado.sem_resposta)
             assert resultado.quarentenas == []
         async with engine_dono.connect() as c:

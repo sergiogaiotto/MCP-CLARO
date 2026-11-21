@@ -243,7 +243,7 @@ async def test_401_no_segundo_post_do_fio_antigo_nao_vira_nao_saiu(
     # Na porta de saida: a acao fica "nao confirmada" (nunca "nao saiu", que deixaria repetir) e a chave nao vence.
     op: Any = SimpleNamespace(pessoa_id=uuid.uuid4(), argumentos={}, fila_id=1)
     aberta: Any = SimpleNamespace(segredo="chave-ana", cifrada="cifrada")
-    estado, _, _ = await PortaDeSaida(engine=None, cifra=None)._classificar(op, FERRAMENTA, r, aberta)  # type: ignore[arg-type]
+    estado, _, _, _ = await PortaDeSaida(engine=None, cifra=None)._classificar(op, FERRAMENTA, r, aberta)  # type: ignore[arg-type]
     assert estado == Estado.NAO_CONFIRMADA
     assert vencidas == []
 

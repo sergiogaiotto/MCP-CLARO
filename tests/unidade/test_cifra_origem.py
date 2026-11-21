@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from mcp_claro.cofre import AcessoNegado, CofreIndisponivel, PedidoRecusado
 from mcp_claro.config.settings import ConfiguracaoInvalida
@@ -15,6 +16,7 @@ from mcp_claro.despachante import autorizacao, chaves
 from mcp_claro.despachante.cifra_origem import (
     CifraPorOrigem,
     ContextoSemSistema,
+    OrigemIndisponivel,
     conferir_chave_de_terceiros,
     sistema_do_contexto,
 )
@@ -161,7 +163,9 @@ async def test_busca_que_falha_chega_a_todos_e_a_proxima_tenta_de_novo() -> None
     await _esperando(banco, 1)
     banco.liberar.set()
     resultados = await asyncio.gather(*pedidos, return_exceptions=True)
-    assert all(isinstance(r, OSError) for r in resultados)
+    # A falha da busca chega a todos como OrigemIndisponivel (um ContextoSemSistema: a leitura e a porta a tratam
+    # como a chave que o cofre nao abriu), com o erro do banco por baixo.
+    assert all(isinstance(r, OrigemIndisponivel) and isinstance(r.__cause__, OSError) for r in resultados)
     banco.erro = None
     assert await cifra.cifrar(b"x", chaves.contexto(sistema, None, None)) == "terceiros:x"
     assert banco.leituras == [sistema, sistema]
@@ -246,3 +250,35 @@ async def test_partida_aceita_chave_de_terceiros_derived() -> None:
 async def test_partida_recusa_chave_de_terceiros_que_falta_ou_nao_e_derived(cofre: Any) -> None:
     with pytest.raises(ConfiguracaoInvalida):
         await conferir_chave_de_terceiros(cofre, "mcp-claro-chaves-terceiros")
+
+
+def test_engine_sem_pool_recusa_a_partida_se_o_sqlalchemy_nao_tiver_o_criador() -> None:
+    from types import SimpleNamespace
+
+    from mcp_claro.despachante.cifra_origem import engine_sem_pool
+
+    sem_criador: Any = SimpleNamespace(sync_engine=SimpleNamespace(pool=object()), url="postgresql+asyncpg://x@h/d")
+    with pytest.raises(ConfiguracaoInvalida):
+        engine_sem_pool(sem_criador)
+
+
+@pytest.mark.parametrize(
+    "erro", [OSError("conexao recusada"), TimeoutError(), SQLAlchemyError("banco")], ids=["rede", "prazo", "banco"]
+)
+async def test_busca_que_falha_por_rede_prazo_ou_banco_vira_origem_indisponivel_sem_guardar(erro: Exception) -> None:
+    sistema = uuid.uuid4()
+    vezes: list[uuid.UUID] = []
+
+    async def origem_de(sistema_id: uuid.UUID) -> str | None:
+        vezes.append(sistema_id)
+        if len(vezes) == 1:
+            raise erro
+        return "proprio"
+
+    cifra = CifraPorOrigem(propria=Anotadora("propria"), terceiros=Anotadora("terceiros"), origem_de=origem_de)
+    with pytest.raises(OrigemIndisponivel) as falha:
+        await cifra.cifrar(b"x", chaves.contexto(sistema, None, None))
+    assert isinstance(falha.value, ContextoSemSistema)
+    assert falha.value.__cause__ is erro
+    assert await cifra.cifrar(b"x", chaves.contexto(sistema, None, None)) == "propria:x"  # buscou de novo
+    assert vezes == [sistema, sistema]

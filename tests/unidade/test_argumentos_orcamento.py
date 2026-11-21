@@ -23,6 +23,7 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from jsonschema._utils import equal as igual_da_biblioteca
+from jsonschema.exceptions import SchemaError
 
 from mcp_claro.cadastro.esquema import ESCOLHAS_MAXIMAS, EsquemaRecusado, conferir_terceiro, para_conferir
 from mcp_claro.entrada import argumentos as argumentos_mod
@@ -174,9 +175,9 @@ def ref_longa(letras: int, chamadas: int = 600) -> dict[str, Any]:
 
 
 PEDIDO_REF = {"l": [0] * TETO_LISTA}
-PASSOS_COM_NOME_CURTO = 50_231
-"""Onde a conta parava antes da R3a com o nome de 1 letra (medido pelo verificador do G4r): o texto curto de ``$ref``
-nao soma passo, entao a conta de hoje fica a mesma."""
+PASSOS_COM_NOME_CURTO = 50_213
+"""Onde a conta para com o nome de 1 letra. Antes do custo fixo por referencia (R3ar), parava em 50.231 (medido pelo
+verificador do G4r), depois de seguir umas 49 mil referencias; agora, depois de umas 12 mil."""
 
 
 def sem_a_revisao(esquema: dict[str, Any], pedido: dict[str, Any]) -> dict[str, Any]:
@@ -189,14 +190,19 @@ def sem_a_revisao(esquema: dict[str, Any], pedido: dict[str, Any]) -> dict[str, 
     return copia
 
 
-def test_texto_de_referencia_conta_um_passo_a_cada_100_letras() -> None:
+def test_referencia_seguida_conta_3_passos_fixos_e_um_a_cada_100_letras() -> None:
     assert argumentos_mod.LETRAS_POR_PASSO == 100
-    assert argumentos_mod._passos("$ref", "#/$defs/s", {}) == 1
-    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 92, {}) == 2
-    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 120_000, {}) == 1 + 1200
-    assert argumentos_mod._passos("$dynamicRef", "#" + "n" * 299, []) == 4  # recusada na revisao; conta por defesa
+    assert argumentos_mod.PASSOS_POR_REFERENCIA == 3
+    # A palavra (1), o custo fixo de seguir a referencia (3) e as letras do texto dela (1 a cada 100).
+    assert argumentos_mod._passos("$ref", "#/$defs/s", {}) == 1 + 3
+    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 91, {}) == 1 + 3
+    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 92, {}) == 1 + 3 + 1
+    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 120_000, {}) == 1 + 3 + 1200
+    # $dynamicRef e recusada na revisao; conta por defesa, como $ref.
+    assert argumentos_mod._passos("$dynamicRef", "#" + "n" * 299, []) == 1 + 3 + 3
     assert argumentos_mod._passos("$ref", 7, {}) == 1  # nao e texto: a revisao e a conferencia do esquema recusam
     assert argumentos_mod._passos("const", "n" * 1000, {}) == 1  # so as referencias leem o texto a cada chamada
+    assert argumentos_mod._passos("const", "#/$defs/s", {}) == 1  # e so elas pagam o custo fixo
 
 
 def test_referencia_de_nome_longo_e_recusada_na_revisao_e_sem_ela_pelo_orcamento_em_milissegundos() -> None:
@@ -212,18 +218,107 @@ def test_referencia_de_nome_longo_e_recusada_na_revisao_e_sem_ela_pelo_orcamento
     recusado_pelo_orcamento(copia, PEDIDO_REF)
 
 
-def test_referencia_de_nome_curto_mantem_a_conta_de_hoje() -> None:
-    # Nome curto: passa na revisao, e o pedido para no orcamento no mesmo passo de antes. (So a conta: seguir 50 mil
-    # referencias curtas leva uns 0,3 s de CPU, mais de 1 s com o tracemalloc de recusado_pelo_orcamento.)
+def test_referencia_de_nome_curto_para_no_orcamento_sempre_no_mesmo_passo() -> None:
+    # Nome curto: passa na revisao, e o pedido para no orcamento sempre no mesmo passo.
     copia = de_terceiro(ref_longa(1), PEDIDO_REF)
     assert passos_gastos(copia, PEDIDO_REF) == -PASSOS_COM_NOME_CURTO
-    # No teto da revisao (o texto da referencia com 256 letras), cada busca soma 2 passos e passa na revisao.
+    # No teto da revisao (o texto da referencia com 256 letras), cada busca soma 2 passos pelas letras e passa na
+    # revisao.
     no_teto = ref_longa(256 - len("#/$defs/"))
     conferir_terceiro(no_teto)
     with pytest.raises(EsquemaRecusado) as erro:
         conferir_terceiro(ref_longa(256 - len("#/$defs/") + 1))
     assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("referencia", "$ref", "$defs/s")
     assert passos_gastos(de_terceiro(no_teto, PEDIDO_REF), PEDIDO_REF) < 0
+
+
+# --- Custo fixo por referencia seguida (R3ar; pendencia 3 do R3a) -----------------------------------------------
+
+
+def cadeia(n: int) -> dict[str, Any]:
+    """O pior caso achado pelo R3a: cada item da lista segue uma cadeia de referencias curtas, uma chamando a outra
+    (``d0`` chama ``d1`` e assim por diante, ate ``d{n}``, vazia): ``n + 1`` referencias por item."""
+    definicoes: dict[str, Any] = {f"d{k}": {"$ref": f"#/$defs/d{k + 1}"} for k in range(n)}
+    definicoes[f"d{n}"] = {}
+    return em_json(objeto({"l": {"type": "array", "items": {"$ref": "#/$defs/d0"}}}, **{"$defs": definicoes}))
+
+
+def referencias_seguidas(monkeypatch: pytest.MonkeyPatch, copia: dict[str, Any], pedido: dict[str, Any]) -> int:
+    """Quantas vezes a conferencia chegou a um ``$ref`` antes de passar ou de parar no orcamento."""
+    seguidas = 0
+    original = argumentos_mod._passos
+
+    def contando(nome: str, valor: Any, instancia: Any) -> int:
+        nonlocal seguidas
+        seguidas += nome == "$ref"
+        return original(nome, valor, instancia)
+
+    with monkeypatch.context() as troca:
+        troca.setattr(argumentos_mod, "_passos", contando)
+        with contextlib.suppress(OrcamentoEsgotado):
+            conferir_argumentos(copia, pedido, terceiro=True)
+    return seguidas
+
+
+def test_cadeia_de_referencias_curtas_para_depois_de_um_quarto_das_referencias(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Antes do custo fixo: 60 referencias curtas em cada item de uma lista de 1.000 paravam no orcamento depois de
+    # seguir umas 49 mil referencias, de 0,28 a 0,49 s de CPU (de 1,6 a 2,3 s com tracemalloc). Com 3 passos a mais
+    # por referencia, param depois de umas 12 mil, de 0,07 a 0,12 s de CPU (de 0,4 a 0,7 s com tracemalloc). Sao os
+    # tempos das rodadas medidas nesta maquina (os do texto ao G8); outra maquina, ou a mesma carregada, pode dar
+    # outros. A prova e a conta, deterministica: o tempo fica no relatorio.
+    copia = de_terceiro(cadeia(60), PEDIDO_REF)
+    with pytest.raises(OrcamentoEsgotado) as erro:
+        conferir_argumentos(copia, PEDIDO_REF, terceiro=True)
+    assert erro.value.passos == 50_003
+    seguidas = referencias_seguidas(monkeypatch, copia, PEDIDO_REF)
+    assert seguidas == 12_250
+    with monkeypatch.context() as troca:
+        troca.setattr(argumentos_mod, "PASSOS_POR_REFERENCIA", 0)
+        sem_o_custo_fixo = referencias_seguidas(monkeypatch, copia, PEDIDO_REF)
+    assert sem_o_custo_fixo > 3.9 * seguidas
+    assert passos_gastos(copia, PEDIDO_REF) == -erro.value.passos  # sempre no mesmo passo
+
+
+def test_cadeia_de_10_referencias_em_cada_item_ainda_cabe_no_orcamento() -> None:
+    # 11 referencias por item, 1.000 itens: type, properties (1 + 1), type e items (1 + 1.000), e 4 passos por
+    # referencia. Sem o custo fixo, 12.005 passos: menos de um quarto do orcamento, entao continua cabendo.
+    copia = de_terceiro(cadeia(10), PEDIDO_REF)
+    assert conferir_argumentos(copia, PEDIDO_REF, terceiro=True) == 1005 + 1000 * 11 * 4 == 45_005
+
+
+LISTA_DE_OBJETOS = em_json(
+    objeto(
+        {"l": {"type": "array", "items": {"$ref": "#/$defs/item"}}},
+        **{
+            "$defs": {
+                "item": {
+                    "type": "object",
+                    "properties": {c: {"type": "integer"} for c in "abcde"},
+                    "required": list("abcde"),
+                }
+            }
+        },
+    )
+)
+REFERENCIAS_QUE_PASSAM: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
+    "cadeia_de_10": (cadeia(10), PEDIDO_REF),
+    "lista_de_objetos": (LISTA_DE_OBJETOS, {"l": [dict.fromkeys("abcde", 1) for _ in range(500)]}),
+    "nome_no_teto": (ref_longa(256 - len("#/$defs/"), chamadas=2), PEDIDO_REF),
+}
+
+
+@pytest.mark.parametrize("caso", list(REFERENCIAS_QUE_PASSAM))
+def test_o_custo_fixo_por_referencia_no_maximo_quadruplica_a_conta(caso: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Cada referencia contava ao menos 1 passo e agora conta 3 a mais: a conta de um pedido no maximo quadruplica.
+    # Por isso, um pedido que gastava ate um quarto do orcamento continua cabendo nele.
+    esquema, pedido = REFERENCIAS_QUE_PASSAM[caso]
+    copia = de_terceiro(esquema, pedido)
+    agora = conferir_argumentos(copia, pedido, terceiro=True)
+    with monkeypatch.context() as troca:
+        troca.setattr(argumentos_mod, "PASSOS_POR_REFERENCIA", 0)
+        antes = conferir_argumentos(copia, pedido, terceiro=True)
+    assert antes < agora <= 4 * antes
+    assert agora <= ORCAMENTO_PASSOS
 
 
 def test_a_frase_do_orcamento() -> None:
@@ -479,6 +574,20 @@ def test_conferir_esquema_fundo_demais_levanta_esquema_invalido(niveis: int) -> 
     assert str(erro.value) == "esquema invalido: partes demais umas dentro das outras para conferir"
     assert not isinstance(erro.value, EsquemaRecusado)
     conferir_esquema(objeto({"p": propriedades_aninhadas(60)}))  # o que cabe na pilha segue como antes
+
+
+def test_conferir_esquema_troca_so_o_estouro_da_pilha_pela_frase_de_partes_demais() -> None:
+    # A guarda da pilha so troca o RecursionError: um esquema invalido comum mostra ao ADMIN o motivo de verdade, e
+    # nao "partes demais umas dentro das outras".
+    with pytest.raises(EsquemaInvalido) as erro:
+        conferir_esquema({"type": "string"})
+    assert str(erro.value) == 'o esquema de entrada precisa ter "type": "object"'
+    assert erro.value.__cause__ is None
+    with pytest.raises(EsquemaInvalido) as erro:
+        conferir_esquema({"type": "object", "properties": {"a": {"type": 5}}})
+    assert str(erro.value).startswith("esquema invalido: ")
+    assert str(erro.value) != argumentos_mod.ESQUEMA_FUNDO_DEMAIS
+    assert isinstance(erro.value.__cause__, SchemaError)
 
 
 def test_o_validador_que_conta_tambem_nao_confere_format() -> None:

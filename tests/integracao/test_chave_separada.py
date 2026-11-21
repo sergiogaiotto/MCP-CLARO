@@ -52,9 +52,15 @@ CONSULTAR = {
 
 @pytest.fixture(scope="module")
 def bao(openbao: Bao) -> Bao:
-    """O cofre de teste com a chave de terceiros, como scripts/iniciar-cofre.sh cria (derived, nao exportavel)."""
-    openbao.api("POST", f"transit/keys/{TERCEIROS}", {"type": "aes256-gcm96", "derived": True})
+    """O cofre de teste ja vem com a chave de terceiros: ``test_cofre.preparar`` a cria como
+    scripts/iniciar-cofre.sh (derived, nao exportavel)."""
     return openbao
+
+
+def test_o_cofre_de_teste_ja_vem_com_a_chave_dos_terceiros_como_o_script(bao: Bao) -> None:
+    for nome in (CHAVE, TERCEIROS):
+        chave = bao.api("GET", f"transit/keys/{nome}")["data"]
+        assert (chave["type"], chave["derived"], chave["exportable"]) == ("aes256-gcm96", True, False)
 
 
 @dataclass
@@ -207,7 +213,7 @@ async def test_sem_a_chave_de_terceiros_os_proprios_seguem_e_a_acao_de_terceiro_
             op = SimpleNamespace(
                 pessoa_id=acao_terceiro.pessoa_id, aplicativo_id=acao_terceiro.aplicativo_id, argumentos={}
             )
-            estado, resultado, desfecho = await porta._enviar(op, ferramenta, None, None)  # type: ignore[arg-type]
+            estado, resultado, desfecho, _ = await porta._enviar(op, ferramenta, None, None)  # type: ignore[arg-type]
             assert (estado, resultado) == (Estado.NAO_SAIU, None)
             assert desfecho == "nao deu para abrir a chave no cofre"
             assert chamadas == []

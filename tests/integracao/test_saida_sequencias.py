@@ -382,7 +382,7 @@ async def pedir(m: Mundo, pessoa: str, ferramenta: str, argumentos: dict[str, An
                 op = await fila.por_id(c, op_id)
             repetida = bool(meta.get(PREFIXO_META + "repetido"))
     else:
-        pedido = Pedido(pessoa_id, m.aplicativo, m.ferramentas[(pessoa, ferramenta)], argumentos, None)
+        pedido = Pedido(pessoa_id, m.aplicativo, m.ferramentas[(pessoa, ferramenta)], argumentos, None, terceiros=False)
         try:
             op, repetida = await Pedidos(amb.p, amb.entrada_db).pedir(pedido)
         except AcaoRecusada as erro:

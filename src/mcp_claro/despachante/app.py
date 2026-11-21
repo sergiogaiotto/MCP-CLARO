@@ -5,9 +5,20 @@ Rotas internas (nunca expostas ao portao):
 - ``POST /interno/ler``: leitura reconferida, uma chamada ao sistema;
 - ``POST /interno/sondar``: sondagem de versao no cadastro de um sistema (com o desfecho e as versoes anunciadas;
   sistema desconhecido: 404);
-- ``POST /interno/declaracoes``: le o que o sistema declara (revisao e mudou-parou);
-- ``POST /interno/revisao_servidor``: conclusao da revisao de um servidor de terceiros pelo ADMIN;
-- ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN).
+- ``POST /interno/declaracoes``: le o que o sistema declara (revisao e mudou-parou). 502
+  ``declaracoes_indisponiveis`` quando o sistema nao entregou; 503 com motivo proprio quando a falha e do
+  MCP-CLARO (``sala_fora``: a sala de visitas fora; ``chave_indisponivel``: o cofre nao abriu a chave das
+  declaracoes), para as rotinas nao contarem a rodada como "sem resposta" do servidor (critica A5);
+- ``POST /interno/revisao_servidor``: conclusao da revisao de um servidor de terceiros pelo ADMIN (texto que o
+  banco nao guarda, com caractere nulo ou com um pedaco de par UTF-16 sozinho, e pedido invalido: 400);
+- ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN);
+- ``POST /interno/autorizacao/*``: autorizacao OAuth por pessoa (``despachante.autorizacao``).
+
+Nenhuma rota ``/interno/*`` recebe texto que o banco nao guarda (``_texto_valido``): um texto de primeiro nivel do
+corpo com caractere nulo (U+0000) ou com um pedaco de par UTF-16 sozinho (``\\ud800``, que o JSON aceita) e pedido
+invalido, 400 ``pedido_invalido``, antes de a rota rodar, e nunca erro 500 (``_so_texto_valido``). Cada rota ainda
+confere o tipo dos proprios campos (``trace_id``, ``chave_sondagem`` e ``quem`` so texto) e o texto dentro de
+listas (``publicar``). Os argumentos de uma leitura nao entram nessa regra: vao ao sistema, nao ao banco.
 
 Toda conversa com um sistema sai por um ponto so (``Despachante.ligacao``, ``ligacao.ponto.ligacao_para``), o
 mesmo da porta de saida: sistema proprio pelo cliente fixado; servidor de terceiros pela sala de visitas
@@ -27,12 +38,13 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, TypeIs
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from mcp_claro import __version__
@@ -44,6 +56,7 @@ from mcp_claro.despachante.cifra_origem import CifraPorOrigem, conferir_chave_de
 from mcp_claro.despachante.servico import (
     TETO_PUBLICADAS,
     DeclaracoesIndisponiveis,
+    DeclaracoesNaoConferidas,
     Despachante,
     LeituraRecusada,
     PedidoLeitura,
@@ -68,12 +81,48 @@ def _uuid(valor: Any) -> uuid.UUID | None:
         return None
 
 
+def _texto_valido(valor: Any) -> TypeIs[str]:
+    """Texto que o banco guarda: ``str`` sem caractere nulo (U+0000), que o PostgreSQL recusa em texto e jsonb, e
+    que se escreve em UTF-8 (o JSON aceita ``\\ud800`` sozinho, um pedaco de par que o UTF-8 nao escreve)."""
+    if not isinstance(valor, str) or "\x00" in valor:
+        return False
+    try:
+        valor.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 async def _corpo(pedido: Request) -> dict[str, Any]:
     try:
         corpo = await pedido.json()
     except ValueError:
         return {}
     return corpo if isinstance(corpo, dict) else {}
+
+
+def _pedido_invalido() -> JSONResponse:
+    return JSONResponse({"motivo": "pedido_invalido", "mensagem": "Pedido interno invalido."}, status_code=400)
+
+
+def _so_texto_valido(rota: Route) -> Route:
+    """A ``rota`` interna que recusa (400 ``pedido_invalido``), antes de rodar, o corpo JSON com um texto de primeiro
+    nivel que o banco nao guarda. Vale tambem para as rotas de autorizacao (``despachante.autorizacao``), que levam
+    texto da pessoa (``estado``, ``codigo``, ``erro``) e do ADMIN (``motivo``, ``segredo``): ``estado`` e ``motivo``
+    com caractere nulo davam erro 500. O corpo lido fica guardado no pedido, e a rota le o mesmo."""
+    rodar = rota.endpoint
+
+    async def conferida(pedido: Request) -> Response:
+        try:
+            corpo = await pedido.json()
+        except ValueError:
+            corpo = None  # a rota decide o que fazer com o corpo que nao e JSON
+        if isinstance(corpo, dict) and not all(_texto_valido(v) for v in corpo.values() if isinstance(v, str)):
+            return _pedido_invalido()
+        resposta: Response = await rodar(pedido)
+        return resposta
+
+    return Route(rota.path, conferida, methods=sorted(rota.methods or ()), name=rota.name)
 
 
 def montar_sala(p: Parametros) -> ClienteSala | None:
@@ -180,15 +229,21 @@ def criar_app_despachante(
         limite_exige_passkey=p.FEATURE_PASSKEY,
         terceiros_ligados=terceiros_ligados,
         ligacao=despachante.ligacao,
+        ambiente=ambiente,
+        liberar_locais=liberar_locais,
         conferir_cofre=float(p.VAULT_CHECK_SECONDS),
         emails_admin=p.NOTIFY_ADMIN_EMAILS,
     )
 
     async def ler(pedido: Request) -> JSONResponse:
+        corpo = await _corpo(pedido)
+        trace_id = corpo.get("trace_id")
+        if not (trace_id is None or isinstance(trace_id, str)):
+            return _pedido_invalido()  # vai a coluna de texto do extrato: um numero ou uma lista dariam erro 500
         try:
-            leitura = PedidoLeitura.de_json(await pedido.json())
+            leitura = PedidoLeitura.de_json(corpo)
         except ValueError, KeyError, TypeError:
-            return JSONResponse({"motivo": "pedido_invalido", "mensagem": "Pedido interno invalido."}, status_code=400)
+            return _pedido_invalido()
         try:
             resultado = await despachante.ler(leitura)
         except LeituraRecusada as erro:
@@ -219,7 +274,9 @@ def criar_app_despachante(
 
     async def revisao_servidor(pedido: Request) -> JSONResponse:
         """Conclusao da revisao do servidor: 200 com ``revisado`` verdadeiro, ou falso com ``motivo``, ``mensagem``
-        (para o ADMIN) e ``ferramentas`` [{ferramenta, problema}]; 404 sistema desconhecido; 400 pedido invalido."""
+        (para o ADMIN) e ``ferramentas`` [{ferramenta, problema}]; 404 sistema desconhecido; 400 pedido invalido
+        (inclusive texto que o banco nao guarda em ``fornecedor``, ``quem`` ou num nome de ``publicar``, com
+        caractere nulo ou com ``\\ud800`` sozinho: nunca erro 500)."""
         corpo = await _corpo(pedido)
         sistema_id = _uuid(corpo.get("sistema_id"))
         publicar = corpo.get("publicar")
@@ -229,12 +286,12 @@ def criar_app_despachante(
             sistema_id is None
             or not isinstance(publicar, list)
             or len(publicar) > TETO_PUBLICADAS
-            or not all(isinstance(n, str) and n for n in publicar)
-            or not isinstance(fornecedor, str)
-            or not isinstance(quem, str)
+            or not all(_texto_valido(n) and n for n in publicar)
+            or not _texto_valido(fornecedor)
+            or not _texto_valido(quem)
             or (corpo.get("pessoa_id") and pessoa_id is None)
         ):
-            return JSONResponse({"motivo": "pedido_invalido", "mensagem": "Pedido interno invalido."}, status_code=400)
+            return _pedido_invalido()
         try:
             feito = await despachante.revisar_servidor(
                 sistema_id, publicar=publicar, fornecedor=fornecedor, quem=quem, pessoa_id=pessoa_id
@@ -248,12 +305,17 @@ def criar_app_despachante(
     async def declaracoes(pedido: Request) -> JSONResponse:
         corpo = await _corpo(pedido)
         sistema_id = _uuid(corpo.get("sistema_id"))
+        chave = corpo.get("chave_sondagem")
         if sistema_id is None:
             return JSONResponse({"mensagem": "sistema_id e obrigatorio"}, status_code=400)
+        if not (chave is None or isinstance(chave, str)):
+            return _pedido_invalido()  # a chave de teste do ADMIN e texto; outra coisa nao e "o sistema nao entregou"
         try:
-            ferramentas = await despachante.ler_declaracoes(sistema_id, corpo.get("chave_sondagem"))
+            ferramentas = await despachante.ler_declaracoes(sistema_id, chave)
         except LookupError as erro:
             return JSONResponse({"mensagem": str(erro)}, status_code=404)
+        except DeclaracoesNaoConferidas as erro:
+            return JSONResponse({"motivo": erro.motivo, "mensagem": str(erro)}, status_code=503)
         except DeclaracoesIndisponiveis as erro:
             return JSONResponse({"motivo": "declaracoes_indisponiveis", "mensagem": str(erro)}, status_code=502)
         return JSONResponse({"ferramentas": ferramentas})
@@ -268,8 +330,13 @@ def criar_app_despachante(
             # Chave de pessoa so nasce da autorizacao dela na pagina do sistema (troca do codigo no despachante).
             return JSONResponse({"mensagem": "chave de pessoa so pela autorizacao no sistema"}, status_code=403)
         aplicativo_id = _uuid(corpo.get("aplicativo_id"))
-        quem = str(corpo.get("quem") or "admin")
+        quem = corpo.get("quem") or "admin"
+        if not _texto_valido(quem):
+            return _pedido_invalido()  # vai ao extrato (jsonb)
         async with engine.begin() as c:
+            existe = (await c.execute(text("SELECT 1 FROM sistemas WHERE id = :s"), {"s": sistema_id})).first()
+            if existe is None:  # sem isto, a cifra (origem) ou a chave estrangeira davam erro 500
+                return JSONResponse({"mensagem": "sistema desconhecido"}, status_code=404)
             tipo = "declaracoes" if corpo.get("tipo") == "declaracoes" else "acesso"
             await chaves.guardar(
                 c, cifra, sistema_id=sistema_id, segredo=segredo, aplicativo_id=aplicativo_id, tipo=tipo
@@ -315,18 +382,18 @@ def criar_app_despachante(
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 
+    internas = [
+        Route("/interno/ler", ler, methods=["POST"]),
+        Route("/interno/sondar", sondar, methods=["POST"]),
+        Route("/interno/declaracoes", declaracoes, methods=["POST"]),
+        Route("/interno/revisao_servidor", revisao_servidor, methods=["POST"]),
+        Route("/interno/chaves", guardar_chave, methods=["POST"]),
+        *rotas_autorizacao(
+            engine, cifra, ambiente=ambiente, liberar_locais=liberar_locais, terceiros_ligados=terceiros_ligados
+        ),
+    ]
     app = Starlette(
-        routes=[
-            Route("/interno/ler", ler, methods=["POST"]),
-            Route("/interno/sondar", sondar, methods=["POST"]),
-            Route("/interno/declaracoes", declaracoes, methods=["POST"]),
-            Route("/interno/revisao_servidor", revisao_servidor, methods=["POST"]),
-            Route("/interno/chaves", guardar_chave, methods=["POST"]),
-            Route("/saude", saude, methods=["GET"]),
-            *rotas_autorizacao(
-                engine, cifra, ambiente=ambiente, liberar_locais=liberar_locais, terceiros_ligados=terceiros_ligados
-            ),
-        ],
+        routes=[*(_so_texto_valido(r) for r in internas), Route("/saude", saude, methods=["GET"])],
         lifespan=ciclo,
     )
     # Para as provas: o despachante e a porta de saida montados aqui (a mesma ligacao nos dois).

@@ -438,6 +438,14 @@ AVISOS_ADMIN: Final[dict[str, AvisoAdmin]] = {
             " os limites das pessoas com ele foram suspensos. Confira o servidor com o fornecedor; depois, leia as"
             " ferramentas e conclua a revisao do servidor nas telas do ADMIN.",
         ),
+        AvisoAdmin(
+            "sistema_em_quarentena_revisao_inconsistente",
+            "MCP-CLARO: servidor de terceiros em quarentena (revisao que nao confere)",
+            "A revisao do servidor de terceiros {sistema} guardada no MCP-CLARO nao confere com a lista de"
+            " ferramentas dela. Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi"
+            " cancelado e os limites das pessoas com ele foram suspensos. Leia as ferramentas e conclua a revisao do"
+            " servidor de novo nas telas do ADMIN; se acontecer outra vez, fale com a equipe do MCP-CLARO.",
+        ),
     )
 }
 

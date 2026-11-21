@@ -22,7 +22,8 @@ Para cada acao liberada e na hora:
    abrir a chave nem chamar a ligacao;
 6. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. Num terceiro, o que a
    sala barrou (sem sala, endereco que nao e publico, desvio nao seguido) ganha antes a sua linha no extrato.
-   O que o sistema pediu no meio da chamada so entra no desfecho com o nosso vocabulario. O caractere nulo
+   O que o sistema pediu no meio da chamada so entra no desfecho com o nosso vocabulario (o mesmo da leitura:
+   ``ligacao.ponto.pedidos_legiveis``), e as categorias vao a ``dados.pedidos`` da linha do fim. O caractere nulo
    (U+0000), que o banco nao guarda, vira U+FFFD no resultado. Se o banco falhar ao gravar o fim, tenta de
    novo algumas vezes; se nao der, encerra o turno: a conexao da trava cai, quem assumir a porta (esta mesma,
    na volta seguinte, ou outra copia) da a linha "enviando" como nao confirmada, e nada e reenviado.
@@ -46,7 +47,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import datetime
 from typing import Any, Final
 
@@ -61,9 +62,10 @@ from mcp_claro.cadastro.quarentena import MOTIVO_PARADA
 from mcp_claro.cofre import CofreIndisponivel, CofreTrancado
 from mcp_claro.despachante import chaves, medida, renovacao
 from mcp_claro.despachante.chaves import Cifra
+from mcp_claro.despachante.cifra_origem import ContextoSemSistema
 from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente, ponto
-from mcp_claro.ligacao.ponto import Ligacao
+from mcp_claro.ligacao.ponto import Ligacao, linha_da_sala, pedidos_da_resposta, pedidos_legiveis
 from mcp_claro.ligacao.sala_contrato import PEDIDO_FORA_DO_CONTRATO, SALA_FORA
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
@@ -124,59 +126,13 @@ contando o envelope). Mais fundo, nem o aplicativo leria a consulta pelo protoco
 TETO_NIVEIS_PEDIDO: Final = 255
 """Niveis de listas e objetos, um dentro do outro, que os argumentos de uma acao podem ter (o objeto dos argumentos
 e o primeiro): o que o kit ainda escreve num pedido (``ligacao.cliente``: com um nivel a mais, o cliente fixado
-devolve ``PEDIDO_FUNDO_DEMAIS``), e o contrato da sala tambem escreve. Mais fundo, nada sai por caminho nenhum, e a
-porta nem chama a ligacao: pela sala, o cliente levantaria um erro antes de enviar, e a acao ficaria "nao
-confirmada" sem ter saido."""
-_LINHA_DA_SALA: Final[dict[str, str]] = {
-    SALA_FORA: "sala_fora",
-    cliente.ENDERECO_RECUSADO: "sala_endereco_recusado",
-}
-_PEDIDO_LEGIVEL: Final[dict[str, str]] = {
-    cliente.PEDIDO_FORMULARIO: "dados num formulario",
-    cliente.PEDIDO_LINK: "um link",
-    cliente.PEDIDO_AMOSTRAGEM: "uma resposta da IA do aplicativo",
-    cliente.PEDIDO_RAIZES: "a lista de pastas do aplicativo",
-    cliente.PEDIDO_SO_ESTADO: "uma nova volta",
-    cliente.PEDIDO_LINK_CODIGO_ANTIGO: "um link (pelo codigo antigo)",
-}
-_FIO_ANTIGO_LEGIVEL: Final[dict[str, str]] = {
-    "elicitation/create": "dados",
-    "sampling/createMessage": "uma resposta da IA do aplicativo",
-    "roots/list": "a lista de pastas do aplicativo",
-    "ping": "um sinal de vida",
-}
-_DESCONHECIDO: Final = "um pedido desconhecido"
+devolve ``PEDIDO_FUNDO_DEMAIS``). Mais fundo, nada sai por caminho nenhum, e a porta nem abre a chave nem chama a
+ligacao.
 
-
-def pedidos_legiveis(pedidos: Iterable[str]) -> str:
-    """As categorias de ``Resposta.pedidos`` em texto (sem acento, como o desfecho): so o nosso vocabulario, nunca
-    texto, link ou campo do sistema. Categoria fora do vocabulario vira "um pedido desconhecido"."""
-    nomes: list[str] = []
-    for categoria in pedidos:
-        if categoria.startswith(cliente.PREFIXO_FIO_ANTIGO):
-            metodo = categoria.removeprefix(cliente.PREFIXO_FIO_ANTIGO)
-            nome = _FIO_ANTIGO_LEGIVEL.get(metodo, _DESCONHECIDO) + " pelo fio antigo"
-        else:
-            nome = _PEDIDO_LEGIVEL.get(categoria, _DESCONHECIDO)
-        if nome not in nomes:
-            nomes.append(nome)
-    if not nomes:
-        return "dados"
-    return nomes[0] if len(nomes) == 1 else ", ".join(nomes[:-1]) + " e " + nomes[-1]
-
-
-def linha_da_sala(resposta: cliente.Resposta, sistema: Sistema) -> str | None:
-    """Tipo da linha do extrato que conta o que a sala barrou num servidor de terceiros (sem sala, endereco que
-    nao e publico ou desvio que o MCP-CLARO nao segue); None no resto e em sistema proprio. Os argumentos na ordem
-    de ``despachante.servico.linha_da_sala``, a da leitura."""
-    if not sistema.de_terceiro:
-        return None
-    if resposta.tipo == "nao_enviado" and resposta.excecao in _LINHA_DA_SALA:
-        return _LINHA_DA_SALA[resposta.excecao]
-    if resposta.tipo == "recusado_http" and resposta.status_http and 300 <= resposta.status_http[-1] < 400:
-        return "sala_desvio_recusado"
-    return None
-
+Pela sala de visitas, o limite e menor: o leitor do contrato da sala (``PedidoChamar``) para em cerca de 200
+niveis. De uns 200 a 255 niveis, a acao de um terceiro tambem nao sai: "nao saiu", com "o pedido nao cabe no
+contrato da sala de visitas" (a chave ja foi aberta, mas nada chegou ao terceiro). Acima de 255, mesmo que a porta
+chamasse a ligacao, o ``ClienteSala`` devolveria "nao saiu" (``PEDIDO_FUNDO_DEMAIS``) sem abrir conexao."""
 
 TENTATIVAS_DO_FIM = 4
 """Vezes que o despachante tenta gravar o fim de um envio antes de deixar a retomada decidir."""
@@ -230,6 +186,8 @@ class PortaDeSaida:
         limite_exige_passkey: bool = True,
         terceiros_ligados: bool = False,
         ligacao: Ligador | None = None,
+        ambiente: str = "producao",
+        liberar_locais: bool = False,
         chamar: Chamador | None = None,
         cofre: saida_cofre.SaudeDoCofre | None = None,
         conferir_cofre: float = 15.0,
@@ -247,6 +205,10 @@ class PortaDeSaida:
         self.terceiros_ligados = terceiros_ligados
         # Todo envio sai por ``ligacao(sistema)``: proprio pelo cliente fixado, terceiro pela sala de visitas.
         self.ligacao: Ligador = ligacao or ligacao_sem_sala
+        # ``APP_ENV`` e, so em testes, endereco local na troca de chave OAuth de um terceiro: valem para a
+        # renovacao da chave por pessoa antes do envio (``renovacao.chave_pronta``), como na leitura.
+        self.ambiente = str(ambiente)
+        self.liberar_locais = liberar_locais
         # So para testes: troca a chamada ao sistema (proprio ou terceiro) por uma funcao com a assinatura de
         # ``Ligacao.chamar_ferramenta``. O app do despachante nunca passa.
         self.chamar: Chamador | None = chamar
@@ -528,13 +490,22 @@ class PortaDeSaida:
             ).scalar_one_or_none()
             declarado = await repositorio.esquema_declarado(c, ferramenta.sistema.id, ferramenta.nome_original)
             await fila.marcar_enviando(c, op)
-        final, resultado, desfecho = await self._enviar(op, ferramenta, sondagem, declarado)
-        await self._gravar_fim(op, final, resultado, desfecho)
+        final, resultado, desfecho, pedidos = await self._enviar(op, ferramenta, sondagem, declarado)
+        await self._gravar_fim(op, final, resultado, desfecho, pedidos=pedidos)
         CONTADORES.somar("acoes", estado=str(final), sistema=ferramenta.sistema.nome)
         return True
 
-    async def _gravar_fim(self, op: Operacao, final: Estado, resultado: dict[str, Any] | None, desfecho: str) -> None:
-        """Grava o fim do envio, tentando de novo algumas vezes se o banco falhar.
+    async def _gravar_fim(
+        self,
+        op: Operacao,
+        final: Estado,
+        resultado: dict[str, Any] | None,
+        desfecho: str,
+        *,
+        pedidos: Sequence[str] = (),
+    ) -> None:
+        """Grava o fim do envio, tentando de novo algumas vezes se o banco falhar. ``pedidos``: as categorias do que o
+        sistema pediu no meio (``dados.pedidos`` da linha do fim).
 
         Antes, troca U+0000 por U+FFFD no resultado (o banco recusaria a gravacao todas as vezes). Sem conseguir
         gravar, levanta ``FimNaoGravado``: o turno da porta acaba, a conexao da trava cai, e quem assumir a porta
@@ -549,7 +520,7 @@ class PortaDeSaida:
         for tentativa in range(1, TENTATIVAS_DO_FIM + 1):
             try:
                 async with self.engine.begin() as c:
-                    await fila.finalizar(c, op, final, resultado, desfecho)
+                    await fila.finalizar(c, op, final, resultado, desfecho, pedidos=pedidos)
             except (SQLAlchemyError, OSError, TimeoutError) as erro:
                 log.warning("fim_do_envio_falhou", fila_id=op.fila_id, tentativa=tentativa, erro=type(erro).__name__)
                 if tentativa < TENTATIVAS_DO_FIM:
@@ -700,7 +671,12 @@ class PortaDeSaida:
         try:
             if sistema.tipo_chave == "por_pessoa":
                 aberta = await renovacao.chave_pronta(
-                    self.engine, self.cifra, sistema_id=sistema.id, pessoa_id=op.pessoa_id
+                    self.engine,
+                    self.cifra,
+                    sistema_id=sistema.id,
+                    pessoa_id=op.pessoa_id,
+                    ambiente=self.ambiente,
+                    liberar_locais=self.liberar_locais,
                 )
                 return aberta.segredo, aberta, None
             async with self.engine.connect() as c:
@@ -722,6 +698,11 @@ class PortaDeSaida:
         except CofreIndisponivel:
             log.warning("chave_com_cofre_sem_resposta")
             return None, None, "o cofre de chaves nao respondeu"
+        except ContextoSemSistema as erro:
+            # A cifra por origem nao achou o sistema ou nao leu a origem agora (``OrigemIndisponivel``): nenhuma
+            # chave abre, e nada foi guardado; a proxima acao busca de novo.
+            log.warning("chave_indisponivel", erro=type(erro).__name__)
+            return None, None, "nao deu para abrir a chave no cofre"
         except Exception:
             # O cofre respondeu e recusou (login vencido, acesso negado, cifrado invalido) ou outra falha.
             log.exception("chave_indisponivel")
@@ -730,17 +711,18 @@ class PortaDeSaida:
 
     async def _enviar(
         self, op: Operacao, ferramenta: FerramentaVitrine, discover_json: Any, declarado: Any
-    ) -> tuple[Estado, dict[str, Any] | None, str]:
-        """Uma chamada so ao sistema. ``discover_json`` e ``declarado`` vem lidos antes de marcar "enviando"."""
+    ) -> tuple[Estado, dict[str, Any] | None, str, tuple[str, ...]]:
+        """Uma chamada so ao sistema. ``discover_json`` e ``declarado`` vem lidos antes de marcar "enviando".
+        Devolve (estado, resultado, desfecho, pedidos do sistema no meio da chamada)."""
         sistema = ferramenta.sistema
         if medida.profundidade(op.argumentos) > TETO_NIVEIS_PEDIDO:
-            # Nenhum caminho escreve este pedido: o cliente fixado o devolveria como "nao enviado", e o da sala
-            # levantaria um erro antes de enviar (que aqui seria duvida). Nada sai, nem a chave abre.
+            # Nenhum caminho escreve este pedido (o cliente fixado e o da sala o devolveriam como "nao enviado").
+            # Nada sai, nem a chave abre.
             log.warning("pedido_fundo_demais", fila_id=op.fila_id)
-            return Estado.NAO_SAIU, None, _NAO_ENVIADO[cliente.PEDIDO_FUNDO_DEMAIS]
+            return Estado.NAO_SAIU, None, _NAO_ENVIADO[cliente.PEDIDO_FUNDO_DEMAIS], ()
         segredo, aberta, sem_chave = await self._chave(op, ferramenta)
         if sem_chave is not None:
-            return Estado.NAO_SAIU, None, sem_chave
+            return Estado.NAO_SAIU, None, sem_chave, ()
 
         async def obter() -> str | None:
             return segredo
@@ -761,7 +743,7 @@ class PortaDeSaida:
         except Exception:
             # Nao sabemos em que ponto parou: o pedido pode ter saido. Nunca reenvia.
             log.exception("envio_falhou")
-            return Estado.NAO_CONFIRMADA, None, "falha inesperada durante o envio"
+            return Estado.NAO_CONFIRMADA, None, "falha inesperada durante o envio", ()
         fim = await self._classificar(op, ferramenta, resposta, aberta)
         await self._registrar_sala(op, sistema, resposta)
         return fim
@@ -792,16 +774,15 @@ class PortaDeSaida:
 
     async def _classificar(
         self, op: Operacao, ferramenta: FerramentaVitrine, resposta: cliente.Resposta, aberta: Any
-    ) -> tuple[Estado, dict[str, Any] | None, str]:
-        """Estado final, resultado (com a medida, sem o ``_meta`` do sistema) e desfecho de uma chamada.
+    ) -> tuple[Estado, dict[str, Any] | None, str, tuple[str, ...]]:
+        """Estado final, resultado (com a medida, sem o ``_meta`` do sistema), desfecho e pedidos de uma chamada.
 
         O que o sistema pediu no meio (``Resposta.pedidos``) entra no desfecho so com o nosso vocabulario
-        (``pedidos_legiveis``): nunca texto, link ou campo dele. Nada disso muda o estado."""
+        (``pedidos_legiveis``): nunca texto, link ou campo dele. Nada disso muda o estado. As categorias voltam
+        tambem, para ``dados.pedidos`` da linha do fim (``fila.finalizar``)."""
         # O que o cliente (ou a sala) contou e o que o proprio resultado ou erro mostra: uma resposta sem a lista
         # nao esconde um ``InputRequiredResult`` nem um -32042.
-        pedidos = tuple(
-            sorted(set(resposta.pedidos) | set(cliente.pedidos_do_sistema(resposta.resultado, resposta.erro, ())))
-        )
+        pedidos = pedidos_da_resposta(resposta)
         for categoria in pedidos:
             CONTADORES.somar("pedidos_do_sistema_barrados", tipo=categoria, onde="acao")
         estado_final, resultado, desfecho = await self._estado_final(op, ferramenta, resposta, aberta, pedidos)
@@ -811,7 +792,7 @@ class PortaDeSaida:
                 desfecho = f"{desfecho}; antes pediu {pediu} e o MCP-CLARO recusou"
             else:
                 desfecho = f"{desfecho}; o sistema pediu {pediu} e o MCP-CLARO recusou"
-        return estado_final, resultado, desfecho
+        return estado_final, resultado, desfecho, pedidos
 
     async def _estado_final(
         self,

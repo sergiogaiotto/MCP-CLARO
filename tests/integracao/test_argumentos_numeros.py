@@ -1,7 +1,8 @@
 """Numeros que a entrada nao consegue conferir ou guardar, pela entrada real (Fase 3, G4r): nunca erro interno.
 
-O pedido vai em JSON cru (``Mundo.chamar_cru``). O leitor de JSON do kit aceita ``NaN``, ``Infinity`` e inteiros de
-ate 4.300 digitos. Antes, cada caso abaixo dava -32603 (erro interno):
+O pedido vai em JSON cru (``Mundo.chamar_cru``; na leitura com numero nao finito, ``corpo_com_literal``, com o numero
+escrito como o aplicativo o escreveu, ``1e400`` inclusive). O leitor de JSON do kit aceita ``NaN``, ``Infinity``,
+``1e400`` (infinito) e inteiros de ate 4.300 digitos. Antes, cada caso abaixo dava -32603 (erro interno):
 
 - ``multipleOf`` fracionario com inteiro enorme ou infinito (``OverflowError``) ou com NaN (``ValueError``), em
   leitura e acao, proprio e terceiro: agora ``argumento_fora_do_esquema`` (``PROBLEMA_NUMERO``);
@@ -35,6 +36,7 @@ from mcp_claro.entrada.servidor import RECUSA_NUMERO_LEITURA
 from mcp_claro.regras import catraca
 from mcp_claro.saida.pedidos import RECUSA_NUMERO
 from mcp_claro.versao import PREFIXO_META
+from tests.apoio import cabecalhos_2026, pedido_2026
 from tests.integracao.test_entrada_terceiros_apoio import Extra, Mundo, resultado_do_sistema, subir_mundo
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
@@ -141,14 +143,46 @@ async def test_numeros_que_dao_para_conferir_seguem_como_antes(mundo: Mundo) -> 
             assert desfecho(resposta) == "segue", (chave, valor)
 
 
+MARCA = "__numero_como_o_aplicativo_escreveu__"
+
+
+def corpo_com_literal(nome: str, literal: str) -> str:
+    """O corpo de ``tools/call`` com o numero escrito como o aplicativo escreveu: montado em texto, trocando uma marca
+    pelo literal. Ler e escrever de novo nao serve: ``json.dumps(json.loads('{"n": 1e400}'))`` da ``Infinity``."""
+    pedido = json.dumps(pedido_2026("tools/call", {"name": nome, "arguments": {"n": MARCA}}))
+    corpo = pedido.replace(json.dumps(MARCA), literal)
+    assert corpo.count(literal) == 1
+    assert MARCA not in corpo
+    return corpo
+
+
+async def chamar_com_literal(m: Mundo, chave: str, literal: str) -> tuple[str, dict[str, Any]]:
+    """Como ``Mundo.chamar_cru`` (Ana, aplicativo A), com o corpo de ``corpo_com_literal``. Devolve o corpo que de fato
+    foi ao fio (``r.request.content``: os bytes que o cliente HTTP postou, nao a variavel montada antes) e a resposta
+    JSON-RPC inteira."""
+    nome = m.f[chave].nome
+    corpo = corpo_com_literal(nome, literal)
+    async with httpx2.AsyncClient(follow_redirects=False, timeout=30) as http:
+        r = await http.post(f"{m.url}/mcp", content=corpo, headers=cabecalhos_2026("tools/call", nome, m.cracha("ana")))
+    return r.request.content.decode(), r.json()
+
+
+def test_o_corpo_leva_o_literal_como_o_aplicativo_escreveu() -> None:
+    corpo = corpo_com_literal("ler", "1e400")
+    assert '"arguments": {"n": 1e400}' in corpo
+    assert "Infinity" not in corpo
+    assert json.loads(corpo)["params"]["arguments"] == {"n": math.inf}
+
+
 @pytest.mark.parametrize("chave", ["p_le_livre", "t_le_livre"], ids=["proprio", "terceiro"])
-@pytest.mark.parametrize("texto", ["NaN", "Infinity", "-Infinity", "1e400"])
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"])
 async def test_leitura_com_numero_nao_finito_pelo_cliente_do_despachante_de_verdade_e_recusada_com_frase(
-    mundo: Mundo, chave: str, texto: str
+    mundo: Mundo, chave: str, literal: str
 ) -> None:
     """Prova test_verif2_nan_leitura.py do verificador do G4r: com o ``ClienteDespachante`` de verdade (o JSON dele
     nao leva NaN nem infinito), a leitura dava -32603 e nada chegava ao despachante. Agora, recusa legivel, antes da
-    catraca: a recusa nao gasta a cota do dia da ordem (``leituras_diarias``)."""
+    catraca: a recusa nao gasta a cota do dia da ordem (``leituras_diarias``). O numero vai ao fio como o aplicativo o
+    escreveu (``1e400``, e nao ``Infinity``)."""
     m = mundo
     chegaram: list[Any] = []
 
@@ -159,7 +193,9 @@ async def test_leitura_com_numero_nao_finito_pelo_cliente_do_despachante_de_verd
     real = ClienteDespachante(m.p, http=httpx2.AsyncClient(transport=httpx2.MockTransport(despachante)))
     m.leitor.respostas[m.f[chave].id] = real.ler
     # Como chega do aplicativo em JSON cru: o leitor de JSON do kit aceita NaN, Infinity e 1e400 (infinito).
-    _, resposta = await m.chamar_cru("ana", chave, json.loads('{"n": ' + texto + "}"))
+    enviado, resposta = await chamar_com_literal(m, chave, literal)
+    assert enviado == corpo_com_literal(m.f[chave].nome, literal)  # os bytes postados, sem ler e escrever de novo
+    assert f'"n": {literal}' in enviado
     assert desfecho(resposta) == NUMERO_INVALIDO_LEITURA
     assert "nao guarda pedido" not in RECUSA_NUMERO_LEITURA
     assert chegaram == []

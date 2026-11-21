@@ -225,9 +225,9 @@ def test_sala_por_https_sem_os_certificados_faz_a_partida_recusar() -> None:
 
 @pytest.mark.parametrize("origem", ["proprio", "terceiro"])
 def test_pedido_que_o_kit_nao_escreve_volta_como_erro_nosso(origem: str) -> None:
-    r = Resposta("nao_enviado", excecao="pedido_fundo_demais")  # o cliente fixado (R3a): nada foi enviado
+    r = Resposta("nao_enviado", excecao=cliente.PEDIDO_FUNDO_DEMAIS)  # o cliente fixado (R3a): nada foi enviado
     leitura = interpretar(r, _ferramenta(_sistema(origem)), com_chave_da_pessoa=False)
-    assert leitura.resultado["_meta"][MOTIVO] == "pedido_fundo_demais"
+    assert leitura.resultado["_meta"][MOTIVO] == cliente.PEDIDO_FUNDO_DEMAIS
     assert "partes demais umas dentro das outras" in leitura.resultado["content"][0]["text"]
     assert leitura.sala is None
 
@@ -277,9 +277,114 @@ class _LocalComStatus(Exception):
         (_ComStatus("recusado_http", None, (401,)), None),
         (sala_contrato.FalhaNaSala("duvida", "ExceptionGroup"), None),
         (ExceptionGroup("kit", [ValueError("x")]), None),
+        # A sala (ou um filho tomado) que diga duvida com SalaFora nunca vira "nada foi enviado".
+        (sala_contrato.FalhaNaSala("duvida", sala_contrato.SALA_FORA), None),
+        (sala_contrato.FalhaNaSala("recusado_http", "ListagemRecusada", status_http=(307,)), "sala_desvio_recusado"),
+        (cliente.ListagemRecusada((200, 308)), "sala_desvio_recusado"),
+        (cliente.ListagemRecusada((403,)), None),
     ],
-    ids=["sala_fora", "endereco_pela_sala", "endereco_local", "desvio_sala", "desvio_local", "401", "duvida", "kit"],
+    ids=[
+        "sala_fora",
+        "endereco_pela_sala",
+        "endereco_local",
+        "desvio_sala",
+        "desvio_local",
+        "401",
+        "duvida",
+        "kit",
+        "duvida_com_sala_fora",
+        "desvio_pelo_contrato",
+        "desvio_local_de_verdade",
+        "403_local",
+    ],
 )
 def test_linha_da_sala_na_listagem(erro: Exception, linha: str | None) -> None:
     assert linha_da_sala(resposta_da_listagem(erro), _sistema()) == linha
     assert linha_da_sala(resposta_da_listagem(erro), _sistema("proprio")) is None
+
+
+# --- G3r (etapa 4r) ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("resposta", "linha"),
+    [
+        (Resposta("nao_enviado", excecao=sala_contrato.SALA_FORA), "sala_fora"),
+        (Resposta("duvida", excecao=sala_contrato.SALA_FORA), None),
+        (Resposta("duvida", excecao=cliente.ENDERECO_RECUSADO), None),
+        (Resposta("recusado_http", status_http=(200, 302)), "sala_desvio_recusado"),
+        (Resposta("recusado_http", status_http=(302, 401)), None),
+        (cliente.Sondagem("inalcancavel", "x", excecao=sala_contrato.SALA_FORA), "sala_fora"),
+        (cliente.Sondagem("inalcancavel", "x", excecao=cliente.ENDERECO_RECUSADO), "sala_endereco_recusado"),
+        (cliente.Sondagem("versao", "x", excecao=sala_contrato.SALA_FORA), None),
+        (cliente.Sondagem("desvio", "x", status_http=(307,)), "sala_desvio_recusado"),
+    ],
+)
+def test_linha_da_sala_so_diz_nada_saiu_quando_nada_saiu(
+    resposta: Resposta | cliente.Sondagem, linha: str | None
+) -> None:
+    """Uma regra so para a leitura, as declaracoes, a sondagem e a acao (``ligacao.ponto.linha_da_sala``)."""
+    from mcp_claro.saida import despachante as porta_de_saida
+
+    assert linha_da_sala(resposta, _sistema()) == linha
+    assert porta_de_saida.linha_da_sala is linha_da_sala is ponto.linha_da_sala
+    assert linha_da_sala(resposta, _sistema("proprio")) is None
+
+
+def test_duvida_que_diz_sala_fora_nao_vira_nada_foi_enviado_na_leitura() -> None:
+    leitura = interpretar(
+        Resposta("duvida", excecao=sala_contrato.SALA_FORA), _ferramenta(_sistema()), com_chave_da_pessoa=False
+    )
+    assert (leitura.sala, leitura.resultado["_meta"][MOTIVO]) == (None, "falha_duvida")
+    assert "nada foi enviado" not in leitura.resultado["content"][0]["text"]
+
+
+def test_pedidos_da_leitura_com_as_palavras_da_porta() -> None:
+    pede = types.InputRequiredResult.model_validate(
+        {
+            "resultType": "input_required",
+            "inputRequests": {
+                "f": {
+                    "method": "elicitation/create",
+                    "params": {"mode": "form", "message": "x", "requestedSchema": {"type": "object", "properties": {}}},
+                },
+                "l": {"method": "elicitation/create", "params": {"mode": "url", "message": "x", "url": "https://p.ex"}},
+            },
+        }
+    )
+    leitura = interpretar(Resposta("resultado", resultado=pede), _ferramenta(_sistema()), com_chave_da_pessoa=False)
+    assert leitura.campos["pedidos"] == "dados por formulario e que a pessoa abrisse um link"
+    assert leitura.resultado["content"][0]["text"].startswith(
+        "O sistema sis-terceiro pediu dados por formulario e que a pessoa abrisse um link no meio da leitura."
+    )
+
+
+def test_app_da_a_chave_da_fase_3_ao_despachante_e_a_porta(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = create_async_engine("postgresql+asyncpg://ninguem@127.0.0.1:1/nada")
+    desligada = criar_app_despachante(_parametros(), engine, CifraFalsa())
+    assert desligada.state.despachante.terceiros_ligados is False
+    assert desligada.state.porta.terceiros_ligados is False
+    # A partida recusa a chave ligada (D6) ate o dono decidir; aqui a conferencia da partida e trocada.
+    monkeypatch.setattr(Parametros, "conferir", lambda self: self)
+    ligada = criar_app_despachante(
+        _parametros(FEATURE_PHASE2_ACT=True, FEATURE_PHASE3_THIRD_PARTY=True), engine, CifraFalsa()
+    )
+    assert ligada.state.despachante.terceiros_ligados is True
+    assert ligada.state.porta.terceiros_ligados is True
+
+
+def test_app_da_o_ambiente_e_a_liberacao_de_locais_a_porta() -> None:
+    engine = create_async_engine("postgresql+asyncpg://ninguem@127.0.0.1:1/nada")
+    padrao = criar_app_despachante(_parametros(), engine, CifraFalsa())
+    assert (padrao.state.porta.ambiente, padrao.state.porta.liberar_locais) == ("teste", False)
+    local = criar_app_despachante(_parametros(), engine, CifraFalsa(), liberar_locais=True)
+    assert (local.state.porta.ambiente, local.state.porta.liberar_locais) == ("teste", True)
+    assert (local.state.despachante.ambiente, local.state.despachante.liberar_locais) == ("teste", True)
+
+
+def test_pedido_fundo_demais_e_um_nome_so() -> None:
+    from mcp_claro.despachante import servico
+    from mcp_claro.saida import despachante as porta_de_saida
+
+    assert servico.PEDIDO_FUNDO_DEMAIS is cliente.PEDIDO_FUNDO_DEMAIS
+    assert porta_de_saida.cliente.PEDIDO_FUNDO_DEMAIS is cliente.PEDIDO_FUNDO_DEMAIS

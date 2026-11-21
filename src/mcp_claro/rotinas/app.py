@@ -86,7 +86,7 @@ def montar_tarefas(engine: AsyncEngine, config: ConfigRotinas, fonte: FonteDecla
         Tarefa(
             "mudou_parou",
             config.intervalo_mudou_parou,
-            lambda: conferir_sistemas(engine, fonte, config.emails_admin),
+            lambda: conferir_sistemas(engine, fonte, config.emails_admin, intervalo=config.intervalo_mudou_parou),
             prazo,
         ),
     ]

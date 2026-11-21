@@ -245,7 +245,9 @@ async def test_limite_sem_passkey_nao_e_gasto_com_a_passkey_ligada(amb: Ambiente
     f = await vitrine(amb, "enviar_mensagem")
     assert amb.p.FEATURE_PASSKEY is True
     op, _ = await pedidos.pedir(
-        Pedido(amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": "limite sem passkey"}, None)
+        Pedido(
+            amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": "limite sem passkey"}, None, terceiros=False
+        )
     )
     # Vai para a ficha, sem gastar o limite (antes: liberada pelo limite, gasta, e cancelada no despachante).
     assert op.estado == Estado.AGUARDANDO_FICHA
@@ -366,7 +368,7 @@ async def test_despachante_cancela_acao_de_programa_pausado_encerrado_ou_vencido
 async def test_pedido_igual_pendente_conta_fora_da_janela_e_a_janela_vale_depois_de_sair(amb: Ambiente) -> None:
     pedidos, aplicativo = await pedidos_de(amb)
     f = await vitrine(amb)
-    pedido = Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Igual {uuid.uuid4().hex[:6]}"}, None)
+    pedido = Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Igual {uuid.uuid4().hex[:6]}"}, None, terceiros=False)
     original, repetida = await pedidos.pedir(pedido)
     assert (original.estado, repetida) == (Estado.AGUARDANDO_FICHA, False)
     async with amb.admin.begin() as c:  # pedido feito ha dois dias, ficha ainda esperando (como a de um programa)
@@ -413,7 +415,9 @@ async def test_saida_fechada_recusa_a_acao_antes_do_protocolo_sem_gastar_limite(
     titulo = f"saida fechada {uuid.uuid4().hex[:6]}"
     async with saida_fechada(amb):
         with pytest.raises(AcaoRecusada) as erro:
-            await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": titulo}, None))
+            await pedidos.pedir(
+                Pedido(amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": titulo}, None, terceiros=False)
+            )
         assert erro.value.motivo == "saida_fechada"
         assert erro.value.mensagem == estado.MENSAGEM_SAIDA_FECHADA
         assert await usados(amb, limite) == 0
@@ -461,9 +465,11 @@ async def test_reativar_depois_do_teto_nao_pausa_de_novo(amb: Ambiente) -> None:
     await politica(amb, CONFIRM_CAP_PER_HOUR=ja + 2)
     f = await vitrine(amb)
     for n in range(2):
-        await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Teto {n} {uuid.uuid4().hex[:6]}"}, None))
+        await pedidos.pedir(
+            Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Teto {n} {uuid.uuid4().hex[:6]}"}, None, terceiros=False)
+        )
     with pytest.raises(AcaoRecusada) as erro:
-        await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": "Teto demais"}, None))
+        await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": "Teto demais"}, None, terceiros=False))
     assert erro.value.motivo == "teto_confirmacoes"
     async with amb.admin.connect() as c:
         pausa = (
@@ -479,7 +485,9 @@ async def test_reativar_depois_do_teto_nao_pausa_de_novo(amb: Ambiente) -> None:
         await bloqueios.encerrar(c, pausa, bloqueios.quem_admin(amb.admin_id))
     # Depois de o ADMIN reativar, o proximo pedido de outra pessoa passa (antes: pausava de novo).
     f_bia = await vitrine(amb, pessoa_id=amb.bia_id)
-    op, _ = await pedidos.pedir(Pedido(amb.bia_id, aplicativo, f_bia, {"titulo": "Depois de reativar"}, None))
+    op, _ = await pedidos.pedir(
+        Pedido(amb.bia_id, aplicativo, f_bia, {"titulo": "Depois de reativar"}, None, terceiros=False)
+    )
     assert op.estado == Estado.AGUARDANDO_FICHA
     async with amb.admin.connect() as c:
         ativas = (
@@ -512,7 +520,10 @@ async def test_teto_de_fichas_nao_passa_com_pedidos_ao_mesmo_tempo(
     monkeypatch.setattr(fila, "fichas_na_ultima_hora", contagem_lenta)
     f = await vitrine(amb)
     marca = uuid.uuid4().hex[:6]
-    lote = [Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Ao mesmo tempo {marca} {n}"}, None) for n in range(3)]
+    lote = [
+        Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Ao mesmo tempo {marca} {n}"}, None, terceiros=False)
+        for n in range(3)
+    ]
     resultados = await asyncio.wait_for(asyncio.gather(*(pedidos.pedir(p) for p in lote), return_exceptions=True), 30)
     recusas = [r for r in resultados if isinstance(r, AcaoRecusada)]
     assert len(recusas) == 2, resultados
@@ -765,7 +776,14 @@ async def test_limite_encerrado_para_a_acao_liberada_e_vencido_pelo_prazo_nao(am
     for situacao, fim in (("encerrado", Estado.CANCELADA), ("suspenso", Estado.CANCELADA), ("vencido", Estado.ENVIADA)):
         limite = await novo_limite(amb)
         op, _ = await pedidos.pedir(
-            Pedido(amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": f"limite {situacao}"}, None)
+            Pedido(
+                amb.ana_id,
+                aplicativo,
+                f,
+                {"destinatario": "equipe", "texto": f"limite {situacao}"},
+                None,
+                terceiros=False,
+            )
         )
         assert (op.estado, op.limite_id) == (Estado.LIBERADA, limite)
         async with amb.admin.begin() as c:

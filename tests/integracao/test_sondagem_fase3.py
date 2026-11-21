@@ -8,6 +8,7 @@ sondagem nunca o tira de la. As versoes que o servidor anuncia so passam conferi
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -30,10 +31,11 @@ from mcp_claro.db.engine import criar_engine
 from mcp_claro.despachante import servico
 from mcp_claro.despachante.app import criar_app_despachante
 from mcp_claro.despachante.servico import MOTIVO_QUARENTENA_VERSAO, Despachante
-from mcp_claro.ligacao.cliente import MOTIVO_ENDERECO_RECUSADO
+from mcp_claro.ligacao.cliente import MOTIVO_ENDERECO_RECUSADO, MOTIVO_NAO_FALA, Sondagem
 from mcp_claro.ligacao.ponto import ClienteLocal
 from mcp_claro.ligacao.sala_contrato import MOTIVO_SALA_FORA
 from mcp_claro.medicoes.contadores import CONTADORES
+from mcp_claro.saida import travas
 from mcp_claro.versao import VERSAO_MCP
 from tests import apoio_g3a as g
 from tests import apoio_terceiros as t3
@@ -365,3 +367,180 @@ async def test_rota_de_sondagem_devolve_desfecho_e_versoes(cena: Cena) -> None:
     assert corpo["desfecho"] == "versao"
     assert corpo["versoes_anunciadas"] == ["2025-06-18"]
     assert (corpo["aceito"], corpo["inalcancavel"]) == (False, False)
+
+
+# --- G3r (etapa 4r) ----------------------------------------------------------------------------------------------
+
+
+async def test_d29_decide_pela_situacao_lida_sob_a_trava_e_nao_pela_de_antes_da_sondagem(cena: Cena) -> None:
+    """O terceiro esta em quarentena quando a sondagem comeca; o ADMIN conclui a revisao enquanto ela fala com o
+    servidor, e a sondagem volta "versao". Na hora da gravacao o servidor esta ativo e revisado: vai a quarentena
+    (D29), com a fila cancelada e o limite suspenso (M2)."""
+    arr = await g.preparar(
+        cena.dono,
+        cena.cifra,
+        endereco="https://t.exemplo.teste/mcp",
+        definicao={"name": "ler", "description": "x", "inputSchema": {"type": "object"}},
+        origem="terceiro",
+    )
+    async with cena.dono.begin() as c:
+        limite = (
+            await c.execute(
+                text(
+                    "INSERT INTO limites (pessoa_id, aplicativo_id, sistema_id, nome_original, por_dia,"
+                    " valido_ate, com_passkey) VALUES (:p, :a, :s, 'ler', 3, now() + interval '1 day', true)"
+                    " RETURNING id"
+                ),
+                {"p": arr.pessoa_id, "a": arr.aplicativo_id, "s": arr.sistema_id},
+            )
+        ).scalar_one()
+        await t3.por_em_quarentena(c, arr.sistema_id, "mudou, parou: teste")
+
+    class ConcluiNoMeio:
+        async def sondar(self, *_: Any, **__: Any) -> Any:
+            async with cena.dono.begin() as c:  # a conclusao do ADMIN, pelo papel do despachante
+                await t3.gravar_revisao_do_servidor(c, arr.sistema_id)
+            return Sondagem("versao", MOTIVO_NAO_FALA, versoes=("2025-06-18",), codigo=-32022)
+
+    desp = Despachante(cena.desp_db, cena.cifra, ambiente="teste", ligacao=lambda _s: ConcluiNoMeio())  # type: ignore[arg-type,return-value]
+    assert (await cena.sistema(arr.sistema_id)).situacao == "quarentena"
+    await desp.sondar_sistema(arr.sistema_id, None)
+    linha = await cena.sistema(arr.sistema_id)
+    assert (linha.situacao, linha.motivo, linha.revisao_servidor_id) == ("quarentena", MOTIVO_QUARENTENA_VERSAO, None)
+    tipos = await g.tipos_no_extrato(cena.dono, arr.sistema_id)
+    assert tipos.count("sistema_em_quarentena") == 1
+    assert tipos.index("sistema_em_quarentena") < tipos.index("recusa_versao_sistema")
+    async with cena.dono.connect() as c:
+        situacao_limite = (
+            await c.execute(text("SELECT situacao FROM limites WHERE id = :i"), {"i": limite})
+        ).scalar_one()
+    assert situacao_limite == "suspenso"
+
+
+async def test_d29_a_base_da_quarentena_e_a_revisao_lida_sob_a_trava(cena: Cena) -> None:
+    """O terceiro esta ativo com a revisao N quando a sondagem comeca; o ADMIN conclui a revisao N+1 enquanto ela fala
+    com o servidor, e a sondagem volta "versao". A quarentena compara a revisao lida sob a trava (N+1): com a de antes
+    da sondagem (N), nada iria a quarentena e o servidor revisado viraria "recusado", com o limite ativo."""
+    arr = await g.preparar(
+        cena.dono,
+        cena.cifra,
+        endereco="https://t.exemplo.teste/mcp",
+        definicao={"name": "ler", "description": "x", "inputSchema": {"type": "object"}},
+        origem="terceiro",
+    )
+    async with cena.dono.begin() as c:
+        await t3.gravar_revisao_do_servidor(c, arr.sistema_id)
+        limite = (
+            await c.execute(
+                text(
+                    "INSERT INTO limites (pessoa_id, aplicativo_id, sistema_id, nome_original, por_dia,"
+                    " valido_ate, com_passkey) VALUES (:p, :a, :s, 'ler', 3, now() + interval '1 day', true)"
+                    " RETURNING id"
+                ),
+                {"p": arr.pessoa_id, "a": arr.aplicativo_id, "s": arr.sistema_id},
+            )
+        ).scalar_one()
+    antes = await cena.sistema(arr.sistema_id)
+    assert (antes.situacao, antes.revisao_servidor_id is not None) == ("ativo", True)
+    no_meio: list[uuid.UUID] = []
+
+    class ConcluiDeNovoNoMeio:
+        async def sondar(self, *_: Any, **__: Any) -> Any:
+            async with cena.dono.begin() as c:  # a conclusao N+1 do ADMIN
+                no_meio.append(await t3.gravar_revisao_do_servidor(c, arr.sistema_id))
+            return Sondagem("versao", MOTIVO_NAO_FALA, versoes=("2025-06-18",), codigo=-32022)
+
+    desp = Despachante(cena.desp_db, cena.cifra, ambiente="teste", ligacao=lambda _s: ConcluiDeNovoNoMeio())  # type: ignore[arg-type,return-value]
+    await desp.sondar_sistema(arr.sistema_id, None)
+    assert len(no_meio) == 1
+    assert no_meio[0] != antes.revisao_servidor_id
+    linha = await cena.sistema(arr.sistema_id)
+    assert (linha.situacao, linha.motivo, linha.revisao_servidor_id) == ("quarentena", MOTIVO_QUARENTENA_VERSAO, None)
+    tipos = await g.tipos_no_extrato(cena.dono, arr.sistema_id)
+    assert tipos.count("sistema_em_quarentena") == 1
+    assert tipos.index("sistema_em_quarentena") < tipos.index("recusa_versao_sistema")
+    async with cena.dono.connect() as c:
+        situacao_limite = (
+            await c.execute(text("SELECT situacao FROM limites WHERE id = :i"), {"i": limite})
+        ).scalar_one()
+    assert situacao_limite == "suspenso"
+
+
+async def test_d29_trava_o_sistema_antes_da_linha_como_a_conclusao_do_admin(cena: Cena) -> None:
+    """A ordem das travas no ramo "versao" e a da conclusao do ADMIN e de ``por_em_quarentena``: primeiro a trava
+    exclusiva do sistema, depois a linha. Outra transacao segura a trava do sistema (como a conclusao, que a toma
+    antes da linha) enquanto a sondagem fala com o servidor: a sondagem espera a trava sem segurar a linha, e a outra
+    trava a linha sem esperar. Na ordem trocada (so a linha, e a trava depois, dentro de ``por_em_quarentena``), a
+    sondagem seguraria a linha esperando a trava, e as duas se esperariam."""
+    arr = await g.preparar(
+        cena.dono,
+        cena.cifra,
+        endereco="https://t.exemplo.teste/mcp",
+        definicao={"name": "ler", "description": "x", "inputSchema": {"type": "object"}},
+        origem="terceiro",
+    )
+    async with cena.dono.begin() as c:
+        await t3.gravar_revisao_do_servidor(c, arr.sistema_id)
+    assert (await cena.sistema(arr.sistema_id)).situacao == "ativo"
+    async with cena.dono.connect() as outra:
+        await outra.begin()
+
+        class OutraTravaNoMeio:
+            async def sondar(self, *_: Any, **__: Any) -> Any:
+                await travas.exclusiva(outra, travas.chaves_do_alcance("sistema", sistema_id=arr.sistema_id))
+                return Sondagem("versao", MOTIVO_NAO_FALA, versoes=("2025-06-18",), codigo=-32022)
+
+        desp = Despachante(cena.desp_db, cena.cifra, ambiente="teste", ligacao=lambda _s: OutraTravaNoMeio())  # type: ignore[arg-type,return-value]
+        tarefa = asyncio.create_task(desp.sondar_sistema(arr.sistema_id, None))
+        try:
+            await _esperando_trava_consultiva(cena)
+            # A sondagem espera a trava do sistema; a linha esta livre (NOWAIT: erro na hora se outro a segura).
+            situacao = (
+                await outra.execute(
+                    text("SELECT situacao FROM sistemas WHERE id = :i FOR UPDATE NOWAIT"), {"i": arr.sistema_id}
+                )
+            ).scalar_one()
+            assert situacao == "ativo"
+        finally:
+            await outra.rollback()
+            await asyncio.wait_for(tarefa, 30)
+    linha = await cena.sistema(arr.sistema_id)
+    assert (linha.situacao, linha.motivo) == ("quarentena", MOTIVO_QUARENTENA_VERSAO)
+
+
+async def _esperando_trava_consultiva(cena: Cena) -> None:
+    """Ate alguma transacao do banco estar parada esperando uma trava consultiva (``pg_locks.granted = false``). Sem
+    tempo fixo: olha o banco ate ver a espera, no maximo 20 s pelo relogio do laco (monotonico)."""
+    fim = asyncio.get_running_loop().time() + 20
+    while asyncio.get_running_loop().time() < fim:
+        async with cena.dono.connect() as c:
+            esperando = (
+                await c.execute(text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"))
+            ).scalar_one()
+        if esperando:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("a sondagem nao chegou a esperar a trava do sistema")
+
+
+async def test_versoes_anunciadas_gravadas_tambem_no_aceite_e_sem_veredito(cena: Cena) -> None:
+    resposta: dict[str, Any] = {"r": _versao_antiga("2025-06-18", "2024-11-05"), "status": 400}
+
+    async def rota(pedido: Request) -> Response:
+        corpo = json.loads(await pedido.body())
+        if resposta["r"] is None:
+            return Response(b"fora", status_code=503)
+        saida = json.dumps({"jsonrpc": "2.0", "id": corpo["id"], **resposta["r"]}).encode()
+        return Response(saida, status_code=resposta["status"], media_type="application/json")
+
+    async with servidor(Starlette(routes=[Route("/mcp", rota, methods=["POST"])])) as base:
+        sistema_id = await cena.terceiro(f"{base}/mcp")
+        await cena.despachante().sondar_sistema(sistema_id, None)
+        assert list((await cena.sistema(sistema_id)).versoes_anunciadas) == ["2025-06-18", "2024-11-05"]
+        resposta.update(r=None)  # sem veredito (503): a coluna e regravada, vazia
+        assert (await cena.despachante().sondar_sistema(sistema_id, None)).desfecho == "inalcancavel"
+        assert list((await cena.sistema(sistema_id)).versoes_anunciadas) == []
+        resposta.update(r=ACEITO, status=200)
+        assert (await cena.despachante().sondar_sistema(sistema_id, None)).desfecho == "aceito"
+    linha = await cena.sistema(sistema_id)
+    assert (linha.situacao, list(linha.versoes_anunciadas)) == ("ativo", [VERSAO_MCP])

@@ -336,7 +336,8 @@ async def test_migracao_sobre_dados_da_fase_2(banco_0005: tuple[Parametros, Asyn
         "SELECT (SELECT count(*) FROM operacoes) AS op, (SELECT count(*) FROM fichas) AS fi,"
         " (SELECT count(*) FROM fila_saida) AS fs, (SELECT count(*) FROM limites) AS li,"
         " (SELECT count(*) FROM sistemas WHERE revisao_servidor_id IS NOT NULL OR sondagem_desfecho IS NOT NULL"
-        "  OR versoes_anunciadas IS NOT NULL OR conferencias_sem_resposta <> 0) AS novas,"
+        "  OR versoes_anunciadas IS NOT NULL OR conferencias_sem_resposta <> 0"
+        "  OR conferencia_sem_resposta_em IS NOT NULL) AS novas,"
         " (SELECT count(*) FROM fichas WHERE sinais IS NOT NULL) AS sinais",
     )
     assert tuple(contagens) == (1, 1, 1, 1, 0, 0)
@@ -1229,15 +1230,19 @@ async def test_terceiro_que_sai_de_ativo_perde_a_revisao(dono: AsyncEngine, cena
     cai, e a volta a 'ativo' pela sondagem nao publica nada ate uma conclusao nova."""
     antiga = await revisao_vigente(dono, cena.terceiro_id)
     await fazer(
-        dono, "UPDATE sistemas SET conferencias_sem_resposta = 1 WHERE id = :s", papel=ROTINAS, s=cena.terceiro_id
+        dono,
+        "UPDATE sistemas SET conferencias_sem_resposta = 1, conferencia_sem_resposta_em = now() WHERE id = :s",
+        papel=ROTINAS,
+        s=cena.terceiro_id,
     )
     await fazer(dono, sql, papel=papel, s=cena.terceiro_id, r=antiga)
     r = await linha(
         dono,
-        "SELECT situacao, revisao_servidor_id, conferencias_sem_resposta FROM sistemas WHERE id = :s",
+        "SELECT situacao, revisao_servidor_id, conferencias_sem_resposta, conferencia_sem_resposta_em FROM sistemas"
+        " WHERE id = :s",
         s=cena.terceiro_id,
     )
-    assert (r.revisao_servidor_id, r.conferencias_sem_resposta) == (None, 0)
+    assert (r.revisao_servidor_id, r.conferencias_sem_resposta, r.conferencia_sem_resposta_em) == (None, 0, None)
     if r.situacao != "quarentena":
         if r.situacao == "desativado":
             await fazer(
@@ -1308,21 +1313,19 @@ async def test_rodadas_sem_resposta_so_as_rotinas_contam(dono: AsyncEngine, cena
     assert (
         await fazer(
             dono,
-            "UPDATE sistemas SET conferencias_sem_resposta = conferencias_sem_resposta + 1 WHERE id = :s"
-            " RETURNING conferencias_sem_resposta",
+            "UPDATE sistemas SET conferencias_sem_resposta = conferencias_sem_resposta + 1,"
+            " conferencia_sem_resposta_em = now() WHERE id = :s RETURNING conferencias_sem_resposta",
             papel=ROTINAS,
             s=cena.terceiro_id,
         )
         == 1
     )
     for papel in (ENTRADA, DESPACHANTE):
-        await recusado(
-            dono,
+        for sql in (
             "UPDATE sistemas SET conferencias_sem_resposta = 0 WHERE id = :s",
-            SEM_PERMISSAO,
-            papel=papel,
-            s=cena.terceiro_id,
-        )
+            "UPDATE sistemas SET conferencia_sem_resposta_em = NULL WHERE id = :s",
+        ):
+            await recusado(dono, sql, SEM_PERMISSAO, papel=papel, s=cena.terceiro_id)
     await recusado(
         dono,
         "UPDATE sistemas SET conferencias_sem_resposta = -1 WHERE id = :s",
@@ -1338,9 +1341,12 @@ async def test_rodadas_sem_resposta_so_as_rotinas_contam(dono: AsyncEngine, cena
         r=revisao,
         s=cena.terceiro_id,
     )
-    assert await fazer(dono, "SELECT conferencias_sem_resposta FROM sistemas WHERE id = :s", s=cena.terceiro_id) == 1
+    contagem = "SELECT conferencias_sem_resposta, conferencia_sem_resposta_em IS NULL FROM sistemas WHERE id = :s"
+    assert tuple(await linha(dono, contagem, s=cena.terceiro_id)) == (1, False)
+    # Revisao nova (a conclusao) zera a contagem e apaga a hora da ultima soma: a primeira rodada sem resposta
+    # contra a revisao nova conta logo.
     await revisao_vigente(dono, cena.terceiro_id)
-    assert await fazer(dono, "SELECT conferencias_sem_resposta FROM sistemas WHERE id = :s", s=cena.terceiro_id) == 0
+    assert tuple(await linha(dono, contagem, s=cena.terceiro_id)) == (0, True)
 
 
 # --- CHAVE_TERCEIRO -------------------------------------------------------------------------------------------
@@ -1705,9 +1711,12 @@ GRANTS: list[tuple[str, str, str | None, str, bool]] = [
         for col in ("revisao_servidor_id", "sondagem_desfecho", "versoes_anunciadas")
     ],
     *[(p, "sistemas", "origem", "UPDATE", False) for p in (E, D, R)],
-    (R, "sistemas", "conferencias_sem_resposta", "UPDATE", True),
-    (E, "sistemas", "conferencias_sem_resposta", "UPDATE", False),
-    (D, "sistemas", "conferencias_sem_resposta", "UPDATE", False),
+    *[(R, "sistemas", col, "UPDATE", True) for col in ("conferencias_sem_resposta", "conferencia_sem_resposta_em")],
+    *[
+        (p, "sistemas", col, "UPDATE", False)
+        for p in (E, D)
+        for col in ("conferencias_sem_resposta", "conferencia_sem_resposta_em")
+    ],
     (E, "sistemas", "origem", "INSERT", True),
     (E, "sistemas", "revisao_servidor_id", "INSERT", False),
     (E, "sinais", None, "SELECT", True),
@@ -2064,6 +2073,7 @@ RETRATO_DE_COLUNA: Final = {
     ("mcp_claro_rotinas", "sinais", "id", "SELECT"),
     ("mcp_claro_rotinas", "sinais", "visto_em", "SELECT"),
     ("mcp_claro_rotinas", "sistemas", "atualizado_em", "UPDATE"),
+    ("mcp_claro_rotinas", "sistemas", "conferencia_sem_resposta_em", "UPDATE"),
     ("mcp_claro_rotinas", "sistemas", "conferencias_sem_resposta", "UPDATE"),
     ("mcp_claro_rotinas", "sistemas", "motivo", "UPDATE"),
     ("mcp_claro_rotinas", "sistemas", "situacao", "UPDATE"),
