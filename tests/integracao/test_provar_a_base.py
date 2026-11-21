@@ -7,6 +7,7 @@ entrada, e fala com o cliente oficial do MCP fixado em 2026-07-28.
 from __future__ import annotations
 
 import contextlib
+import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -57,6 +58,44 @@ class Ambiente:
         return self.idp.cracha(**kw)
 
 
+META_DO_SISTEMA = {"sistema.exemplo/contato": "ana@exemplo.test", "sistema.exemplo/documento": "123.456.789-09"}
+
+
+def com_meta_nos_blocos(app: Any) -> Any:
+    """O sistema de exemplo, com um ``_meta`` de bloco cheio de dado pessoal em cada resposta de ``tools/call``
+    (Fase 3: o ``_meta`` de bloco nunca passa ao aplicativo)."""
+
+    async def embrulho(scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope.get("method") != "POST":
+            await app(scope, receive, send)
+            return
+        inicio: dict[str, Any] = {}
+        partes: list[bytes] = []
+
+        async def guardar(mensagem: dict[str, Any]) -> None:
+            if mensagem["type"] == "http.response.start":
+                inicio.update(mensagem)
+                return
+            partes.append(mensagem.get("body", b""))
+            if mensagem.get("more_body"):
+                return
+            corpo = b"".join(partes)
+            try:
+                dados = json.loads(corpo)
+                for bloco in dados["result"]["content"]:
+                    bloco["_meta"] = dict(META_DO_SISTEMA)
+                corpo = json.dumps(dados).encode()
+            except ValueError, KeyError, TypeError:
+                pass
+            cabecalhos = [(k, v) for k, v in inicio.get("headers", []) if k.lower() != b"content-length"]
+            await send({**inicio, "headers": [*cabecalhos, (b"content-length", str(len(corpo)).encode())]})
+            await send({"type": "http.response.body", "body": corpo})
+
+        await app(scope, receive, guardar)
+
+    return embrulho
+
+
 @contextlib.asynccontextmanager
 async def subir(banco_migrado: Parametros) -> AsyncIterator[Ambiente]:
     porta_idp = porta_livre()
@@ -85,7 +124,7 @@ async def subir(banco_migrado: Parametros) -> AsyncIterator[Ambiente]:
     cifra = CifraFalsa()
     async with (
         servidor(idp.app(), porta_idp),
-        servidor(sistema_app) as url_sistema,
+        servidor(com_meta_nos_blocos(sistema_app)) as url_sistema,
         servidor(criar_app_despachante(p, engine, cifra), porta_desp) as url_desp,
     ):
         despachante = ClienteDespachante(p)
@@ -432,6 +471,10 @@ async def test_dado_pessoal_nao_vaza_por_texto_nem_por_meta(amb: Ambiente) -> No
     textos = " ".join(b.text for b in r.content if hasattr(b, "text"))
     assert "ana@exemplo.test" not in textos
     assert "123.456.789-09" not in str(r.model_dump())
+    # O sistema pos um _meta com dado pessoal em cada bloco: nenhum passa (Fase 3).
+    assert r.content
+    assert all(b.meta is None for b in r.content)
+    assert "sistema.exemplo/" not in str(r.model_dump())
     # So chaves do proprio MCP-CLARO: as nossas e o carimbo serverInfo que o kit poe com o nome do gateway.
     meta = dict(r.meta or {})
     assert meta.pop("io.modelcontextprotocol/serverInfo", {}).get("name") == "mcp-claro"
@@ -478,19 +521,26 @@ async def test_acao_pela_porta_de_leitura_e_recusada_pelo_despachante(amb: Ambie
 async def test_sistema_que_pede_dados_conta_uma_chamada_so(banco_migrado: Parametros) -> None:
     from exemplos import mal_comportado
     from mcp_claro.ligacao import chamar_ferramenta
+    from tests.apoio_g3a import ContaPosts
 
-    app = mal_comportado.criar()
+    app = ContaPosts(mal_comportado.criar())
 
     async def chave() -> str:
         return "chave-ana"
 
+    posts: dict[str, int] = {}
     async with servidor(app) as base, httpx2.AsyncClient() as http:
-        for modo in ("pede_dados", "recusa_chave"):
-            await http.post(f"{base}/modo", json={"modo": modo})
+        for modo in ("pede_dados", "recusa_chave", "pede_pelo_fio_antigo_e_401", "pede_link"):
+            await http.post(f"{base}/modo", json={"modo": modo, "atraso_fio": 0.1})
+            app.zerar()
             await chamar_ferramenta(f"{base}/mcp", chave, None, "consultar_pedido", {"pedido": "1"})
+            posts[modo] = app.posts
         contagem = (await http.get(f"{base}/contagem")).json()["chamadas"]
-    assert contagem.get("consultar_pedido", 0) == 1  # pede_dados: uma chamada, sem segunda volta
-    assert contagem.get("http401", 0) == 1  # 401: sem reenvio
+    # Todos os POSTs que chegaram ao sistema, nao so as chamadas: um por chamada, em todo modo.
+    assert posts == {"pede_dados": 1, "recusa_chave": 1, "pede_pelo_fio_antigo_e_401": 1, "pede_link": 1}
+    assert contagem.get("consultar_pedido", 0) == 3  # pede_dados, fio antigo e link: sem segunda volta
+    assert contagem.get("http401", 0) == 1  # 401: sem reenvio; o do fio antigo nem chegou
+    assert contagem.get("resposta_do_cliente", 0) == 0
 
 
 async def test_sistema_da_geracao_antiga_e_recusado_no_cadastro_e_contado(banco_migrado: Parametros) -> None:

@@ -2103,3 +2103,137 @@ def test_revisao_de_terceiro_aceita_regras_e_listas_caras_sem_efeito_na_entrada(
     copia = para_conferir(gravado)
     assert "pattern" not in json.dumps(copia)
     assert "uniqueItems" not in json.dumps(copia)
+
+
+# --- R3a (etapa 4): referencia e nome de definicao com teto, pilha da conferencia do esquema, lacunas do G2br -----
+
+
+def _revisar_com(c: _ConexaoFalsa, entrada: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """A revisao de verdade, sem banco, pela conexao falsa ``c``: devolve o que foi ao INSERT (``c.inserido`` fica
+    vazio se a revisao recusa)."""
+    from mcp_claro.cadastro import repositorio
+
+    asyncio.run(
+        repositorio.revisar_ferramenta(
+            cast(Any, c),
+            sistema_id=uuid.uuid4(),
+            definicao_declarada={"name": "consultar", "inputSchema": entrada},
+            nome_vitrine="consultar_x",
+            descricao="Consulta, escrito pelo ADMIN.",
+            classe="le",
+            revisado_por="admin",
+            **extra,
+        )
+    )
+    return c.inserido
+
+
+def _referencia_para(nome: str, chave: str = "$defs") -> dict[str, Any]:
+    return {"type": "object", chave: {nome: {"type": "string"}}, "properties": {"p": {"$ref": f"#/{chave}/{nome}"}}}
+
+
+def test_teto_de_letras_da_referencia_e_do_nome_de_definicao() -> None:
+    assert modulo.REFERENCIA_MAXIMA == 256
+    teto = modulo.REFERENCIA_MAXIMA
+    # O texto do $ref: ate 256 letras passa; 257 nao, mesmo com a definicao de nome curto (%61 e "a").
+    conferir_terceiro(_referencia_para("n" * (teto - len("#/$defs/"))))
+    for esquema in (
+        _referencia_para("n" * (teto - len("#/$defs/") + 1)),
+        {
+            "type": "object",
+            "$defs": {"a" * 83: {"type": "string"}},
+            "properties": {"p": {"$ref": "#/$defs/" + "%61" * 83}},
+        },
+    ):
+        with pytest.raises(EsquemaRecusado) as erro:
+            conferir_terceiro(esquema)
+        assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("referencia", "$ref", "properties/p")
+        assert f"tem mais de {teto} letras" in str(erro.value)
+    # O nome de definicao, citada ou nao, em $defs ou definitions, em qualquer lugar: ate 256 letras passa.
+    for chave in ("$defs", "definitions"):
+        conferir_terceiro({"type": "object", chave: {"n" * teto: {"type": "string"}}})
+        for esquema, caminho in (
+            ({"type": "object", chave: {"n" * (teto + 1): {"type": "string"}}}, ""),
+            (
+                {"type": "object", "properties": {"a": {"type": "string", chave: {"n" * (teto + 1): {}}}}},
+                "properties/a/",
+            ),
+        ):
+            with pytest.raises(EsquemaRecusado) as erro:
+                conferir_terceiro(esquema)
+            assert (erro.value.motivo, erro.value.palavra) == ("referencia", chave)
+            assert erro.value.onde == f"{caminho}{chave}/" + "n" * 40 + "..."
+            assert f"o nome da definicao ({chave})" in str(erro.value)
+
+
+def test_prova_do_verificador_com_nome_de_120_mil_letras_e_recusada_na_revisao_sem_insert() -> None:
+    # A prova do defeito 1 do G4r: passava na revisao (custo 1803, 253.926 bytes) e custava 4,3 s por pedido.
+    longo = "n" * 120_000
+    esquema = {
+        "type": "object",
+        "properties": {"l": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/s"}] * 600}}},
+        "$defs": {"s": {"$ref": "#/$defs/" + longo}, longo: {}},
+    }
+    conferir_documento(esquema)
+    conferir_largura(esquema)
+    assert custo_do_esquema(esquema) == 1803
+    recusa = _revisao_recusada(esquema)
+    assert (recusa.motivo, recusa.palavra, recusa.onde) == ("referencia", "$defs", "$defs/" + "n" * 40 + "...")
+    assert longo not in str(recusa)
+    # Sistema proprio: como nas Fases 1 e 2, a revisao nao olha isso.
+    assert json.loads(_revisar_com(_ConexaoFalsa("proprio"), esquema)["ee"]) == esquema
+
+
+@pytest.mark.parametrize("origem", ["proprio", "terceiro"])
+@pytest.mark.parametrize("niveis", [100, 300])
+def test_declarado_fundo_demais_para_a_pilha_e_recusado_na_revisao_sem_erro_interno(origem: str, niveis: int) -> None:
+    # Prova revisao_declarado_fundo.py do verificador do G2br: com 100 niveis ou mais, a conferencia do esquema
+    # declarado (check_schema, com recursao, antes de tudo) dava RecursionError, erro 500 na tela do ADMIN.
+    declarado = {"type": "object", "properties": {"p": _com_niveis(niveis)}}
+    c = _ConexaoFalsa(origem)
+    with pytest.raises(EsquemaInvalido) as erro:
+        _revisar_com(c, declarado)
+    assert str(erro.value) == modulo_argumentos.ESQUEMA_FUNDO_DEMAIS
+    assert not isinstance(erro.value, EsquemaRecusado)
+    assert c.inserido == {}
+
+
+def test_definicao_dentro_de_outra_definicao_tambem_conta() -> None:
+    # Prova definicao_dentro_de_definicao.py do verificador do G2br: b esta dentro de a, que esta em $defs, e
+    # ninguem cita nenhuma das duas. Seguindo a referencia de b (59 not) ate c (30 not), passa de 64 niveis.
+    def esquema(nots_em_c: int) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "$defs": {
+                "a": {"type": "string", "$defs": {"b": _aninhar({"$ref": "#/$defs/c"}, 59)}},
+                "c": _aninhar({"type": "string"}, nots_em_c),
+            },
+        }
+
+    conferir_esquema(esquema(30))
+    conferir_documento(esquema(30))
+    conferir_palavras(esquema(30))
+    assert custo_do_esquema(esquema(30)) == 1  # da raiz, ninguem e citado
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema(30))
+    assert erro.value.motivo == "fundo"
+    assert erro.value.onde.startswith("$defs/a/$defs/b/not/")
+    # b no nivel 1, a referencia no 60, c do 61 ao 63 com 2 not e o type: cabe.
+    conferir_terceiro(esquema(2))
+
+
+def test_descricoes_do_admin_contam_nos_256_kib() -> None:
+    # Prova descricoes_pesam.py do verificador do G2br: o teto vale para o esquema como fica gravado, com as
+    # descricoes do ADMIN. Um esquema 10 bytes abaixo do teto passa sem descricoes e e recusado com elas.
+    esquema: dict[str, Any] = {"type": "object", "properties": {"a": {"type": "string"}, "b": {"const": ""}}}
+    esquema["properties"]["b"]["const"] = "x" * (BYTES_MAXIMOS - modulo._bytes(esquema) - 10)
+    assert modulo._bytes(esquema) == BYTES_MAXIMOS - 10
+    descricoes = {"a": "Texto escrito pelo ADMIN, com mais de dez letras."}
+    c = _ConexaoFalsa("terceiro")
+    with pytest.raises(EsquemaRecusado) as erro:
+        _revisar_com(c, esquema, descricoes_campos=descricoes)
+    assert (erro.value.motivo, erro.value.onde) == ("pesado", "(raiz)")
+    assert c.inserido == {}
+    gravado = json.loads(_revisar_com(_ConexaoFalsa("terceiro"), esquema)["ee"])
+    assert gravado == esquema
+    assert modulo._bytes(gravado) <= BYTES_MAXIMOS

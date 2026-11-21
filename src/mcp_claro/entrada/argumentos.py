@@ -7,8 +7,10 @@ busca referencias externas (``$ref`` de fora): um registro vazio recusa.
 A frase da recusa leva no maximo cinco problemas: os cinco primeiros que a conferencia acha
 (``itertools.islice``), postos em ordem de caminho. Os outros erros nem sao montados, tambem num sistema proprio.
 Tambem num sistema proprio, nunca erro interno: aninhamento que estoura a pilha do Python na conferencia
-(``RecursionError``) vira a recusa legivel ``PROBLEMA_FUNDO``, e um numero que a conta de ``multipleOf`` nao
-consegue dividir (inteiro enorme com fracao, infinito ou NaN) vira ``PROBLEMA_NUMERO``.
+(``RecursionError``, no pedido ou no esquema) vira a recusa legivel ``PROBLEMA_FUNDO``, e um numero que a conta de
+``multipleOf`` nao consegue dividir (inteiro enorme com fracao, infinito ou NaN) vira ``PROBLEMA_NUMERO``. Na
+revisao do ADMIN, ``conferir_esquema`` de um esquema fundo demais para a pilha (uns 100 niveis ou mais) levanta
+``EsquemaInvalido`` (``ESQUEMA_FUNDO_DEMAIS``), nunca ``RecursionError``.
 
 Ferramenta de servidor de terceiros (Fase 3). A conferencia roda dentro do laco da entrada. ``pattern`` e
 ``uniqueItems`` do fornecedor nunca rodam aqui (``cadastro.esquema.para_conferir``, na copia que
@@ -37,7 +39,9 @@ de ``enum`` e ``const``) vezes o tamanho do pedido. Por isso, duas barreiras, ca
    ``required``, ``properties`` e as outras de ``_PELO_ESQUEMA``) ou das partes do pedido (``items``,
    ``contains``, ``additionalProperties``, ``propertyNames`` e as outras de ``_PELO_PEDIDO``). ``enum`` e ``const``
    comparam listas e objetos parte por parte, e cada par de partes comparado conta mais um passo (``_igual``, com
-   o mesmo veredito da biblioteca). Cada erro achado conta, em cada palavra por onde passa, ``PASSOS_POR_ERRO`` e
+   o mesmo veredito da biblioteca). ``$ref`` le o texto inteiro da referencia a cada vez que a segue, e conta mais
+   um passo a cada ``LETRAS_POR_PASSO`` letras dele (``_REFERENCIAS``; ``$dynamicRef`` tambem, por defesa). Cada
+   erro achado conta, em cada palavra por onde passa, ``PASSOS_POR_ERRO`` e
    mais um a cada ``LETRAS_POR_PASSO`` letras da mensagem (a mensagem repete o valor conferido, e ``anyOf``/``oneOf``
    guardam os erros de todos os ramos). Um esquema ``false`` num ramo de ``anyOf``/``oneOf`` ou em ``not``, ``if`` e
    ``contains`` e conferido como ``{"not": {}}``, o mesmo veredito, para o erro dele tambem contar: sem isso, a
@@ -47,10 +51,13 @@ de ``enum`` e ``const``) vezes o tamanho do pedido. Por isso, duas barreiras, ca
 
 Os tetos prendem o tamanho do pedido; os cinco primeiros erros e o orcamento prendem o trabalho e a memoria que a
 conferencia gasta em Python. Ficam fora da conta, presos so pelos tetos do pedido e da revisao de terceiro
-(``cadastro.esquema``, ate ``BYTES_MAXIMOS`` bytes de esquema): o que a biblioteca faz de uma vez sobre um valor so
-(comparar dois textos ou dois numeros, escrever o valor na mensagem de um erro antes de o erro ser contado) e a
-primeira conferencia de cada esquema (``check_schema``), que fica guardada. Um esquema caro pode recusar ate pedido
-valido; quem simplifica e o fornecedor. Nada disso e garantia.
+(``cadastro.esquema``: ate ``BYTES_MAXIMOS`` bytes de esquema, ``ESCOLHAS_MAXIMAS`` valores em cada ``enum`` e
+``REFERENCIA_MAXIMA`` letras em cada ``$ref`` e em cada nome de definicao), duas coisas: o que a biblioteca faz de
+uma vez sobre um valor so (comparar dois textos ou dois numeros, escrever o valor na mensagem de um erro antes de o
+erro ser contado) e a primeira conferencia de cada esquema (``check_schema``), que fica guardada. Os passos nao
+custam todos o mesmo: seguir uma referencia, mesmo curta, custa mais que a media (50 mil passos so de referencias,
+uns 0,3 s de CPU nesta maquina). Um esquema caro pode recusar ate pedido valido; quem simplifica e o fornecedor.
+Nada disso e garantia.
 """
 
 from __future__ import annotations
@@ -284,11 +291,19 @@ _PELO_PEDIDO: Final[dict[str, _Container]] = {
 Com um esquema vazio dentro (``items: {}``), so esta conta paga o trabalho de andar pela lista. ``patternProperties``
 e ``unevaluated*`` sao recusadas na revisao de terceiro e ficam aqui so por defesa."""
 
+_REFERENCIAS: Final = frozenset({"$ref", "$dynamicRef"})
+"""Palavras que buscam a parte citada a cada chamada, lendo o texto da referencia inteiro (``referencing``: decodifica,
+corta e procura cada pedaco): um passo a mais a cada ``LETRAS_POR_PASSO`` letras. ``$dynamicRef`` e recusada na
+revisao de terceiro e fica aqui so por defesa."""
+
 
 def _passos(nome: str, valor: Any, instancia: Any) -> int:
     """Passos de uma chamada da palavra ``nome``: um, e mais um por item que ela percorre (``_PELO_ESQUEMA`` e
-    ``_PELO_PEDIDO``). ``dependentRequired`` percorre tambem a lista de nomes de cada campo."""
+    ``_PELO_PEDIDO``). ``dependentRequired`` percorre tambem a lista de nomes de cada campo, e ``$ref`` (como
+    ``$dynamicRef``) le o texto da referencia (``_REFERENCIAS``)."""
     passos = 1
+    if nome in _REFERENCIAS and isinstance(valor, str):
+        passos += len(valor) // LETRAS_POR_PASSO
     if nome in _PELO_ESQUEMA and isinstance(valor, list | dict):
         tipo = _PELO_ESQUEMA[nome]
         if tipo is None or isinstance(instancia, tipo):
@@ -411,8 +426,14 @@ _ValidadorContado: Any = validators.extend(
 comparando com a conta (``_igual``)."""
 
 
-def conferir_esquema(esquema: Mapping[str, Any]) -> None:
-    """O esquema revisado precisa ser valido e de objeto (exigencia da 2026-07-28)."""
+ESQUEMA_FUNDO_DEMAIS: Final = "esquema invalido: partes demais umas dentro das outras para conferir"
+"""Mensagem de ``EsquemaInvalido`` quando a conferencia do esquema (``check_schema``, com recursao) estoura a pilha do
+Python: um esquema com uns 100 niveis ou mais, de sistema proprio ou de terceiro."""
+
+
+def _conferir_esquema(esquema: Mapping[str, Any]) -> None:
+    """``conferir_esquema`` sem a guarda da pilha: o ``RecursionError`` sobe (``_validador``, dentro de
+    ``conferir_argumentos``, que o troca por ``PROBLEMA_FUNDO``)."""
     if esquema.get("type") != "object":
         raise EsquemaInvalido('o esquema de entrada precisa ter "type": "object"')
     try:
@@ -421,12 +442,25 @@ def conferir_esquema(esquema: Mapping[str, Any]) -> None:
         raise EsquemaInvalido(f"esquema invalido: {erro.message}") from erro
 
 
+def conferir_esquema(esquema: Mapping[str, Any]) -> None:
+    """O esquema revisado precisa ser valido e de objeto (exigencia da 2026-07-28).
+
+    A conferencia da biblioteca (``check_schema``) desce com recursao: um esquema fundo demais para a pilha do Python
+    levanta ``EsquemaInvalido`` (``ESQUEMA_FUNDO_DEMAIS``), nunca erro interno. A revisao do ADMIN chama esta funcao
+    antes de tudo, em sistema proprio e em terceiro."""
+    try:
+        _conferir_esquema(esquema)
+    except RecursionError as erro:
+        raise EsquemaInvalido(ESQUEMA_FUNDO_DEMAIS) from erro
+
+
 @lru_cache(maxsize=1024)
 def _validador(esquema_json: str, terceiro: bool = False) -> Any:
     """O validador do esquema, guardado. ``terceiro``: o que conta os passos (``_ValidadorContado``). Nenhum dos dois
-    confere ``format``, como nas Fases 1 e 2."""
+    confere ``format``, como nas Fases 1 e 2. O ``RecursionError`` da conferencia do esquema sobe: na entrada, e a
+    recusa ``PROBLEMA_FUNDO``."""
     esquema = json.loads(esquema_json)
-    conferir_esquema(esquema)
+    _conferir_esquema(esquema)
     classe = _ValidadorContado if terceiro else Draft202012Validator
     return classe(esquema, registry=_REGISTRO_VAZIO)
 

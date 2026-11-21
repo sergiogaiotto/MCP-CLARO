@@ -1649,6 +1649,41 @@ async def test_toda_funcao_de_gatilho_tem_caminho_de_busca_fixo(dono: AsyncEngin
     assert CAMINHO in config
 
 
+# --- TEMPORARIA -----------------------------------------------------------------------------------------------
+
+# O que o PUBLIC tem no banco atual (sem ACL gravada, vale o padrao do PostgreSQL: CONNECT e TEMPORARY).
+DO_PUBLIC = (
+    "SELECT array_agg(a.privilege_type ORDER BY a.privilege_type) FROM pg_database d,"
+    " aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a WHERE d.datname = current_database()"
+    " AND a.grantee = 0"
+)
+PAPEIS_DO_APP = (*PAPEIS, GRAFANA)
+PODE = "SELECT has_database_privilege(:quem, current_database(), :privilegio)"
+
+
+async def test_migracao_tira_o_temporary_do_public_num_banco_que_ja_existe(
+    banco_0005: tuple[Parametros, AsyncEngine],
+) -> None:
+    """Bloco TEMPORARIA: num banco que nao passou pelo ``10-papeis.sh`` (como um que ja existia antes da Fase 3), o
+    PUBLIC tem o TEMPORARY, o padrao do PostgreSQL, ate a 0005, e os papeis do app o herdam; a 0006 o tira. O
+    CONNECT fica, e nenhum papel do app cria tabela temporaria."""
+    q, engine = banco_0005
+    assert await fazer(engine, DO_PUBLIC) == ["CONNECT", "TEMPORARY"]
+    for papel in PAPEIS_DO_APP:
+        assert await fazer(engine, PODE, quem=papel, privilegio="TEMPORARY") is True, papel
+    await asyncio.to_thread(migrar, q, "head")
+    assert await fazer(engine, DO_PUBLIC) == ["CONNECT"]
+    for papel in PAPEIS_DO_APP:
+        assert await fazer(engine, PODE, quem=papel, privilegio="TEMPORARY") is False, papel
+        assert await fazer(engine, PODE, quem=papel, privilegio="CONNECT") is True, papel
+        await recusado(
+            engine,
+            "CREATE TEMP TABLE sistemas (id uuid, origem text)",
+            "permission denied to create temporary tables",
+            papel=papel,
+        )
+
+
 # --- GRANTS ---------------------------------------------------------------------------------------------------
 
 E, D, R = ENTRADA, DESPACHANTE, ROTINAS

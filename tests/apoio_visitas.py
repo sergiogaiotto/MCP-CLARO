@@ -16,12 +16,15 @@ Os alvos ficam aqui, num modulo importavel, porque o filho e iniciado por ``spaw
   ``<pid>.dormindo`` (o filho ja se isolou e recebeu o pedido) e demora ``s`` segundos para responder.
 - ``responde_cru``: com ``functools.partial``, escreve no cano da resposta exatamente os bytes dados.
 - ``escreve_depois_de_isolar``: depois de ``filho._isolar()``, escreve nos descritores 1 e 2 e devolve para onde
-  apontam 0, 1 e 2 e o que sobrou do cano do rastreador de recursos do ``multiprocessing``.
+  apontam 0, 1 e 2 (antes e depois do isolamento), o que sobrou do cano do rastreador de recursos do
+  ``multiprocessing``, se o rastreador volta a ser iniciado (``resource_tracker.ensure_running()``) e o sinal que o
+  processo recebe quando morre a thread que o criou (``PR_GET_PDEATHSIG``).
 """
 
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import datetime
 import errno
 import ipaddress
@@ -136,9 +139,32 @@ def _para_onde(fd: int) -> str:
     return "devnull" if os.path.samestat(estado, os.stat(os.devnull)) else "outro"
 
 
+PR_GET_PDEATHSIG = 2
+
+
+def sinal_da_morte_do_criador() -> int | None:
+    """O sinal que o processo recebe quando morre a thread que o criou (``PR_GET_PDEATHSIG``); None fora do Linux."""
+    if not sys.platform.startswith("linux"):
+        return None
+    sinal = ctypes.c_int(-1)
+    if ctypes.CDLL(None, use_errno=True).prctl(PR_GET_PDEATHSIG, ctypes.byref(sinal), 0, 0, 0) != 0:
+        return None
+    return sinal.value
+
+
+def _rastreador_volta() -> str:
+    """Tenta iniciar de novo o rastreador de recursos (como o ``multiprocessing`` faz ao registrar um recurso)."""
+    try:
+        resource_tracker.ensure_running()
+    except OSError:
+        return "recusado"
+    return "iniciou"
+
+
 def escreve_depois_de_isolar(pedidos: Any, respostas: Any, *_: Any) -> None:
     """Um filho isolado que escreve no stdout e no stderr herdados do pai (como o texto de um terceiro faria)."""
     rastreador = resource_tracker._resource_tracker._fd
+    antes = {str(fd): _para_onde(fd) for fd in (0, 1, 2)}
     filho._isolar()
     for fd in (1, 2):
         with contextlib.suppress(OSError):
@@ -146,10 +172,13 @@ def escreve_depois_de_isolar(pedidos: Any, respostas: Any, *_: Any) -> None:
     print(MARCA_NA_SAIDA.decode() + "print", flush=True)
     print(MARCA_NA_SAIDA.decode() + "stderr", file=sys.stderr, flush=True)
     vistos = {
+        "descritores_antes": antes,
         "descritores": {str(fd): _para_onde(fd) for fd in (0, 1, 2)},
         "rastreador_herdado": rastreador is not None,
         "rastreador_fechado": rastreador is None or _para_onde(rastreador) == "EBADF",
         "rastreador_agora": resource_tracker._resource_tracker._fd,
+        "rastreador_volta": _rastreador_volta(),
+        "pdeathsig": sinal_da_morte_do_criador(),
     }
     filho.avisar_pronto(respostas)
     filho.ler_ate_o_fim(pedidos.fileno(), 1 << 30)

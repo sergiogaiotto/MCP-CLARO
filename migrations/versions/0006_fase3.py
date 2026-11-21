@@ -15,6 +15,7 @@ Blocos, nesta ordem (cada um com comentario de abertura e "Fim do bloco"):
 - CHAVE_TERCEIRO: terceiro so com chave por pessoa ou compartilhada (D2);
 - LIMITES: o despachante so suspende limites ativos (o UPDATE dele em limites vem da critica M2);
 - CAMINHO: caminho de busca fixo nas funcoes de gatilho das migracoes anteriores;
+- TEMPORARIA: o PUBLIC deixa de criar tabela temporaria no banco do gateway (bancos que ja existem);
 - GRANTS, no fim.
 
 Toda funcao desta migracao roda com ``search_path = pg_catalog, public, pg_temp``: um papel que crie uma tabela
@@ -445,6 +446,20 @@ ALTER FUNCTION fila_saida_avisa() SET search_path = pg_catalog, public, pg_temp;
 -- Fim do bloco CAMINHO.
 """
 
+SQL_TEMPORARIA = r"""
+-- Bloco TEMPORARIA. O PUBLIC deixa de criar tabela temporaria neste banco: nenhum papel do app cria uma sombra em
+-- pg_temp com o nome de uma tabela do esquema. E a defesa de cima; a de baixo e o caminho de busca fixo (bloco
+-- CAMINHO), que vale mesmo se um papel ganhar o TEMPORARY por outro caminho. O docker/postgres/iniciar/10-papeis.sh
+-- faz o mesmo, mas so na primeira partida do banco (volume vazio): esta linha alcanca os bancos que ja existem. O
+-- CONNECT do PUBLIC fica como esta. O MCP-CLARO nao desfaz migracoes (o downgrade levanta erro, como nas outras);
+-- quem voltar um banco a mao devolve o padrao do PostgreSQL com GRANT TEMPORARY ON DATABASE <banco> TO PUBLIC.
+DO $$
+BEGIN
+  EXECUTE format('REVOKE TEMPORARY ON DATABASE %I FROM PUBLIC', current_database());
+END $$;
+-- Fim do bloco TEMPORARIA.
+"""
+
 GRANTS = r"""
 -- Bloco GRANTS (ultimo).
 -- Revisao do servidor: todos leem (vitrine da entrada, ordem do despachante, mudou-parou das rotinas); so o
@@ -491,6 +506,7 @@ def upgrade() -> None:
     sql_em_bloco(SQL_CHAVE_TERCEIRO)
     sql_em_bloco(SQL_LIMITES)
     sql_em_bloco(SQL_CAMINHO)
+    sql_em_bloco(SQL_TEMPORARIA)
     sql_em_bloco(GRANTS)
 
 

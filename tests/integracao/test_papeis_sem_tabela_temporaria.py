@@ -9,6 +9,9 @@ Uma tabela temporaria com o nome de uma tabela do esquema e o jeito de enganar u
   propria senha, mas ``CREATE TEMP TABLE`` e recusado (42501). O PUBLIC fica so com o CONNECT.
 - O banco dos testes (``tests/conftest.py``, que nao roda o script: os papeis nascem na 0001) e montado igual: os
   mesmos papeis, pelo ``SET ROLE``, tambem recebem 42501.
+
+O script so roda na primeira partida do banco. Num banco que ja existia, quem tira o TEMPORARY do PUBLIC e a
+migracao 0006 (bloco TEMPORARIA; prova em ``test_migracao_0006``, num banco que nao passou pelo script).
 """
 
 from __future__ import annotations

@@ -20,7 +20,8 @@ terceiro (critica B3, desenho simples do coordenador):
 - ``conferir_terceiro`` (revisao): recusa ``patternProperties`` (regra de formato nos nomes de campo), ``$id``,
   ``$anchor``, ``$dynamicAnchor``, ``$dynamicRef``, ``unevaluatedProperties`` e ``unevaluatedItems`` em qualquer
   lugar, ``$schema`` fora da raiz, toda referencia que nao seja ``#/$defs/<nome>`` ou ``#/definitions/<nome>`` para
-  uma definicao que existe, esquema em ciclo, esquema com mais de ``CUSTO_MAXIMO`` partes ou
+  uma definicao que existe, texto de ``$ref`` e nome de definicao com mais de ``REFERENCIA_MAXIMA`` letras,
+  esquema em ciclo, esquema com mais de ``CUSTO_MAXIMO`` partes ou
   ``PROFUNDIDADE_MAXIMA`` niveis (contando todas as definicoes e seguindo as referencias, da raiz e de cada
   definicao, citada ou nao), ``enum`` com mais de ``ESCOLHAS_MAXIMAS`` valores e esquema com mais de
   ``BYTES_MAXIMOS`` bytes.
@@ -72,6 +73,14 @@ estao), contados em UTF-8."""
 
 ESCOLHAS_MAXIMAS: Final = 1000
 """Valores de cada ``enum`` de um esquema de entrada de terceiro."""
+
+REFERENCIA_MAXIMA: Final = 256
+"""Letras do texto de cada ``$ref`` e do nome de cada definicao (``$defs`` e ``definitions``) de um esquema de entrada
+de terceiro. A entrada le o texto da referencia inteiro a cada vez que a segue (decodifica, corta e procura cada
+pedaco): uma definicao curta que chama uma de nome com 120 mil letras, chamada 600 vezes por item, custava segundos
+de CPU por pedido. O orcamento de passos da entrada tambem conta essas letras; este teto e a segunda barreira."""
+_COMECO_DO_NOME: Final = 40
+"""Letras do nome de uma definicao longa demais que entram no ``onde`` da recusa."""
 
 # Palavras que valem para a validacao (JSON Schema 2020-12, as do Draft202012Validator e as que ele le junto:
 # then/else com if, minContains/maxContains com contains) e as de estrutura, que as referencias usam.
@@ -180,7 +189,10 @@ MotivoEsquema = Literal["palavra", "referencia", "ciclo", "grande", "fundo", "pe
 class EsquemaRecusado(EsquemaInvalido):
     """Esquema valido que a revisao de terceiro nao aceita. A mensagem e para o ADMIN; ``onde`` (com os
     escondidos ja marcados; ``(raiz)`` quando e a raiz ou o esquema inteiro), ``motivo`` (um de ``MotivoEsquema``)
-    e ``palavra`` (a palavra recusada, com o motivo ``palavra``) servem para a tela montar a propria frase."""
+    e ``palavra`` servem para a tela montar a propria frase. ``palavra``: com o motivo ``palavra``, a palavra
+    recusada; com o motivo ``referencia``, ``$ref`` (texto da referencia com mais de ``REFERENCIA_MAXIMA`` letras),
+    ``$defs`` ou ``definitions`` (nome de definicao com mais de ``REFERENCIA_MAXIMA`` letras, ``onde`` e o caminho da
+    definicao), ou None (referencia que nao acha uma definicao); nos outros motivos, None."""
 
     def __init__(self, mensagem: str, *, onde: str, motivo: MotivoEsquema, palavra: str | None = None) -> None:
         self.onde = onde
@@ -391,14 +403,32 @@ _FRASES_DAS_PALAVRAS: Final[dict[str, str]] = {
 }
 
 
+def _frase_da_referencia(lugar: str, palavra: str | None) -> str:
+    """A frase do motivo ``referencia``: ``palavra`` None (a referencia nao acha uma definicao), ``$ref`` (texto da
+    referencia longo demais) ou ``$defs``/``definitions`` (nome de definicao longo demais)."""
+    if palavra == "$ref":
+        return (
+            f"a referencia ($ref) {lugar} tem mais de {REFERENCIA_MAXIMA} letras; a revisao de terceiro so aceita "
+            f"referencia de ate {REFERENCIA_MAXIMA} letras"
+        )
+    if palavra in _DEFINICOES:
+        return (
+            f"o nome da definicao ({palavra}) {lugar} tem mais de {REFERENCIA_MAXIMA} letras; a revisao de terceiro so "
+            f"aceita nome de definicao de ate {REFERENCIA_MAXIMA} letras"
+        )
+    return (
+        f"a referencia ($ref) {lugar} nao aponta para uma definicao deste esquema; a revisao de terceiro so aceita "
+        "referencia da forma #/$defs/<nome> ou #/definitions/<nome>, para uma definicao que existe"
+    )
+
+
 def _recusa(caminho: tuple[str, ...], motivo: MotivoEsquema, palavra: str | None = None) -> EsquemaRecusado:
     onde = _lugar(caminho)
     lugar = "na raiz do esquema" if onde == "(raiz)" else f"em {onde}"
     frases: dict[str, str] = {
         "palavra": f"o esquema usa {_FRASES_DAS_PALAVRAS.get(palavra or '', palavra)} {lugar}; a revisao de "
         "terceiro nao aceita essa palavra",
-        "referencia": f"a referencia ($ref) {lugar} nao aponta para uma definicao deste esquema; a revisao de "
-        "terceiro so aceita referencia da forma #/$defs/<nome> ou #/definitions/<nome>, para uma definicao que existe",
+        "referencia": _frase_da_referencia(lugar, palavra),
         "ciclo": f"a referencia {lugar} volta a uma parte que a contem (esquema em ciclo); a revisao de "
         "terceiro nao aceita esquema em ciclo",
         "grande": f"o esquema tem mais de {CUSTO_MAXIMO} partes, contando todas as definicoes e seguindo as "
@@ -464,17 +494,28 @@ def conferir_palavras(esquema: Mapping[str, Any]) -> None:
 
     Recusa (``EsquemaRecusado``, frase para o ADMIN) com o motivo ``palavra`` (``PALAVRAS_RECUSADAS`` em qualquer
     lugar, ``SO_NA_RAIZ`` fora da raiz; o atributo ``palavra`` diz qual) ou ``referencia`` (``$ref`` que nao e
-    ``#/$defs/<nome>`` nem ``#/definitions/<nome>``, ou cuja definicao nao existe ou nao e um esquema). Com isso,
-    nenhuma referencia cai dentro de um ``enum``, de um ``const`` ou de texto do fornecedor, nenhuma ancora repetida
-    muda o alvo, e toda parte vale como JSON Schema 2020-12 na entrada.
+    ``#/$defs/<nome>`` nem ``#/definitions/<nome>``, ou cuja definicao nao existe ou nao e um esquema; e, com o
+    atributo ``palavra``, texto de ``$ref`` ou nome de definicao com mais de ``REFERENCIA_MAXIMA`` letras: ``$ref``,
+    ``$defs`` ou ``definitions``). Com isso, nenhuma referencia cai dentro de um ``enum``, de um ``const`` ou de texto
+    do fornecedor, nenhuma ancora repetida muda o alvo, toda parte vale como JSON Schema 2020-12 na entrada, e seguir
+    uma referencia custa pouco.
     """
     raiz = dict(esquema)
     for caminho, no in _esquemas(raiz):
         for palavra in (*PALAVRAS_RECUSADAS, *(SO_NA_RAIZ if caminho else ())):
             if palavra in no:
                 raise _recusa(caminho, "palavra", palavra)
+        for chave in _DEFINICOES:
+            definicoes = no.get(chave)
+            if isinstance(definicoes, dict):
+                for nome in definicoes:
+                    if len(str(nome)) > REFERENCIA_MAXIMA:
+                        # No lugar, so o comeco do nome: o resto nao ajuda o ADMIN a achar a definicao.
+                        raise _recusa((*caminho, chave, str(nome)[:_COMECO_DO_NOME] + "..."), "referencia", chave)
         if "$ref" in no:
             referencia = no["$ref"]
+            if isinstance(referencia, str) and len(referencia) > REFERENCIA_MAXIMA:
+                raise _recusa(caminho, "referencia", "$ref")
             alvo = _definicao(raiz, referencia)
             if alvo is None or not _acha_como_a_entrada(raiz, referencia, alvo):
                 raise _recusa(caminho, "referencia")

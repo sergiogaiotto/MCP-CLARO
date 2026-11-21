@@ -158,6 +158,74 @@ def test_enum_no_teto_da_revisao_com_lista_valida_cabe_ate_49_itens() -> None:
     assert not isinstance(erro.value, OrcamentoEsgotado)
 
 
+# --- Referencia de texto longo (R3a, defeito 1 da ultima conferencia do G4r) -------------------------------------
+
+
+def ref_longa(letras: int, chamadas: int = 600) -> dict[str, Any]:
+    """A prova do verificador: uma definicao de nome curto (``s``) que chama outra de nome com ``letras`` letras, e um
+    ``allOf`` com ``chamadas`` referencias a ``s`` em cada item. Cada busca de referencia le o texto inteiro."""
+    longo = "n" * letras
+    return em_json(
+        objeto(
+            {"l": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/s"}] * chamadas}}},
+            **{"$defs": {"s": {"$ref": "#/$defs/" + longo}, longo: {}}},
+        )
+    )
+
+
+PEDIDO_REF = {"l": [0] * TETO_LISTA}
+PASSOS_COM_NOME_CURTO = 50_231
+"""Onde a conta parava antes da R3a com o nome de 1 letra (medido pelo verificador do G4r): o texto curto de ``$ref``
+nao soma passo, entao a conta de hoje fica a mesma."""
+
+
+def sem_a_revisao(esquema: dict[str, Any], pedido: dict[str, Any]) -> dict[str, Any]:
+    """A copia que a entrada usaria se a revisao de terceiro deixasse o esquema passar (``de_terceiro`` sem ela)."""
+    conferir_esquema(esquema)
+    conferir_tamanho(pedido)
+    copia = para_conferir(esquema)
+    with contextlib.suppress(ArgumentosInvalidos):
+        conferir_argumentos(copia, {}, terceiro=True)
+    return copia
+
+
+def test_texto_de_referencia_conta_um_passo_a_cada_100_letras() -> None:
+    assert argumentos_mod.LETRAS_POR_PASSO == 100
+    assert argumentos_mod._passos("$ref", "#/$defs/s", {}) == 1
+    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 92, {}) == 2
+    assert argumentos_mod._passos("$ref", "#/$defs/" + "n" * 120_000, {}) == 1 + 1200
+    assert argumentos_mod._passos("$dynamicRef", "#" + "n" * 299, []) == 4  # recusada na revisao; conta por defesa
+    assert argumentos_mod._passos("$ref", 7, {}) == 1  # nao e texto: a revisao e a conferencia do esquema recusam
+    assert argumentos_mod._passos("const", "n" * 1000, {}) == 1  # so as referencias leem o texto a cada chamada
+
+
+def test_referencia_de_nome_longo_e_recusada_na_revisao_e_sem_ela_pelo_orcamento_em_milissegundos() -> None:
+    # Antes: passava na revisao (custo 1803, 253.926 bytes), e o pedido valido gastava 4,3 s de CPU antes de parar
+    # no orcamento, porque cada busca de referencia custa o tamanho do texto e contava 1 passo.
+    esquema = ref_longa(120_000)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.palavra) == ("referencia", "$defs")
+    assert erro.value.onde == "$defs/" + "n" * 40 + "..."
+    # Com a revisao contornada, o orcamento conta as letras de cada busca e para logo.
+    copia = sem_a_revisao(esquema, PEDIDO_REF)
+    recusado_pelo_orcamento(copia, PEDIDO_REF)
+
+
+def test_referencia_de_nome_curto_mantem_a_conta_de_hoje() -> None:
+    # Nome curto: passa na revisao, e o pedido para no orcamento no mesmo passo de antes. (So a conta: seguir 50 mil
+    # referencias curtas leva uns 0,3 s de CPU, mais de 1 s com o tracemalloc de recusado_pelo_orcamento.)
+    copia = de_terceiro(ref_longa(1), PEDIDO_REF)
+    assert passos_gastos(copia, PEDIDO_REF) == -PASSOS_COM_NOME_CURTO
+    # No teto da revisao (o texto da referencia com 256 letras), cada busca soma 2 passos e passa na revisao.
+    no_teto = ref_longa(256 - len("#/$defs/"))
+    conferir_terceiro(no_teto)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(ref_longa(256 - len("#/$defs/") + 1))
+    assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("referencia", "$ref", "$defs/s")
+    assert passos_gastos(de_terceiro(no_teto, PEDIDO_REF), PEDIDO_REF) < 0
+
+
 def test_a_frase_do_orcamento() -> None:
     assert RECUSA_ORCAMENTO == "O esquema deste servidor ficou caro demais para conferir este pedido. Nada foi enviado."
     assert ORCAMENTO_PASSOS == 50_000
@@ -377,6 +445,40 @@ def test_pilha_estourada_vira_recusa_legivel(n: int, terceiro: bool) -> None:
     assert not isinstance(erro.value, ArgumentosGrandes)
     # A conta volta ao normal: a proxima conferencia nao herda a conta parada no meio.
     assert argumentos_mod._CONTA.get() is None
+
+
+def propriedades_aninhadas(n: int) -> dict[str, Any]:
+    """Um esquema de objeto com ``n`` niveis de ``properties``, um dentro do outro (a raiz e o primeiro)."""
+    no: dict[str, Any] = {"type": "string"}
+    for _ in range(n - 1):
+        no = objeto({"a": no})
+    return no
+
+
+@pytest.mark.parametrize("terceiro", [False, True], ids=["proprio", "terceiro"])
+def test_pilha_estourada_na_montagem_do_validador_vira_recusa_legivel(terceiro: bool) -> None:
+    # A conferencia do esquema da biblioteca (check_schema, na primeira chamada de cada esquema) desce com recursao:
+    # com uns 100 niveis de properties, a pilha estoura antes de qualquer argumento. Sem a guarda, RecursionError.
+    with pytest.raises(ArgumentosInvalidos) as erro:
+        conferir_argumentos(propriedades_aninhadas(100), {}, terceiro=terceiro)
+    assert erro.value.problemas == [PROBLEMA_FUNDO]
+    assert not isinstance(erro.value, ArgumentosGrandes)
+    assert argumentos_mod._CONTA.get() is None
+    # Nada fica guardado: a mesma chamada de novo da a mesma recusa (lru_cache nao guarda excecao).
+    with pytest.raises(ArgumentosInvalidos):
+        conferir_argumentos(propriedades_aninhadas(100), {}, terceiro=terceiro)
+
+
+@pytest.mark.parametrize("niveis", [100, 300])
+def test_conferir_esquema_fundo_demais_levanta_esquema_invalido(niveis: int) -> None:
+    # A revisao do ADMIN (proprio e terceiro) chama conferir_esquema antes de tudo: antes, RecursionError (erro 500).
+    esquema = objeto({"p": propriedades_aninhadas(niveis)})
+    with pytest.raises(EsquemaInvalido) as erro:
+        conferir_esquema(esquema)
+    assert str(erro.value) == argumentos_mod.ESQUEMA_FUNDO_DEMAIS
+    assert str(erro.value) == "esquema invalido: partes demais umas dentro das outras para conferir"
+    assert not isinstance(erro.value, EsquemaRecusado)
+    conferir_esquema(objeto({"p": propriedades_aninhadas(60)}))  # o que cabe na pilha segue como antes
 
 
 def test_o_validador_que_conta_tambem_nao_confere_format() -> None:

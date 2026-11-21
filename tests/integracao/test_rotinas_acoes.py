@@ -1,5 +1,6 @@
-"""Rotinas da Fase 2 contra PostgreSQL real, com o usuario ``mcp_claro_rotinas``: fichas que vencem, aviso
-de ficha pendente (uma vez por ficha, mesmo com duas copias no ar) e limites que vencem."""
+"""Rotinas das acoes contra PostgreSQL real, com o usuario ``mcp_claro_rotinas``: fichas que vencem, aviso
+de ficha pendente (uma vez por ficha, mesmo com duas copias no ar), limites que vencem e, na Fase 3, a limpeza dos
+sinais dos tres sinais mais velhos que a maior janela."""
 
 from __future__ import annotations
 
@@ -16,10 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from exemplos import acoes_caixa
 from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Parametros
+from mcp_claro.regras.sinais import MAIOR_JANELA_MINUTOS
 from mcp_claro.rotinas import acoes
 from mcp_claro.rotinas.agendador import Agendador, Desfecho
 from mcp_claro.rotinas.config import ConfigRotinas
 from mcp_claro.saida.protocolo import codigo_conferencia, novo_protocolo
+from tests import apoio_terceiros as t3
 from tests.integracao import test_rotinas_apoio as apoio
 from tests.integracao.test_rotinas_apoio import Cadastro, cadastro_minimo, ordem
 
@@ -435,6 +438,69 @@ async def test_limite_com_prazo_no_passado_vence(engine_rotinas: AsyncEngine, en
     assert n == 2
 
 
+# --- Sinais dos tres sinais (Fase 3) --------------------------------------------------------
+
+
+async def test_limpar_sinais_so_apaga_os_mais_velhos_que_a_maior_janela(
+    engine_rotinas: AsyncEngine, engine_dono: AsyncEngine
+) -> None:
+    a = await arranjo(engine_dono)
+    minutos = MAIOR_JANELA_MINUTOS
+    # Antes: nenhum sinal velho de outro teste da sessao, para os lotes abaixo contarem so os deste.
+    while await acoes.limpar_sinais(engine_rotinas):
+        pass
+    ids: dict[str, list[int]] = {"velhos": [], "novos": []}
+    async with engine_dono.begin() as c:
+        # Os velhos (9 e 8 dias, e dois de 7 dias e 1 minuto) saem; os que ainda cabem na janela de 7 dias ficam,
+        # mesmo o de 7 dias menos 10 minutos (o banco recusa apagar esse: uma limpeza com janela menor quebraria aqui).
+        for idade, grupo in (
+            (f"{9 * 24 * 60} minutes", "velhos"),
+            (f"{8 * 24 * 60} minutes", "velhos"),
+            (f"{minutos + 1} minutes", "velhos"),
+            (f"{minutos + 1} minutes", "velhos"),
+            (f"{minutos - 10} minutes", "novos"),
+            ("1 minute", "novos"),
+        ):
+            visto = (await c.execute(text(f"SELECT now() - interval '{idade}'"))).scalar_one()
+            ids[grupo].append(
+                await t3.gravar_sinal(
+                    c,
+                    pessoa_id=a.cad.pessoa_id,
+                    aplicativo_id=a.cad.aplicativo_id,
+                    tipo="dado_privado",
+                    ferramenta_id=a.ferramenta_id,
+                    visto_em=visto,
+                )
+            )
+    antes = await contar(engine_dono, "SELECT count(*) FROM extrato WHERE pessoa_id = :p", p=a.cad.pessoa_id)
+
+    async def ficaram() -> set[int]:
+        async with engine_dono.connect() as c:
+            return set(
+                (
+                    await c.execute(
+                        text("SELECT id FROM sinais WHERE id = ANY(:i)"), {"i": ids["velhos"] + ids["novos"]}
+                    )
+                ).scalars()
+            )
+
+    # Em lote: uma volta de 2 apaga so os 2 mais velhos; os outros 2 velhos ficam para a proxima volta.
+    assert await acoes.limpar_sinais(engine_rotinas, lote=2, voltas=1) == 2
+    assert await ficaram() == set(ids["velhos"][2:] + ids["novos"])
+    # Lotes de 1: os 2 que sobraram saem em duas voltas da mesma rodada.
+    assert await acoes.limpar_sinais(engine_rotinas, lote=1) == 2
+    assert await ficaram() == set(ids["novos"])
+    # Sem extrato: o sinal nao e um passo da pessoa.
+    assert await contar(engine_dono, "SELECT count(*) FROM extrato WHERE pessoa_id = :p", p=a.cad.pessoa_id) == antes
+    # De novo, e com duas copias ao mesmo tempo: nada mais sai, nada quebra.
+    await asyncio.gather(acoes.limpar_sinais(engine_rotinas), acoes.limpar_sinais(engine_rotinas))
+    async with engine_dono.connect() as c:
+        restantes = (
+            await c.execute(text("SELECT count(*) FROM sinais WHERE id = ANY(:i)"), {"i": ids["novos"]})
+        ).scalar_one()
+    assert restantes == len(ids["novos"])
+
+
 # --- Tarefas no agendador --------------------------------------------------------------------
 
 
@@ -445,6 +511,7 @@ async def test_tarefas_de_acoes_rodam_no_agendador(engine_rotinas: AsyncEngine, 
         ("avisar_fichas_pendentes", acoes.INTERVALO_AVISO_FICHAS),
         ("vencer_limites", acoes.INTERVALO_LIMITES),
         ("limpar_desafios_passkey", acoes.INTERVALO_DESAFIOS),
+        ("limpar_sinais", acoes.INTERVALO_SINAIS),
     ]
     agendador = Agendador(engine_rotinas, tarefas, primeira_espera=0)
     for t in tarefas:

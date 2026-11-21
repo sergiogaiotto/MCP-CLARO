@@ -12,6 +12,10 @@
 
 Nunca ha reenvio do ``tools/call``: renova-se antes de enviar. Um 401 no envio e recusa definitiva
 daquele pedido; ``marcar_vencida`` so faz o proximo pedido renovar antes.
+
+Servidor de terceiros (Fase 3): o ``token_endpoint`` passa antes pela conferencia do endereco combinado
+(``autorizacao.trocar(..., terceiro=True)``). Recusado, nada sai, a falha vai ao extrato com
+``sala_endereco_recusado``, e a chave atual so serve enquanto valer.
 """
 
 from __future__ import annotations
@@ -80,11 +84,14 @@ async def chave_pronta(
     sistema_id: uuid.UUID,
     pessoa_id: uuid.UUID,
     margem: timedelta = MARGEM,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
 ) -> ChaveAberta:
     """Chave de acesso da pessoa no sistema, renovada antes se estiver vencida ou perto de vencer.
 
     Levanta ``chaves.ChaveAusente`` (nunca autorizou ou foi derrubada), ``AutorizacaoVencida`` ou
-    ``RenovacaoIndisponivel``.
+    ``RenovacaoIndisponivel``. ``ambiente`` e ``liberar_locais`` (so desenvolvimento e teste) valem para a
+    conferencia do endereco de troca de um terceiro.
     """
     async with engine.connect() as c:
         linha = await _ler(c, sistema_id, pessoa_id, "acesso")
@@ -92,7 +99,15 @@ async def chave_pronta(
         raise chaves.ChaveAusente("sem chave guardada para este sistema e esta pessoa")
     if _vale(linha.expira_em, margem, datetime.now(UTC)):
         return ChaveAberta(await _abrir(cifra, linha, sistema_id, pessoa_id), linha.cifrada)
-    return await renovar(engine, cifra, sistema_id=sistema_id, pessoa_id=pessoa_id, margem=margem)
+    return await renovar(
+        engine,
+        cifra,
+        sistema_id=sistema_id,
+        pessoa_id=pessoa_id,
+        margem=margem,
+        ambiente=ambiente,
+        liberar_locais=liberar_locais,
+    )
 
 
 async def renovar(
@@ -102,6 +117,8 @@ async def renovar(
     sistema_id: uuid.UUID,
     pessoa_id: uuid.UUID,
     margem: timedelta = MARGEM,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
 ) -> ChaveAberta:
     """Renova com a trava do par (pessoa, sistema). Quem chegar depois usa a chave que o primeiro gravou."""
     async with engine.begin() as c:
@@ -115,7 +132,9 @@ async def renovar(
         atual: ChaveAberta | None = None
         if _vale(acesso.expira_em, timedelta(0), agora):
             atual = ChaveAberta(await _abrir(cifra, acesso, sistema_id, pessoa_id), acesso.cifrada)
-        desfecho = await _trocar_com_trava(c, cifra, sistema_id, pessoa_id, atual)
+        desfecho = await _trocar_com_trava(
+            c, cifra, sistema_id, pessoa_id, atual, ambiente=ambiente, liberar_locais=liberar_locais
+        )
     if isinstance(desfecho, Exception):
         CONTADORES.somar("renovacoes_falhas", motivo=type(desfecho).__name__)
         raise desfecho
@@ -123,7 +142,14 @@ async def renovar(
 
 
 async def _trocar_com_trava(
-    c: AsyncConnection, cifra: Cifra, sistema_id: uuid.UUID, pessoa_id: uuid.UUID, atual: ChaveAberta | None
+    c: AsyncConnection,
+    cifra: Cifra,
+    sistema_id: uuid.UUID,
+    pessoa_id: uuid.UUID,
+    atual: ChaveAberta | None,
+    *,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
 ) -> ChaveAberta | Exception:
     """Ja dentro da trava. Devolve a chave a usar ou a falha a levantar depois do COMMIT (o extrato fica)."""
     renovacao = await _ler(c, sistema_id, pessoa_id, "renovacao")
@@ -148,9 +174,27 @@ async def _trocar_com_trava(
                 "refresh_token": await _abrir(cifra, renovacao, sistema_id, pessoa_id, "renovacao"),
                 "resource": sistema.recurso,
             },
+            terceiro=sistema.de_terceiro,
+            ambiente=ambiente,
+            liberar_locais=liberar_locais,
         )
     except autorizacao.TrocaRecusada as recusa:
         log.warning("renovacao_recusada", sistema=sistema.nome, erro_oauth=recusa.codigo)
+        if recusa.codigo == autorizacao.ENDERECO_RECUSADO:
+            # Nada saiu: o endereco de troca do terceiro nao e o combinado. A chave de renovacao nao vai a ele.
+            await _registrar_falha(
+                c, sistema_id, pessoa_id, sistema.nome, "o endereco de troca de chave nao e publico ou nao usa https"
+            )
+            await registrar(
+                c,
+                papel="despachante",
+                tipo="sala_endereco_recusado",
+                campos={"sistema": sistema.nome},
+                pessoa_id=pessoa_id,
+                sistema_id=sistema_id,
+            )
+            CONTADORES.somar("sala_endereco_recusado", onde="renovacao")
+            return atual or RenovacaoIndisponivel("endereco de troca recusado")
         if recusa.codigo == "invalid_grant":
             await _derrubar(c, sistema_id, pessoa_id, "o sistema recusou a renovacao", nome=sistema.nome)
             return AutorizacaoVencida("o sistema recusou a renovacao")

@@ -5,8 +5,10 @@
 - A1: cada chamada roda num processo filho novo; duas chamadas a terceiros diferentes ao mesmo tempo rodam em
   processos diferentes, e o processo de X nao recebe a chave de Y;
 - o pai devolve o que o filho escreveu, sem ler; erro inesperado do filho, ou prazo da sala, vira 500 (duvida);
-- o filho so avisa que esta pronto depois de se isolar, e isolado nao escreve no stdout nem no stderr da sala;
-- os filhos nascem numa thread da sala que vive tanto quanto ela (``PR_SET_PDEATHSIG`` vale pela thread);
+- o filho so avisa que esta pronto depois de se isolar, e isolado nao escreve no stdout nem no stderr da sala, nem
+  com um cano herdado no fd 0, nem fala com o rastreador de recursos do ``multiprocessing``;
+- os filhos nascem numa thread da sala que vive tanto quanto ela (``PR_SET_PDEATHSIG`` vale pela thread); o filho
+  isolado tem ``PR_SET_PDEATHSIG`` com ``SIGKILL``, e fechar a sala mata o que ainda vive;
 - o ambiente que vale e o da sala; enderecos locais so em desenvolvimento;
 - partida: sem ``DATABASE_*``, ``DB_*``, ``VAULT_*`` nem outro segredo, e so com mTLS.
 """
@@ -19,6 +21,7 @@ import functools
 import json
 import os
 import select
+import signal
 import socket
 import ssl
 import sys
@@ -429,24 +432,45 @@ def test_os_canos_do_pai_com_o_filho_nao_se_reabrem_pelo_proc() -> None:
         novo.encerrar()
 
 
+@contextlib.contextmanager
+def _cano_na_entrada() -> Iterator[None]:
+    """Poe um cano no fd 0 deste processo, e no fim devolve o de antes: o filho iniciado aqui herda algo que nao e
+    ``/dev/null`` (sob o pytest, o fd 0 ja e ``/dev/null``, e um filho que nao trocasse o 0 passaria igual)."""
+    leitura, escrita = os.pipe()
+    antes = os.dup(0)
+    try:
+        os.dup2(leitura, 0)
+        yield
+    finally:
+        os.dup2(antes, 0)
+        for fd in (antes, leitura, escrita):
+            os.close(fd)
+
+
 async def test_filho_isolado_nao_escreve_na_saida_da_sala_e_a_chamada_responde(
     espiao: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """Depois de ``_isolar()``, 0, 1 e 2 apontam para ``/dev/null`` e o cano do rastreador de recursos do
-    ``multiprocessing`` (herdado do pai) fica fechado: um filho tomado nao escreve no log da sala."""
+    """Depois de ``_isolar()``, 0, 1 e 2 apontam para ``/dev/null`` (o 0 herdado e um cano), o cano do rastreador de
+    recursos do ``multiprocessing`` (herdado do pai) fica fechado e o rastreador nao volta a ser iniciado: um filho
+    tomado nao escreve no log da sala nem fala com o rastreador."""
     sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=apoio_visitas.escreve_depois_de_isolar, prontos=0)
     capfd.readouterr()
-    async with sala.ligada():
-        atendimento = await sala.atender(sala_contrato.ROTA_CHAMAR, b"{}")
+    with _cano_na_entrada():
+        async with sala.ligada():
+            atendimento = await sala.atender(sala_contrato.ROTA_CHAMAR, b"{}")
     capturado = capfd.readouterr()
     assert (atendimento.status, atendimento.desfecho) == (200, "filho")
     assert apoio_visitas.MARCA_NA_SAIDA.decode() not in capturado.out + capturado.err
     vistos = json.loads(atendimento.corpo)
+    assert vistos["descritores_antes"]["0"] == "outro"  # o filho herdou o cano: a troca do 0 e do filho
+    vistos.pop("pdeathsig")  # o teste da thread criadora confere
     assert vistos == {
+        "descritores_antes": vistos["descritores_antes"],
         "descritores": {"0": "devnull", "1": "devnull", "2": "devnull"},
         "rastreador_herdado": True,
         "rastreador_fechado": True,
         "rastreador_agora": None,
+        "rastreador_volta": "recusado",
     }
 
 
@@ -506,6 +530,40 @@ async def test_filhos_nascem_sempre_na_thread_criadora_da_sala(monkeypatch: pyte
     assert criadora.name.startswith(visitas_app.CRIADORA)
     assert criadora is not threading.main_thread()
     assert not criadora.is_alive()  # fechada no fim da sala
+
+
+async def test_filho_isolado_morre_com_a_thread_que_o_criou(espiao: Path) -> None:
+    """Depois de ``_isolar()``, o filho tem ``PR_SET_PDEATHSIG`` com ``SIGKILL``: morre quando morre a thread da sala
+    que o criou (``PR_GET_PDEATHSIG`` le o sinal guardado no nucleo)."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("PR_SET_PDEATHSIG e do Linux")
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=apoio_visitas.escreve_depois_de_isolar, prontos=0)
+    async with sala.ligada():
+        atendimento = await sala.atender(sala_contrato.ROTA_CHAMAR, b"{}")
+    assert (atendimento.status, atendimento.desfecho) == (200, "filho")
+    assert json.loads(atendimento.corpo)["pdeathsig"] == signal.SIGKILL
+
+
+async def test_fechar_a_sala_mata_o_filho_isolado_que_ainda_vive_fora_dos_prontos() -> None:
+    """Um filho de verdade (``filho.principal``), ja isolado, a espera de um pedido que nao vem, e que nao esta em
+    ``_prontos`` (a sala nao o encerra no fim): ao sair de ``ligada()``, a thread criadora fecha e o nucleo mata o
+    filho com ``SIGKILL``. Sem o ``PR_SET_PDEATHSIG``, ele ficaria vivo, preso na leitura do pedido."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("PR_SET_PDEATHSIG e do Linux")
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), prontos=0)
+    soltos: list[visitas_app._Filho] = []
+    try:
+        async with sala.ligada():
+            await sala._novo(soltos)  # nasce na thread criadora, fora dos prontos
+            [solto] = soltos
+            assert await solto.esperar_isolamento()
+            assert solto.processo.is_alive()
+            assert solto not in sala._prontos
+        await anyio.to_thread.run_sync(solto.processo.join, 15.0)
+        assert solto.processo.exitcode == -signal.SIGKILL
+    finally:
+        for filho_solto in soltos:
+            await anyio.to_thread.run_sync(filho_solto.encerrar)
 
 
 async def test_filho_nao_morre_quando_o_anyio_aposenta_uma_thread_ociosa(

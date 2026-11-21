@@ -33,7 +33,10 @@ Fase 3, servidores de terceiros:
   (``argumentos.conferir_argumentos(..., terceiro=True)``): caro demais, recusa
   com ``esquema_caro_demais``. Em qualquer sistema, aninhamento que estoura a
   pilha na conferencia, ou numero que a conta de ``multipleOf`` nao divide,
-  vira a recusa ``argumento_fora_do_esquema``, nunca erro interno;
+  vira a recusa ``argumento_fora_do_esquema``, nunca erro interno. Leitura com
+  numero NaN ou infinito e recusada antes da catraca (``numero_invalido``,
+  ``RECUSA_NUMERO_LEITURA``): o pedido ao despachante e JSON, que nao leva
+  esses numeros, e antes virava erro interno (a acao ja era recusada assim);
 - tres sinais: quando o aplicativo recebe texto de um sistema (leitura, acao
   enviada ou consulta de uma acao enviada), a entrada grava os sinais
   (``regras.sinais``) numa transacao que confirma ANTES de devolver o texto.
@@ -85,6 +88,13 @@ from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PR
 log = logger("mcp_claro.entrada.servidor")
 
 CODIGO_RECUSA = types.INVALID_PARAMS
+
+RECUSA_NUMERO_LEITURA = (
+    "A leitura traz um numero que nao e um numero de verdade (NaN ou infinito), e o MCP-CLARO nao consegue enviar "
+    "esse numero ao sistema. Nada foi enviado."
+)
+"""Frase da recusa ``numero_invalido`` numa leitura. A da acao (``saida.pedidos.RECUSA_NUMERO``) fala em guardar o
+pedido; a leitura nao e guardada, mas o pedido ao despachante e JSON, que nao leva NaN nem infinito."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +405,10 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             raise await recusar(q, params.name, bloqueio.motivo_recusa(), bloqueio.mensagem(), trace, tipo)
         if ferramenta.classe != "le":
             return await agir(q, ferramenta, params, trace)
+        if saida_pedidos.tem_numero_nao_finito(params.arguments):
+            # O pedido ao despachante e JSON sem NaN nem infinito: sem esta recusa, a leitura virava erro interno.
+            # Antes da catraca: nada foi gasto nem enviado. Proprio e terceiro (D3: so muda o que dava erro).
+            raise await recusar(q, params.name, "numero_invalido", RECUSA_NUMERO_LEITURA, trace)
         async with engine.begin() as c:
             passagem = await catraca.passar(c, ferramenta.ordem_id)
         if not passagem.passou:

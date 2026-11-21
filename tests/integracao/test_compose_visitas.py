@@ -2,8 +2,8 @@
 
 - Compose (``docker compose config``, sem subir nada): ``visitas`` usa a rede do ``visitas-muro``, que so esta nas
   redes ``visitas`` (interna, so com o despachante) e ``saida_visitas`` (so a sala); fora da ``interna`` e da
-  ``saida``; sem segredo de banco nem de cofre; sem capacidade nenhuma. A prova que conecta de verdade fica em
-  ``test_sala_isolada.py``.
+  ``saida``; sem segredo de banco nem de cofre; sem capacidade nenhuma; parte por ``python -m mcp_claro`` (o filho
+  nao roda de novo o script de partida do pai). A prova que conecta de verdade fica em ``test_sala_isolada.py``.
 - Certificados (``scripts/gerar-segredos-dev.sh``): a sala tem autoridade propria (``ca_visitas``), so
   ``serverAuth``; a ``ca_clientes_visitas`` so emite o certificado de cliente do despachante; o certificado da sala
   e recusado por um TLS montado como o do cofre e como o da porta 9443 do despachante.
@@ -123,6 +123,24 @@ def test_sala_sem_banco_sem_cofre_e_sem_capacidade(compose: dict[str, Any]) -> N
     assert sala["security_opt"] == ["no-new-privileges:true"]
     assert sala["healthcheck"]["test"] == ["CMD", "python", "-m", "mcp_claro.visitas.saude"]
     assert set(sala.get("depends_on", {})) == {"visitas-muro"}  # nao depende de banco nem de cofre
+
+
+PARTIDA_DA_SALA = ["/app/.venv/bin/python", "-m", "mcp_claro"]
+
+
+def test_sala_parte_por_python_m_e_nao_pelo_script_da_imagem(compose: dict[str, Any]) -> None:
+    """Com o pai iniciado por um script (o ``mcp-claro`` da imagem), o spawn roda o script de novo em cada filho, antes
+    do isolamento, e importa ``mcp_claro.__main__`` e o que ele importa; com ``python -m mcp_claro``, pula. A prova
+    dinamica (``test_sala_isolada``) confere o pai e o filho de verdade."""
+    sala = compose["services"]["visitas"]
+    assert sala["entrypoint"] == PARTIDA_DA_SALA
+    assert sala["command"] == ["visitas"]
+    # O python da imagem e o do ambiente que o Dockerfile copia para /app/.venv (o mesmo do PATH da imagem).
+    dockerfile = (RAIZ / "docker" / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY --from=construcao /app/.venv /app/.venv" in dockerfile
+    assert 'PATH="/app/.venv/bin:$PATH"' in dockerfile
+    # So a sala troca a partida: os outros papeis seguem pelo ENTRYPOINT da imagem.
+    assert [n for n, s in compose["services"].items() if s.get("entrypoint") == PARTIDA_DA_SALA] == ["visitas"]
 
 
 def test_muro_so_tem_net_admin_e_bloqueia_o_que_nao_e_publico(compose: dict[str, Any]) -> None:

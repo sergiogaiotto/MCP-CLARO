@@ -6,27 +6,36 @@ ate 4.300 digitos. Antes, cada caso abaixo dava -32603 (erro interno):
 - ``multipleOf`` fracionario com inteiro enorme ou infinito (``OverflowError``) ou com NaN (``ValueError``), em
   leitura e acao, proprio e terceiro: agora ``argumento_fora_do_esquema`` (``PROBLEMA_NUMERO``);
 - acao com NaN ou infinito, mesmo sem ``multipleOf`` (o JSON do protocolo e o banco nao guardam): agora
-  ``numero_invalido`` (``RECUSA_NUMERO``), em proprio e terceiro.
+  ``numero_invalido`` (``RECUSA_NUMERO``), em proprio e terceiro;
+- leitura com NaN ou infinito, mesmo sem ``multipleOf`` (o pedido ao despachante e JSON sem NaN nem infinito: o
+  ``ClienteDespachante`` levantava ``ValueError``): agora ``numero_invalido`` (``RECUSA_NUMERO_LEITURA``), antes da
+  catraca, em proprio e terceiro (R3a). O ``LeitorFalso`` escondia esse erro; a prova usa o ``ClienteDespachante`` de
+  verdade, com o despachante falso no transporte (``httpx2.MockTransport``).
 
-Num terceiro, o inteiro com mais de ``TETO_DIGITOS`` digitos ja para nos tetos (``argumento_grande_demais``). A
-leitura de sistema proprio continua como nas Fases 1 e 2 (D3): sem ``multipleOf``, o pedido segue ao sistema.
+Num terceiro, o inteiro com mais de ``TETO_DIGITOS`` digitos ja para nos tetos (``argumento_grande_demais``). Num
+sistema proprio, o inteiro enorme sem ``multipleOf`` segue como nas Fases 1 e 2 (D3).
 """
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx2
 import mcp_types as types
 import pytest
 from sqlalchemy import text
 
 from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada.argumentos import PROBLEMA_NUMERO, TETO_DIGITOS
+from mcp_claro.entrada.despachante_cliente import ClienteDespachante
+from mcp_claro.entrada.servidor import RECUSA_NUMERO_LEITURA
+from mcp_claro.regras import catraca
 from mcp_claro.saida.pedidos import RECUSA_NUMERO
 from mcp_claro.versao import PREFIXO_META
-from tests.integracao.test_entrada_terceiros_apoio import Extra, Mundo, subir_mundo
+from tests.integracao.test_entrada_terceiros_apoio import Extra, Mundo, resultado_do_sistema, subir_mundo
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
@@ -46,6 +55,7 @@ NAO_FINITOS = {"infinito": math.inf, "menos_infinito": -math.inf, "nan": math.na
 
 FORA_DO_ESQUEMA = ("argumento_fora_do_esquema", f"Argumentos fora do esquema revisado: {PROBLEMA_NUMERO}")
 NUMERO_INVALIDO = ("numero_invalido", RECUSA_NUMERO)
+NUMERO_INVALIDO_LEITURA = ("numero_invalido", RECUSA_NUMERO_LEITURA)
 GRANDE_DEMAIS = (
     "argumento_grande_demais",
     f"Argumentos grandes demais para um servidor de terceiros: n: numero com mais de {TETO_DIGITOS} digitos. "
@@ -68,6 +78,12 @@ async def operacoes(m: Mundo) -> int:
         )
 
 
+async def leituras_de_hoje(m: Mundo) -> int:
+    """Leituras que a Ana gastou hoje na catraca da ordem (uma ordem para todas as ferramentas do mundo)."""
+    async with m.dono.connect() as c:
+        return await catraca.usadas_hoje(c, m.ordens[("ana", "A")])
+
+
 def desfecho(resposta: dict[str, Any]) -> tuple[str, str] | str:
     """("motivo", "mensagem") de uma recusa legivel (-32602), ou "segue" quando o pedido passou. Nunca -32603."""
     if "error" not in resposta:
@@ -84,8 +100,8 @@ def esperado(chave: str, valor: Any) -> tuple[str, str] | str:
         return GRANDE_DEMAIS  # os tetos vem antes do esquema
     if nome == "multiplo":
         return FORA_DO_ESQUEMA
-    if classe == "muda" and isinstance(valor, float):
-        return NUMERO_INVALIDO
+    if isinstance(valor, float):
+        return NUMERO_INVALIDO if classe == "muda" else NUMERO_INVALIDO_LEITURA
     return "segue"
 
 
@@ -100,12 +116,18 @@ async def test_numero_que_nao_da_para_conferir_ou_guardar_nunca_vira_erro_intern
     assert achados == {chave: esperado(chave, valor) for chave in EXTRAS}
     # So as acoes que seguiram viraram protocolo: o inteiro enorme num sistema proprio, sem multipleOf.
     assert await operacoes(m) == (1 if valor is ENORME else 0)
-    # Cada acao recusada tem a linha dela no extrato, com o motivo.
-    frases = [linha.frase for linha in await m.extrato("acao_recusada", pessoa="ana")]
-    recusadas = [achados[chave] for chave in EXTRAS if "_muda_" in chave and achados[chave] != "segue"]
-    assert len(frases) == len(recusadas)
-    for motivo, _ in recusadas:
-        assert any(motivo in frase for frase in frases), (motivo, frases)
+    # So a leitura que seguiu chegou ao despachante (o leitor falso): a mesma, o inteiro enorme no proprio.
+    seguiram = [m.f[chave].id for chave in EXTRAS if "_le_" in chave and achados[chave] == "segue"]
+    assert [c.ferramenta_id for c in m.leitor.chamadas] == seguiram
+    # E so ela gastou a cota do dia: as recusas vem antes da catraca (o NaN da leitura inclusive).
+    assert await leituras_de_hoje(m) == len(seguiram)
+    # Cada recusa tem a linha dela no extrato, com o motivo: acao_recusada para a acao, leitura_recusada para a leitura.
+    for classe, tipo in (("_muda_", "acao_recusada"), ("_le_", "leitura_recusada")):
+        frases = [linha.frase for linha in await m.extrato(tipo, pessoa="ana")]
+        recusadas = [achados[chave] for chave in EXTRAS if classe in chave and achados[chave] != "segue"]
+        assert len(frases) == len(recusadas)
+        for motivo, _ in recusadas:
+            assert any(motivo in frase for frase in frases), (motivo, frases)
 
 
 async def test_numeros_que_dao_para_conferir_seguem_como_antes(mundo: Mundo) -> None:
@@ -117,3 +139,35 @@ async def test_numeros_que_dao_para_conferir_seguem_como_antes(mundo: Mundo) -> 
         for valor in valores:
             _, resposta = await m.chamar_cru("ana", chave, {"n": valor})
             assert desfecho(resposta) == "segue", (chave, valor)
+
+
+@pytest.mark.parametrize("chave", ["p_le_livre", "t_le_livre"], ids=["proprio", "terceiro"])
+@pytest.mark.parametrize("texto", ["NaN", "Infinity", "-Infinity", "1e400"])
+async def test_leitura_com_numero_nao_finito_pelo_cliente_do_despachante_de_verdade_e_recusada_com_frase(
+    mundo: Mundo, chave: str, texto: str
+) -> None:
+    """Prova test_verif2_nan_leitura.py do verificador do G4r: com o ``ClienteDespachante`` de verdade (o JSON dele
+    nao leva NaN nem infinito), a leitura dava -32603 e nada chegava ao despachante. Agora, recusa legivel, antes da
+    catraca: a recusa nao gasta a cota do dia da ordem (``leituras_diarias``)."""
+    m = mundo
+    chegaram: list[Any] = []
+
+    def despachante(pedido: httpx2.Request) -> httpx2.Response:
+        chegaram.append(json.loads(pedido.content))
+        return httpx2.Response(200, json=resultado_do_sistema("sistema"))
+
+    real = ClienteDespachante(m.p, http=httpx2.AsyncClient(transport=httpx2.MockTransport(despachante)))
+    m.leitor.respostas[m.f[chave].id] = real.ler
+    # Como chega do aplicativo em JSON cru: o leitor de JSON do kit aceita NaN, Infinity e 1e400 (infinito).
+    _, resposta = await m.chamar_cru("ana", chave, json.loads('{"n": ' + texto + "}"))
+    assert desfecho(resposta) == NUMERO_INVALIDO_LEITURA
+    assert "nao guarda pedido" not in RECUSA_NUMERO_LEITURA
+    assert chegaram == []
+    assert m.leitor.chamadas == []  # recusada antes da catraca e do despachante
+    assert await leituras_de_hoje(m) == 0  # sem gastar a cota do dia
+    assert "numero_invalido" in (await m.extrato("leitura_recusada", pessoa="ana"))[-1].frase
+    # O numero de verdade segue pelo mesmo caminho, gasta a sua vez e chega ao despachante.
+    _, resposta = await m.chamar_cru("ana", chave, {"n": 1.5})
+    assert desfecho(resposta) == "segue"
+    assert [c["argumentos"] for c in chegaram] == [{"n": 1.5}]
+    assert await leituras_de_hoje(m) == 1

@@ -40,7 +40,7 @@ from mcp_claro.rotinas.despachante import ClienteDespachante
 from mcp_claro.rotinas.fechamento import fechar_se_devido
 from mcp_claro.rotinas.limpeza import limpar_sessoes
 from mcp_claro.rotinas.medicoes import garantir_particoes, resumir_medicoes
-from mcp_claro.rotinas.mudou_parou import FonteDeclaracoes, conferir_sistemas_proprios
+from mcp_claro.rotinas.mudou_parou import FonteDeclaracoes, conferir_sistemas
 from mcp_claro.rotinas.ordens import avisar_ordens_a_vencer, vencer_ordens
 from mcp_claro.rotinas.programas import tarefas_dos_programas
 from mcp_claro.rotinas.resumo_semanal import resumo_semanal
@@ -86,7 +86,7 @@ def montar_tarefas(engine: AsyncEngine, config: ConfigRotinas, fonte: FonteDecla
         Tarefa(
             "mudou_parou",
             config.intervalo_mudou_parou,
-            lambda: conferir_sistemas_proprios(engine, fonte, config.emails_admin),
+            lambda: conferir_sistemas(engine, fonte, config.emails_admin),
             prazo,
         ),
     ]

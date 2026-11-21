@@ -26,6 +26,16 @@ ao sistema como ``Bearer``.
 Todo HTTP de saida vai pelo ``httpx2``, sem seguir redirecionamento, sem proxy do ambiente, com
 prazo curto e resposta de tamanho limitado. Nada de chave, codigo ou verificador vai ao log ou ao
 extrato.
+
+Servidor de terceiros (Fase 3):
+
+- a troca do codigo e a renovacao ficam no despachante (codigo nosso, pequeno, com teto), mas o ``token_endpoint``
+  passa antes pela mesma conferencia do endereco combinado da sala (https, sem usuario nem fragmento, todo IP
+  publico: ``ligacao.cliente.conferir_endereco_terceiro``). Endereco recusado: nada sai e o extrato ganha
+  ``sala_endereco_recusado``;
+- com a chave da Fase 3 desligada, so pessoa de teste autoriza um terceiro (``terceiros_desligados``);
+- a configuracao de um terceiro so passa de vazia a preenchida: depois disso ``configurar`` recusa ("Para mudar,
+  cadastre o servidor de novo."), como a guarda do banco (critica M1).
 """
 
 from __future__ import annotations
@@ -43,6 +53,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, get_args
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+import anyio
 import httpx2
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -54,6 +65,7 @@ from mcp_claro import __version__
 from mcp_claro.despachante import chaves
 from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.extrato import registrar
+from mcp_claro.ligacao import cliente
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios
@@ -116,6 +128,16 @@ class TrocaRecusada(Exception):
 
 class TrocaIndisponivel(Exception):
     """O servidor de autorizacao nao respondeu (rede, prazo, 5xx, 429): vale tentar mais tarde."""
+
+
+ENDERECO_RECUSADO: Final = "endereco_recusado"
+"""``TrocaRecusada.codigo`` quando o ``token_endpoint`` de um terceiro nao e o endereco combinado: nada saiu."""
+
+MENSAGEM_TERCEIRO_JA_CONFIGURADO: Final = "Para mudar, cadastre o servidor de novo."
+MENSAGEM_TERCEIROS_DESLIGADOS: Final = (
+    "Servidores de terceiros ainda estao desligados neste MCP-CLARO. So pessoas de teste os autorizam. Nada foi"
+    " guardado."
+)
 
 
 # --- Configuracao ----------------------------------------------------------------------------------
@@ -208,17 +230,23 @@ class SistemaAutorizavel:
     situacao: str
     tipo_chave: str
     config: ConfigAutorizacao
+    origem: str = "proprio"
 
     @property
     def recurso(self) -> str:
         return self.config.recurso or self.endereco
+
+    @property
+    def de_terceiro(self) -> bool:
+        """Toda origem que nao e ``proprio`` conta como terceiro (o lado que aperta)."""
+        return self.origem != "proprio"
 
 
 async def carregar_sistema(c: AsyncConnection, sistema_id: uuid.UUID) -> SistemaAutorizavel:
     """Le o sistema e a configuracao. Levanta ``AutorizacaoRecusada`` se ele nao aceita autorizacao por pessoa."""
     linha = (
         await c.execute(
-            text("SELECT id, nome, endereco, situacao, tipo_chave, autorizacao FROM sistemas WHERE id = :s"),
+            text("SELECT id, nome, endereco, situacao, tipo_chave, autorizacao, origem FROM sistemas WHERE id = :s"),
             {"s": sistema_id},
         )
     ).first()
@@ -232,16 +260,28 @@ async def carregar_sistema(c: AsyncConnection, sistema_id: uuid.UUID) -> Sistema
         raise AutorizacaoRecusada(
             "configuracao_invalida", "A autorizacao deste sistema esta mal configurada. Fale com o ADMIN."
         ) from None
-    return SistemaAutorizavel(linha.id, linha.nome, linha.endereco, linha.situacao, linha.tipo_chave, config)
+    return SistemaAutorizavel(
+        linha.id, linha.nome, linha.endereco, linha.situacao, linha.tipo_chave, config, str(linha.origem)
+    )
 
 
 async def configurar(
     c: AsyncConnection, sistema_id: uuid.UUID, dados: dict[str, Any] | None, *, papel: str = "entrada"
 ) -> ConfigAutorizacao | None:
-    """Para a tela do ADMIN: confere e grava ``sistemas.autorizacao`` (``None`` tira a configuracao)."""
-    linha = (await c.execute(text("SELECT nome, tipo_chave FROM sistemas WHERE id = :s"), {"s": sistema_id})).first()
+    """Para a tela do ADMIN: confere e grava ``sistemas.autorizacao`` (``None`` tira a configuracao).
+
+    Num servidor de terceiros ja configurado, recusa qualquer mudanca (``MENSAGEM_TERCEIRO_JA_CONFIGURADO``): os
+    enderecos de troca de chave nao mudam depois de preenchidos (critica M1; a guarda do banco faz o mesmo).
+    """
+    linha = (
+        await c.execute(
+            text("SELECT nome, tipo_chave, origem, autorizacao FROM sistemas WHERE id = :s"), {"s": sistema_id}
+        )
+    ).first()
     if linha is None:
         raise LookupError("Sistema desconhecido.")
+    if linha.origem != "proprio" and linha.autorizacao is not None:
+        raise ConfiguracaoAutorizacaoInvalida(MENSAGEM_TERCEIRO_JA_CONFIGURADO)
     config = None
     if dados is not None:
         if linha.tipo_chave != "por_pessoa":
@@ -395,8 +435,33 @@ def _codigo_erro(bruto: bytes) -> str:
     return erro if isinstance(erro, str) and erro in _ERROS_OAUTH else "outro"
 
 
-async def trocar(config: ConfigAutorizacao, segredo_cliente: str | None, campos: dict[str, str]) -> RespostaToken:
-    """Um POST no ``token_endpoint``. Sem reenvio: qualquer falha volta classificada a quem chamou."""
+async def _conferir_troca_de_terceiro(endereco: str, ambiente: str, liberar_locais: bool) -> None:
+    """O ``token_endpoint`` de um terceiro e conferido como o endereco da sala, antes de abrir conexao."""
+    try:
+        with anyio.fail_after(cliente.PRAZO_CONEXAO):
+            await cliente.conferir_endereco_terceiro(endereco, ambiente, liberar_locais=liberar_locais)
+    except ValueError:  # EnderecoRecusado e nome que o IDNA recusa
+        raise TrocaRecusada(ENDERECO_RECUSADO) from None
+    except OSError, TimeoutError:
+        raise TrocaIndisponivel("nome_nao_resolvido") from None
+
+
+async def trocar(
+    config: ConfigAutorizacao,
+    segredo_cliente: str | None,
+    campos: dict[str, str],
+    *,
+    terceiro: bool = False,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
+) -> RespostaToken:
+    """Um POST no ``token_endpoint``. Sem reenvio: qualquer falha volta classificada a quem chamou.
+
+    ``terceiro``: o endereco passa antes pela conferencia da sala (https e IP publico; ``liberar_locais`` so vale
+    em desenvolvimento e teste). Recusado, levanta ``TrocaRecusada(ENDERECO_RECUSADO)`` sem nada enviado.
+    """
+    if terceiro:
+        await _conferir_troca_de_terceiro(config.token_endpoint, ambiente, liberar_locais)
     corpo = dict(campos)
     cabecalhos: dict[str, str] = {}
     if config.autenticacao_cliente == "client_secret_basic":
@@ -482,18 +547,17 @@ def montar_url(config: ConfigAutorizacao, *, estado: str, desafio: str, redirect
     return urlunsplit((partes.scheme, partes.netloc, partes.path, urlencode(parametros), ""))
 
 
-async def _pessoa_ativa(c: AsyncConnection, pessoa_id: uuid.UUID) -> bool:
-    situacao = (
-        await c.execute(text("SELECT situacao FROM pessoas WHERE id = :p"), {"p": pessoa_id})
-    ).scalar_one_or_none()
-    return situacao == "ativa"
-
-
-async def _conferir_pessoa_e_sistema(c: AsyncConnection, pessoa_id: uuid.UUID, sistema: SistemaAutorizavel) -> None:
+async def _conferir_pessoa_e_sistema(
+    c: AsyncConnection, pessoa_id: uuid.UUID, sistema: SistemaAutorizavel, *, terceiros_ligados: bool = False
+) -> None:
     if sistema.situacao != "ativo":
         raise AutorizacaoRecusada("sistema_indisponivel", f"O sistema {sistema.nome} nao esta ativo agora.")
-    if not await _pessoa_ativa(c, pessoa_id):
+    pessoa = (await c.execute(text("SELECT situacao, teste FROM pessoas WHERE id = :p"), {"p": pessoa_id})).first()
+    if pessoa is None or pessoa.situacao != "ativa":
         raise AutorizacaoRecusada("pessoa_inativa", "Sua conta nao esta ativa no MCP-CLARO.")
+    if sistema.de_terceiro and not terceiros_ligados and not pessoa.teste:
+        # Com a chave da Fase 3 desligada, so pessoa de teste usa terceiros (como a vitrine).
+        raise AutorizacaoRecusada("terceiros_desligados", MENSAGEM_TERCEIROS_DESLIGADOS)
     bloqueio = await bloqueios.ativo_para(c, pessoa_id=pessoa_id, aplicativo_id=None, sistema_id=sistema.id)
     if bloqueio is not None:
         raise AutorizacaoRecusada(bloqueio.motivo_recusa(), bloqueio.mensagem())
@@ -508,18 +572,20 @@ async def iniciar_autorizacao(
     *,
     prazo: timedelta = PRAZO_PENDENTE,
     papel: str = "entrada",
+    terceiros_ligados: bool = False,
 ) -> str:
     """Cria a autorizacao pendente e devolve o endereco da pagina de autorizacao do sistema.
 
     Grava na transacao do chamador. ``cifra`` so precisa cifrar (a entrada nunca decifra o
     verificador; quem decifra e o despachante, na volta). Levanta ``AutorizacaoRecusada``.
+    ``terceiros_ligados``: a chave da Fase 3; desligada, so pessoa de teste autoriza um terceiro.
     """
     try:
         conferir_endereco(redirect_uri, "redirect_uri")
     except ConfiguracaoAutorizacaoInvalida as erro:
         raise AutorizacaoRecusada("redirect_uri_invalido", str(erro)) from None
     sistema = await carregar_sistema(conexao, sistema_id)
-    await _conferir_pessoa_e_sistema(conexao, pessoa_id, sistema)
+    await _conferir_pessoa_e_sistema(conexao, pessoa_id, sistema, terceiros_ligados=terceiros_ligados)
     estado = secrets.token_urlsafe(32)
     verificador = novo_verificador()
     guardado = json.dumps({"verificador": verificador, "redirect_uri": redirect_uri}).encode()
@@ -626,13 +692,13 @@ async def _gastar_estado(engine: AsyncEngine, estado: str, pessoa_id: uuid.UUID)
 
 
 async def _preparar_troca(
-    engine: AsyncEngine, cifra: Cifra, pendente: _Pendente, pessoa_id: uuid.UUID
+    engine: AsyncEngine, cifra: Cifra, pendente: _Pendente, pessoa_id: uuid.UUID, *, terceiros_ligados: bool
 ) -> tuple[SistemaAutorizavel, str | None]:
     recusa: AutorizacaoRecusada | None = None
     async with engine.connect() as c:
         try:
             sistema = await carregar_sistema(c, pendente.sistema_id)
-            await _conferir_pessoa_e_sistema(c, pessoa_id, sistema)
+            await _conferir_pessoa_e_sistema(c, pessoa_id, sistema, terceiros_ligados=terceiros_ligados)
             segredo = await abrir_segredo_cliente(c, cifra, sistema.id) if sistema.config.usa_segredo else None
         except AutorizacaoRecusada as erro:
             recusa = erro
@@ -651,19 +717,24 @@ async def concluir_autorizacao(
     pessoa_id: uuid.UUID,
     codigo: str | None = None,
     erro: str | None = None,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
+    terceiros_ligados: bool = False,
 ) -> Concluida:
     """Despachante: confere o estado, troca o codigo pela chave e grava tudo cifrado.
 
     ``pessoa_id`` e a pessoa da sessao das telas; precisa ser a mesma que iniciou. ``erro`` e o
     ``error`` da volta (a pessoa desistiu ou o sistema recusou): o estado fica gasto e nada e
-    guardado. Toda recusa vai ao extrato e levanta ``AutorizacaoRecusada``.
+    guardado. Toda recusa vai ao extrato e levanta ``AutorizacaoRecusada``. Num terceiro, o
+    ``token_endpoint`` passa antes pela conferencia do endereco combinado (``ambiente`` e
+    ``liberar_locais``, este so em desenvolvimento e teste).
     """
     if not estado or len(estado) > 256 or (codigo is not None and not _VISIVEL.match(codigo)):
         raise await _recusar(
             engine, "pedido_invalido", "Pedido de autorizacao invalido.", pessoa_id=pessoa_id, sistema_id=None
         )
     pendente = await _gastar_estado(engine, estado, pessoa_id)
-    sistema, segredo = await _preparar_troca(engine, cifra, pendente, pessoa_id)
+    sistema, segredo = await _preparar_troca(engine, cifra, pendente, pessoa_id, terceiros_ligados=terceiros_ligados)
     if erro is not None or not codigo:
         codigo_erro = erro if erro in _ERROS_OAUTH else "outro"
         raise await _recusar(
@@ -688,9 +759,23 @@ async def concluir_autorizacao(
                 "code_verifier": guardado["verificador"],
                 "resource": sistema.recurso,
             },
+            terceiro=sistema.de_terceiro,
+            ambiente=ambiente,
+            liberar_locais=liberar_locais,
         )
     except TrocaRecusada as recusa:
         log.warning("troca_recusada", sistema=sistema.nome, erro_oauth=recusa.codigo)
+        if recusa.codigo == ENDERECO_RECUSADO:
+            await registrar_endereco_recusado(engine, sistema.id, sistema.nome, pessoa_id=pessoa_id)
+            raise await _recusar(
+                engine,
+                ENDERECO_RECUSADO,
+                f"O endereco de troca de chave do servidor de terceiros {sistema.nome} nao e publico ou nao usa"
+                " https. Nada foi enviado nem guardado.",
+                pessoa_id=pessoa_id,
+                sistema_id=sistema.id,
+                sistema=sistema.nome,
+            ) from None
         raise await _recusar(
             engine,
             "troca_recusada",
@@ -786,6 +871,22 @@ async def derrubar_autorizacoes(
 # --- Porta interna ---------------------------------------------------------------------------------
 
 
+async def registrar_endereco_recusado(
+    engine: AsyncEngine, sistema_id: uuid.UUID, nome: str, *, pessoa_id: uuid.UUID | None = None
+) -> None:
+    """``sala_endereco_recusado`` no extrato: o endereco de troca de chave de um terceiro nao passou."""
+    async with engine.begin() as c:
+        await registrar(
+            c,
+            papel="despachante",
+            tipo="sala_endereco_recusado",
+            campos={"sistema": nome},
+            pessoa_id=pessoa_id,
+            sistema_id=sistema_id,
+        )
+    CONTADORES.somar("sala_endereco_recusado", onde="autorizacao")
+
+
 def _uuid(valor: Any) -> uuid.UUID | None:
     try:
         return uuid.UUID(str(valor)) if valor else None
@@ -810,11 +911,25 @@ async def _corpo(pedido: Request) -> dict[str, Any]:
 
 
 class _PortaAutorizacao:
-    """Atende as rotas internas. Sem ``engine`` e ``cifra`` dados, usa ``app.state.engine`` e ``app.state.cifra``."""
+    """Atende as rotas internas. Sem ``engine`` e ``cifra`` dados, usa ``app.state.engine`` e ``app.state.cifra``.
 
-    def __init__(self, engine: AsyncEngine | None = None, cifra: Cifra | None = None) -> None:
+    ``ambiente``, ``liberar_locais`` e ``terceiros_ligados`` valem para servidores de terceiros (ver o topo do
+    modulo); o padrao e o lado que aperta."""
+
+    def __init__(
+        self,
+        engine: AsyncEngine | None = None,
+        cifra: Cifra | None = None,
+        *,
+        ambiente: str = "producao",
+        liberar_locais: bool = False,
+        terceiros_ligados: bool = False,
+    ) -> None:
         self._engine = engine
         self._cifra = cifra
+        self._ambiente = str(ambiente)
+        self._liberar_locais = liberar_locais
+        self._terceiros_ligados = terceiros_ligados
 
     def _ligacoes(self, pedido: Request) -> tuple[AsyncEngine, Cifra]:
         if self._engine is not None and self._cifra is not None:
@@ -835,6 +950,9 @@ class _PortaAutorizacao:
                 pessoa_id=pessoa_id,
                 codigo=_texto(corpo.get("codigo")),
                 erro=_texto(corpo.get("erro")),
+                ambiente=self._ambiente,
+                liberar_locais=self._liberar_locais,
+                terceiros_ligados=self._terceiros_ligados,
             )
         except AutorizacaoRecusada as recusa:
             return JSONResponse(
@@ -858,7 +976,15 @@ class _PortaAutorizacao:
             return _invalido("pessoa_id, sistema_id e redirect_uri sao obrigatorios.")
         try:
             async with engine.begin() as c:
-                url = await iniciar_autorizacao(c, cifra, pessoa_id, sistema_id, redirect_uri, papel="despachante")
+                url = await iniciar_autorizacao(
+                    c,
+                    cifra,
+                    pessoa_id,
+                    sistema_id,
+                    redirect_uri,
+                    papel="despachante",
+                    terceiros_ligados=self._terceiros_ligados,
+                )
         except AutorizacaoRecusada as recusa:
             return JSONResponse({"motivo": recusa.motivo, "mensagem": recusa.mensagem}, status_code=403)
         return JSONResponse({"url": url})
@@ -895,7 +1021,14 @@ class _PortaAutorizacao:
         ]
 
 
-def rotas_autorizacao(engine: AsyncEngine, cifra: Cifra) -> list[Route]:
+def rotas_autorizacao(
+    engine: AsyncEngine,
+    cifra: Cifra,
+    *,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
+    terceiros_ligados: bool = False,
+) -> list[Route]:
     """Rotas internas do despachante (so com mTLS da entrada), ja ligadas ao ``engine`` e a ``cifra``.
 
     - ``POST /interno/autorizacao/concluir`` {estado, pessoa_id, codigo | erro}: a volta da pagina do sistema;
@@ -904,7 +1037,9 @@ def rotas_autorizacao(engine: AsyncEngine, cifra: Cifra) -> list[Route]:
     - ``POST /interno/autorizacao/derrubar`` {pessoa_id, motivo, sistema_id?}: ao desativar a pessoa;
     - ``POST /interno/autorizacao/segredo`` {sistema_id, segredo}: o ADMIN guarda o segredo do cliente.
     """
-    return _PortaAutorizacao(engine, cifra).rotas()
+    return _PortaAutorizacao(
+        engine, cifra, ambiente=ambiente, liberar_locais=liberar_locais, terceiros_ligados=terceiros_ligados
+    ).rotas()
 
 
 ROTAS_AUTORIZACAO: Final[list[Route]] = _PortaAutorizacao().rotas()

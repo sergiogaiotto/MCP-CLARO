@@ -158,6 +158,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     image: ${MCP_CLARO_IMAGEM:-mcp-claro:dev}
+    # Partida por "python -m mcp_claro", nao pelo script mcp-claro da imagem: o spawn roda de novo, em cada filho e
+    # antes do isolamento, o programa principal do pai quando ele e um script (e com ele o mcp_claro.__main__ e o
+    # que ele importa); o __main__ de um pacote, o spawn pula. Medido na imagem: 60 modulos e cerca de 5 MB a menos
+    # por filho.
+    entrypoint: ["/app/.venv/bin/python", "-m", "mcp_claro"]
     command: ["visitas"]
     read_only: true
     restart: unless-stopped

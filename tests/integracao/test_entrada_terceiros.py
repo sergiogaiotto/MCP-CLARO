@@ -7,6 +7,7 @@ Entrada real com o leitor falso no lugar do despachante (``test_entrada_terceiro
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -15,7 +16,7 @@ import pytest
 from mcp.shared.exceptions import MCPError
 from sqlalchemy import text
 
-from mcp_claro.cadastro.esquema import ESCOLHAS_MAXIMAS, PROFUNDIDADE_MAXIMA, conferir_terceiro
+from mcp_claro.cadastro.esquema import ESCOLHAS_MAXIMAS, PROFUNDIDADE_MAXIMA, EsquemaRecusado, conferir_terceiro
 from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada import servidor as servidor_mod
 from mcp_claro.entrada.argumentos import RECUSA_ORCAMENTO, TETO_DIGITOS, TETO_LISTA, TETO_TEXTO
@@ -291,6 +292,51 @@ async def test_esquema_de_terceiro_caro_demais_e_recusado_com_frase_em_leitura_e
     r = await m.chamar("ana", "t_caro_ler", {"l": [0, 1]})
     assert not r.is_error
     assert [c.ferramenta_id for c in m.leitor.chamadas] == [m.f["t_caro_ler"].id]
+
+
+def ref_longa(letras: int) -> dict[str, Any]:
+    """A prova do verificador do G4r: ``s`` chama uma definicao de nome com ``letras`` letras, e cada item chama ``s``
+    600 vezes. Cada busca de referencia le o texto inteiro dela."""
+    longo = "n" * letras
+    return {
+        "type": "object",
+        "properties": {"l": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/s"}] * 600}}},
+        "$defs": {"s": {"$ref": "#/$defs/" + longo}, longo: {}},
+    }
+
+
+REFERENCIAS = {
+    "t_ref_longa": Extra(True, ("ler_ref_longa", "le", "medio", (), False), ref_longa(120_000)),
+    "t_ref_curta": Extra(True, ("ler_ref_curta", "le", "medio", (), False), ref_longa(1)),
+}
+
+
+@pytest.fixture
+async def mundo_referencias(banco_migrado: Parametros) -> AsyncIterator[Mundo]:
+    # O nome longo nao passa mais na revisao de terceiro (REFERENCIA_MAXIMA); o apoio grava a ferramenta revisada
+    # direto no banco, com a revisao contornada, para provar a primeira barreira (o orcamento) sozinha.
+    with pytest.raises(EsquemaRecusado):
+        conferir_terceiro(REFERENCIAS["t_ref_longa"].esquema)
+    conferir_terceiro(REFERENCIAS["t_ref_curta"].esquema)
+    async with subir_mundo(banco_migrado, extras=REFERENCIAS) as m:
+        yield m
+
+
+@pytest.mark.parametrize("chave", list(REFERENCIAS))
+async def test_referencia_de_texto_longo_para_no_orcamento_em_menos_de_1_s_de_cpu(
+    mundo_referencias: Mundo, chave: str
+) -> None:
+    # Antes: com o nome de 120 mil letras, a recusa esquema_caro_demais saia em 4,7 s pela entrada (o laco parado).
+    m = mundo_referencias
+    _, resposta = await m.chamar_cru("ana", chave, {"l": []})  # o validador fica pronto, como depois da 1a chamada
+    assert "result" in resposta, resposta
+    inicio = time.process_time()  # a entrada roda neste processo: conta a CPU dela
+    _, resposta = await m.chamar_cru("ana", chave, {"l": [0] * TETO_LISTA})
+    cpu = time.process_time() - inicio
+    assert resposta["error"]["message"] == RECUSA_ORCAMENTO
+    assert resposta["error"]["data"] == {PREFIXO_META + "motivo": "esquema_caro_demais"}
+    assert cpu < 1.0, cpu
+    assert [c.ferramenta_id for c in m.leitor.chamadas] == [m.f[chave].id]  # so a primeira, com a lista vazia
 
 
 async def test_esquema_proprio_caro_confere_como_antes(mundo_caro: Mundo) -> None:

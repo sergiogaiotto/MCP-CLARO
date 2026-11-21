@@ -10,12 +10,19 @@ Para cada acao liberada e na hora:
 2. reconferencia: saida aberta, pessoa e aplicativo ativos, sem bloqueio, cadastro do programa valendo
    (quando o aplicativo e um programa), ordem e ferramenta vigentes, ficha confirmada para esta operacao
    (a de risco alto, com passkey ou login refeito) ou limite gasto e nao encerrado, e codigo de conferencia
-   igual ao que vai seguir;
+   igual ao que vai seguir. Servidor de terceiros: so com a chave da Fase 3 ligada (``terceiros_ligados``) ou
+   pessoa de teste, e so com a ferramenta publicada na revisao vigente do servidor; senao a acao e cancelada
+   (``MOTIVO_TERCEIROS``), e com o servidor em quarentena, cancelada com ``cadastro.quarentena.MOTIVO_PARADA``;
 3. com o cliente do cofre, pergunta a saude dele: trancado ou sem resposta, a acao nao segue agora e continua
    liberada (nenhuma chave abriria);
 4. marca "enviando" e grava, antes de qualquer byte sair (o que o envio le do banco e lido antes);
-5. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema;
-6. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. O caractere nulo
+5. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema, sempre por
+   ``ligacao(sistema)``: proprio pelo cliente fixado, terceiro pela sala de visitas (sem sala, nada sai). Argumentos
+   com niveis demais para o kit escrever (``TETO_NIVEIS_PEDIDO``) nao saem por nenhum caminho: "nao saiu", sem
+   abrir a chave nem chamar a ligacao;
+6. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. Num terceiro, o que a
+   sala barrou (sem sala, endereco que nao e publico, desvio nao seguido) ganha antes a sua linha no extrato.
+   O que o sistema pediu no meio da chamada so entra no desfecho com o nosso vocabulario. O caractere nulo
    (U+0000), que o banco nao guarda, vira U+FFFD no resultado. Se o banco falhar ao gravar o fim, tenta de
    novo algumas vezes; se nao der, encerra o turno: a conexao da trava cai, quem assumir a porta (esta mesma,
    na volta seguinte, ou outra copia) da a linha "enviando" como nao confirmada, e nada e reenviado.
@@ -39,7 +46,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
 from datetime import datetime
 from typing import Any, Final
 
@@ -49,15 +56,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
-from mcp_claro.cadastro.modelos import FerramentaVitrine
+from mcp_claro.cadastro.modelos import FerramentaVitrine, Sistema
+from mcp_claro.cadastro.quarentena import MOTIVO_PARADA
 from mcp_claro.cofre import CofreIndisponivel, CofreTrancado
 from mcp_claro.despachante import chaves, medida, renovacao
 from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.extrato import registrar
-from mcp_claro.ligacao import cliente
+from mcp_claro.ligacao import cliente, ponto
+from mcp_claro.ligacao.ponto import Ligacao
+from mcp_claro.ligacao.sala_contrato import PEDIDO_FORA_DO_CONTRATO, SALA_FORA
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, estado
+from mcp_claro.regras import bloqueios, estado, estranhos
 from mcp_claro.saida import cofre as saida_cofre
 from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import Estado
@@ -79,6 +89,94 @@ _ANTES_DE_EXECUTAR = {
 }
 
 Chamador = Callable[..., Awaitable[cliente.Resposta]]
+Ligador = Callable[[Sistema], Ligacao]
+"""Por onde falar com um sistema (``ligacao.ponto.ligacao_para`` com a sala montada no app do despachante)."""
+
+
+def ligacao_sem_sala(sistema: Sistema) -> Ligacao:
+    """Ligacao de reserva, quando o app nao da a sua: sistema proprio pelo cliente fixado; servidor de terceiros
+    sem sala (nada sai: ``nao_enviado`` com ``SalaFora``). Nunca o cliente local para um terceiro."""
+    return ponto.ligacao_para(sistema, ambiente="producao")
+
+
+MOTIVO_TERCEIROS: Final = "servidores de terceiros desligados ou servidor sem revisao"
+"""Desfecho da acao de terceiro cancelada na saida: a chave da Fase 3 desligada (e a pessoa nao e de teste) ou a
+ferramenta fora da revisao vigente do servidor."""
+_NAO_ENVIADO: Final[dict[str, str]] = {
+    SALA_FORA: "a sala de visitas nao esta disponivel; o pedido nao chegou ao servidor de terceiros",
+    cliente.ENDERECO_RECUSADO: (
+        "o endereco do servidor de terceiros nao e publico ou nao usa https; o pedido nao chegou ao sistema"
+    ),
+    cliente.PEDIDO_FUNDO_DEMAIS: (
+        "o pedido tem niveis demais, um dentro do outro, para o MCP-CLARO escrever; o pedido nao chegou ao sistema"
+    ),
+    PEDIDO_FORA_DO_CONTRATO: "o pedido nao cabe no contrato da sala de visitas; o pedido nao chegou ao sistema",
+}
+"""Desfecho de "nao saiu" por ``Resposta.excecao``; as outras ficam com "o pedido nao chegou ao sistema"."""
+RESULTADO_FUNDO_DEMAIS: Final = (
+    "o sistema respondeu; a resposta tem partes demais umas dentro das outras e o MCP-CLARO nao a guardou"
+)
+"""Desfecho da acao enviada cuja resposta nao da para escrever, medir ou repassar (niveis demais): sem resultado."""
+TETO_NIVEIS_RESULTADO: Final = 199
+"""Niveis de listas e objetos, um dentro do outro, que o resultado guardado de uma acao pode ter: o mesmo teto da
+leitura (``despachante.servico.TETO_NIVEIS_RESPOSTA``; o leitor de JSON do kit aceita 200 niveis numa mensagem,
+contando o envelope). Mais fundo, nem o aplicativo leria a consulta pelo protocolo."""
+TETO_NIVEIS_PEDIDO: Final = 255
+"""Niveis de listas e objetos, um dentro do outro, que os argumentos de uma acao podem ter (o objeto dos argumentos
+e o primeiro): o que o kit ainda escreve num pedido (``ligacao.cliente``: com um nivel a mais, o cliente fixado
+devolve ``PEDIDO_FUNDO_DEMAIS``), e o contrato da sala tambem escreve. Mais fundo, nada sai por caminho nenhum, e a
+porta nem chama a ligacao: pela sala, o cliente levantaria um erro antes de enviar, e a acao ficaria "nao
+confirmada" sem ter saido."""
+_LINHA_DA_SALA: Final[dict[str, str]] = {
+    SALA_FORA: "sala_fora",
+    cliente.ENDERECO_RECUSADO: "sala_endereco_recusado",
+}
+_PEDIDO_LEGIVEL: Final[dict[str, str]] = {
+    cliente.PEDIDO_FORMULARIO: "dados num formulario",
+    cliente.PEDIDO_LINK: "um link",
+    cliente.PEDIDO_AMOSTRAGEM: "uma resposta da IA do aplicativo",
+    cliente.PEDIDO_RAIZES: "a lista de pastas do aplicativo",
+    cliente.PEDIDO_SO_ESTADO: "uma nova volta",
+    cliente.PEDIDO_LINK_CODIGO_ANTIGO: "um link (pelo codigo antigo)",
+}
+_FIO_ANTIGO_LEGIVEL: Final[dict[str, str]] = {
+    "elicitation/create": "dados",
+    "sampling/createMessage": "uma resposta da IA do aplicativo",
+    "roots/list": "a lista de pastas do aplicativo",
+    "ping": "um sinal de vida",
+}
+_DESCONHECIDO: Final = "um pedido desconhecido"
+
+
+def pedidos_legiveis(pedidos: Iterable[str]) -> str:
+    """As categorias de ``Resposta.pedidos`` em texto (sem acento, como o desfecho): so o nosso vocabulario, nunca
+    texto, link ou campo do sistema. Categoria fora do vocabulario vira "um pedido desconhecido"."""
+    nomes: list[str] = []
+    for categoria in pedidos:
+        if categoria.startswith(cliente.PREFIXO_FIO_ANTIGO):
+            metodo = categoria.removeprefix(cliente.PREFIXO_FIO_ANTIGO)
+            nome = _FIO_ANTIGO_LEGIVEL.get(metodo, _DESCONHECIDO) + " pelo fio antigo"
+        else:
+            nome = _PEDIDO_LEGIVEL.get(categoria, _DESCONHECIDO)
+        if nome not in nomes:
+            nomes.append(nome)
+    if not nomes:
+        return "dados"
+    return nomes[0] if len(nomes) == 1 else ", ".join(nomes[:-1]) + " e " + nomes[-1]
+
+
+def linha_da_sala(resposta: cliente.Resposta, sistema: Sistema) -> str | None:
+    """Tipo da linha do extrato que conta o que a sala barrou num servidor de terceiros (sem sala, endereco que
+    nao e publico ou desvio que o MCP-CLARO nao segue); None no resto e em sistema proprio. Os argumentos na ordem
+    de ``despachante.servico.linha_da_sala``, a da leitura."""
+    if not sistema.de_terceiro:
+        return None
+    if resposta.tipo == "nao_enviado" and resposta.excecao in _LINHA_DA_SALA:
+        return _LINHA_DA_SALA[resposta.excecao]
+    if resposta.tipo == "recusado_http" and resposta.status_http and 300 <= resposta.status_http[-1] < 400:
+        return "sala_desvio_recusado"
+    return None
+
 
 TENTATIVAS_DO_FIM = 4
 """Vezes que o despachante tenta gravar o fim de um envio antes de deixar a retomada decidir."""
@@ -130,6 +228,8 @@ class PortaDeSaida:
         varredura: float = 5.0,
         acoes_de_programas: bool = False,
         limite_exige_passkey: bool = True,
+        terceiros_ligados: bool = False,
+        ligacao: Ligador | None = None,
         chamar: Chamador | None = None,
         cofre: saida_cofre.SaudeDoCofre | None = None,
         conferir_cofre: float = 15.0,
@@ -142,7 +242,14 @@ class PortaDeSaida:
         self.varredura = varredura
         self.acoes_de_programas = acoes_de_programas
         self.limite_exige_passkey = limite_exige_passkey
-        self.chamar: Chamador = chamar or cliente.chamar_ferramenta
+        # Chave da Fase 3 (``FEATURE_PHASE3_THIRD_PARTY``): sem ela, so a acao de pessoa de teste sai para um
+        # servidor de terceiros. A reconferencia da saida decide de novo, na hora do envio.
+        self.terceiros_ligados = terceiros_ligados
+        # Todo envio sai por ``ligacao(sistema)``: proprio pelo cliente fixado, terceiro pela sala de visitas.
+        self.ligacao: Ligador = ligacao or ligacao_sem_sala
+        # So para testes: troca a chamada ao sistema (proprio ou terceiro) por uma funcao com a assinatura de
+        # ``Ligacao.chamar_ferramenta``. O app do despachante nunca passa.
+        self.chamar: Chamador | None = chamar
         # Cliente do cofre com saude(): o app do despachante o liga na partida, depois de entrar no cofre.
         self.cofre = cofre
         self.conferir_cofre = conferir_cofre
@@ -457,6 +564,7 @@ class PortaDeSaida:
             await c.execute(
                 text(
                     "SELECT (SELECT situacao FROM pessoas WHERE id = :p) AS pessoa,"
+                    " (SELECT teste FROM pessoas WHERE id = :p) AS teste,"
                     " (SELECT situacao FROM aplicativos WHERE id = :a) AS app,"
                     " (SELECT tipo FROM aplicativos WHERE id = :a) AS tipo_app"
                 ),
@@ -487,6 +595,9 @@ class PortaDeSaida:
             ).first()
             if cadastro is None or cadastro.situacao != "ativo" or not cadastro.no_prazo:
                 return Estado.CANCELADA, "o cadastro do programa nao esta valendo (pausado, encerrado ou vencido)"
+        # Servidor de terceiros so com a chave da Fase 3 ligada ou para pessoa de teste, e so com a ferramenta
+        # publicada na revisao vigente do servidor (a mesma regra da vitrine, lida de novo aqui).
+        terceiros = self.terceiros_ligados or bool(situacoes.teste)
         ferramenta = await repositorio.ferramenta_da_ordem(
             c,
             pessoa_id=op.pessoa_id,
@@ -494,8 +605,11 @@ class PortaDeSaida:
             ordem_id=op.ordem_id,
             ferramenta_id=op.ferramenta_id,
             versao=VERSAO_MCP,
+            terceiros=terceiros,
         )
-        if ferramenta is None or ferramenta.classe == "le":
+        if ferramenta is None:
+            return await self._sem_ferramenta(c, op, terceiros=terceiros)
+        if ferramenta.classe == "le":
             return Estado.CANCELADA, "a ordem de servico ou a ferramenta mudou"
         sistema = ferramenta.sistema
         if (
@@ -560,6 +674,26 @@ class PortaDeSaida:
             return Estado.CANCELADA, "sem ficha nem limite"
         return ferramenta
 
+    async def _sem_ferramenta(self, c: Any, op: Operacao, *, terceiros: bool) -> tuple[Estado, str]:
+        """Por que a ferramenta da operacao saiu da vitrine: servidor em quarentena, terceiro sem a chave ou fora
+        da revisao vigente, ou a ordem e a ferramenta que mudaram."""
+        sistema = (
+            await c.execute(
+                text(
+                    "SELECT s.origem, s.situacao, EXISTS (SELECT 1 FROM revisoes_servidor rs"
+                    " JOIN ferramentas_revisadas f ON f.id = :f AND f.sistema_id = s.id"
+                    " WHERE rs.id = s.revisao_servidor_id AND rs.sistema_id = s.id AND f.id = ANY (rs.publicadas)"
+                    " AND f.definicao_declarada IS NOT NULL) AS publicada FROM sistemas s WHERE s.id = :s"
+                ),
+                {"s": op.sistema_id, "f": op.ferramenta_id},
+            )
+        ).first()
+        if sistema is not None and sistema.situacao == "quarentena":
+            return Estado.CANCELADA, MOTIVO_PARADA
+        if sistema is not None and sistema.origem != "proprio" and not (terceiros and sistema.publicada):
+            return Estado.CANCELADA, MOTIVO_TERCEIROS
+        return Estado.CANCELADA, "a ordem de servico ou a ferramenta mudou"
+
     async def _chave(self, op: Operacao, ferramenta: FerramentaVitrine) -> tuple[str | None, Any, str | None]:
         """(segredo, chave aberta por pessoa, motivo de nao sair)."""
         sistema = ferramenta.sistema
@@ -599,6 +733,11 @@ class PortaDeSaida:
     ) -> tuple[Estado, dict[str, Any] | None, str]:
         """Uma chamada so ao sistema. ``discover_json`` e ``declarado`` vem lidos antes de marcar "enviando"."""
         sistema = ferramenta.sistema
+        if medida.profundidade(op.argumentos) > TETO_NIVEIS_PEDIDO:
+            # Nenhum caminho escreve este pedido: o cliente fixado o devolveria como "nao enviado", e o da sala
+            # levantaria um erro antes de enviar (que aqui seria duvida). Nada sai, nem a chave abre.
+            log.warning("pedido_fundo_demais", fila_id=op.fila_id)
+            return Estado.NAO_SAIU, None, _NAO_ENVIADO[cliente.PEDIDO_FUNDO_DEMAIS]
         segredo, aberta, sem_chave = await self._chave(op, ferramenta)
         if sem_chave is not None:
             return Estado.NAO_SAIU, None, sem_chave
@@ -607,8 +746,9 @@ class PortaDeSaida:
             return segredo
 
         sondagem = json.dumps(discover_json) if isinstance(discover_json, dict) else discover_json
+        chamar = self.chamar or self.ligacao(sistema).chamar_ferramenta
         try:
-            resposta = await self.chamar(
+            resposta = await chamar(
                 sistema.endereco,
                 obter,
                 sondagem,
@@ -622,25 +762,107 @@ class PortaDeSaida:
             # Nao sabemos em que ponto parou: o pedido pode ter saido. Nunca reenvia.
             log.exception("envio_falhou")
             return Estado.NAO_CONFIRMADA, None, "falha inesperada durante o envio"
-        return await self._classificar(op, ferramenta, resposta, aberta)
+        fim = await self._classificar(op, ferramenta, resposta, aberta)
+        await self._registrar_sala(op, sistema, resposta)
+        return fim
+
+    async def _registrar_sala(self, op: Operacao, sistema: Sistema, resposta: cliente.Resposta) -> None:
+        """Linha do extrato (e contador) do que a sala barrou num terceiro, antes da linha do fim do envio. A acao
+        nao saiu de qualquer jeito: se o banco falhar aqui, so a linha fica faltando (o log diz o tipo do erro)."""
+        tipo = linha_da_sala(resposta, sistema)
+        if tipo is None:
+            return
+        try:
+            async with self.engine.begin() as c:
+                await registrar(
+                    c,
+                    papel="despachante",
+                    tipo=tipo,
+                    campos={"sistema": sistema.nome},
+                    protocolo=op.protocolo,
+                    pessoa_id=op.pessoa_id,
+                    aplicativo_id=op.aplicativo_id,
+                    sistema_id=sistema.id,
+                    ferramenta=op.nome_vitrine,
+                    dados={"onde": "acao", "status_http": list(resposta.status_http[-1:])},
+                )
+        except (SQLAlchemyError, OSError, TimeoutError) as erro:
+            log.warning("linha_da_sala_nao_gravada", fila_id=op.fila_id, tipo=tipo, erro=type(erro).__name__)
+        CONTADORES.somar(tipo, onde="acao")
 
     async def _classificar(
         self, op: Operacao, ferramenta: FerramentaVitrine, resposta: cliente.Resposta, aberta: Any
     ) -> tuple[Estado, dict[str, Any] | None, str]:
+        """Estado final, resultado (com a medida, sem o ``_meta`` do sistema) e desfecho de uma chamada.
+
+        O que o sistema pediu no meio (``Resposta.pedidos``) entra no desfecho so com o nosso vocabulario
+        (``pedidos_legiveis``): nunca texto, link ou campo dele. Nada disso muda o estado."""
+        # O que o cliente (ou a sala) contou e o que o proprio resultado ou erro mostra: uma resposta sem a lista
+        # nao esconde um ``InputRequiredResult`` nem um -32042.
+        pedidos = tuple(
+            sorted(set(resposta.pedidos) | set(cliente.pedidos_do_sistema(resposta.resultado, resposta.erro, ())))
+        )
+        for categoria in pedidos:
+            CONTADORES.somar("pedidos_do_sistema_barrados", tipo=categoria, onde="acao")
+        estado_final, resultado, desfecho = await self._estado_final(op, ferramenta, resposta, aberta, pedidos)
+        if pedidos and estado_final is not Estado.SISTEMA_PEDIU_DADOS:
+            pediu = pedidos_legiveis(pedidos)
+            if estado_final is Estado.ENVIADA:
+                desfecho = f"{desfecho}; antes pediu {pediu} e o MCP-CLARO recusou"
+            else:
+                desfecho = f"{desfecho}; o sistema pediu {pediu} e o MCP-CLARO recusou"
+        return estado_final, resultado, desfecho
+
+    async def _estado_final(
+        self,
+        op: Operacao,
+        ferramenta: FerramentaVitrine,
+        resposta: cliente.Resposta,
+        aberta: Any,
+        pedidos: tuple[str, ...],
+    ) -> tuple[Estado, dict[str, Any] | None, str]:
         sistema = ferramenta.sistema
         if resposta.tipo == "resultado" and resposta.resultado is not None:
-            bruto = resposta.resultado.model_dump(by_alias=True, exclude_none=True, mode="json")
-            if bruto.get("resultType") == "input_required":
-                return Estado.SISTEMA_PEDIU_DADOS, None, "o sistema pediu dados no meio da acao"
-            resultado = medida.aplicar(bruto, ferramenta.campos_pessoais)
+            pediu_dados = (
+                Estado.SISTEMA_PEDIU_DADOS,
+                None,
+                f"o sistema pediu {pedidos_legiveis(pedidos)} no meio da acao",
+            )
+            if isinstance(resposta.resultado, types.InputRequiredResult):
+                # Nada do pedido (mensagem, link, esquema) passa: so o que ele pediu, no nosso vocabulario.
+                return pediu_dados
+            try:
+                bruto = resposta.resultado.model_dump(by_alias=True, exclude_none=True, mode="json")
+                if bruto.get("resultType") == "input_required":
+                    return pediu_dados  # defesa: o tipo do resultado e aberto no kit
+                if medida.profundidade(bruto) > TETO_NIVEIS_RESULTADO:
+                    raise medida.RespostaFundaDemais("resultado fundo demais para guardar e repassar")
+                # A conta das partes sem texto e feita no resultado do sistema, antes da medida: o aviso de partes
+                # retiradas sai da nossa conta (fora da moldura, em ``pedidos.resposta``), nunca de um bloco dele.
+                retiradas = estranhos.retiradas_pela_medida(bruto)
+                resultado = medida.aplicar(bruto, ferramenta.campos_pessoais, anotacoes=not sistema.de_terceiro)
+            except (ValueError, RecursionError) as erro:
+                # A resposta chegou inteira (a acao saiu), mas tem partes demais umas dentro das outras para
+                # escrever (o kit nao escreve mais de uns 255 niveis), medir ou repassar (``TETO_NIVEIS_RESULTADO``).
+                # Fica "enviada", sem o resultado: nunca erro interno, nunca "nao confirmada" pela retomada.
+                log.warning("resultado_fundo_demais", fila_id=op.fila_id, erro=type(erro).__name__)
+                return Estado.ENVIADA, None, RESULTADO_FUNDO_DEMAIS
             resultado.pop("resultType", None)
             resultado.pop("_meta", None)  # o _meta do sistema nunca passa adiante
+            if retiradas:
+                resultado["_meta"] = {fila.META_RETIRADAS: retiradas}
             desfecho = "o sistema respondeu com erro" if resultado.get("isError") else "o sistema respondeu"
             return Estado.ENVIADA, resultado, desfecho
         if resposta.tipo == "nao_enviado":
-            return Estado.NAO_SAIU, None, "o pedido nao chegou ao sistema"
-        if resposta.tipo == "recusado_http":
-            if 401 in resposta.status_http and aberta is not None:
+            return Estado.NAO_SAIU, None, _NAO_ENVIADO.get(resposta.excecao or "", "o pedido nao chegou ao sistema")
+        if (
+            resposta.tipo == "recusado_http"
+            and resposta.status_http
+            and cliente.recusado_por_status(resposta.status_http[-1])
+        ):
+            # So a recusa na porta (401, 403 ou desvio nao seguido, no ultimo status) e "nao saiu". O 401 marca a
+            # chave por pessoa vencida; nenhum outro status vence a chave.
+            if resposta.status_http[-1] == 401 and aberta is not None:
                 try:
                     await renovacao.marcar_vencida(
                         self.engine, sistema_id=sistema.id, pessoa_id=op.pessoa_id, cifrada=aberta.cifrada

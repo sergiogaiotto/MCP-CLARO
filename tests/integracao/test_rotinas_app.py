@@ -26,6 +26,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.rotinas.agendador import Desfecho
 from mcp_claro.rotinas.app import criar_app_rotinas, montar_tarefas
 from mcp_claro.rotinas.config import ConfigRotinas
+from mcp_claro.rotinas.mudou_parou import ConferenciaNaoFeita
 from tests.apoio import servidor
 from tests.integracao import test_rotinas_apoio as apoio
 from tests.integracao.test_rotinas_apoio import Mailpit
@@ -45,7 +46,9 @@ ADMIN = "admin-app@exemplo.teste"
 
 class SemSistemas:
     async def declaracoes(self, sistema_id: uuid.UUID) -> list[dict[str, Any]]:
-        raise LookupError("sem despachante neste teste")
+        # Sem despachante: a conferencia nao acontece, e nenhum servidor de terceiros de outros testes do banco da
+        # sessao soma rodada sem resposta (nem vai a quarentena) por causa deste teste.
+        raise ConferenciaNaoFeita("sem despachante neste teste")
 
 
 def config_rapida() -> ConfigRotinas:
@@ -93,6 +96,7 @@ async def test_saude_e_tarefas_rodando(rotinas: tuple[str, Any]) -> None:
         "avisar_fichas_pendentes",
         "vencer_limites",
         "limpar_desafios_passkey",  # desafios de passkey vencidos ou usados (correcao da revisao)
+        "limpar_sinais",  # Fase 3: sinais dos tres sinais mais velhos que a maior janela
     }
     fim = time.monotonic() + 15
     tarefas: dict[str, str] = {}

@@ -4,7 +4,9 @@
 - ``ativa`` sem uso ha ``WORK_ORDER_IDLE_DAYS`` (desde o ultimo uso, ou desde o inicio
   se nunca foi usada) vira ``inativa``;
 - ``ativa`` que vence nos proximos ``WORK_ORDER_WARN_DAYS`` recebe um aviso, uma vez
-  por ordem (``chave_unica``).
+  por ordem (``chave_unica``). As ja avisadas ficam de fora da busca, e a rodada segue de
+  lote em lote ate o fim da janela: muitas ordens avisadas que vencem antes nao seguram
+  o aviso das seguintes.
 
 Cada mudanca deixa linha no extrato, em nome da pessoa, e um aviso por e-mail a ela.
 O aviso leva so o nome do modelo, o nome do aplicativo e a data: nada do que foi lido.
@@ -14,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -160,53 +162,69 @@ async def vencer_ordens(engine: AsyncEngine) -> dict[str, int]:
     return {"vencidas": len(vencidas), "inativas": len(inativas)}
 
 
+SQL_A_VENCER = """
+SELECT o.id, o.pessoa_id, o.aplicativo_id, o.fim, m.nome AS modelo, a.nome AS aplicativo
+FROM ordens_servico o
+JOIN modelos_ordem m ON m.id = o.modelo_id
+JOIN aplicativos a ON a.id = o.aplicativo_id
+WHERE o.situacao = 'ativa' AND o.fim > now() AND o.fim <= now() + make_interval(days => :d)
+  AND (o.fim, o.id) > (CAST(:depois_de_fim AS timestamptz), CAST(:depois_de_id AS uuid))
+  AND NOT EXISTS (SELECT 1 FROM avisos v WHERE v.chave_unica = 'ordem_a_vencer:' || o.id::text)
+ORDER BY o.fim, o.id
+LIMIT :lote
+"""
+"""Um lote das ordens ainda nao avisadas que vencem na janela, depois de ``(fim, id)`` do lote anterior."""
+
+
 async def avisar_ordens_a_vencer(engine: AsyncEngine) -> int:
-    """Avisa cada ordem ativa que vence em ate ``WORK_ORDER_WARN_DAYS``, uma vez por ordem."""
+    """Avisa cada ordem ativa que vence em ate ``WORK_ORDER_WARN_DAYS``, uma vez por ordem.
+
+    De lote em lote (``LOTE``, cada um na sua transacao), em ordem de ``(fim, id)``, ate a janela acabar. A busca
+    deixa de fora as ja avisadas (``avisos.chave_unica``): sem isso, um lote cheio de ordens ja avisadas que vencem
+    antes seguraria o aviso das outras."""
     novos = 0
-    async with engine.begin() as c:
+    async with engine.connect() as c:
         dias = await valor_politica(c, "WORK_ORDER_WARN_DAYS")
-        linhas = (
-            await c.execute(
-                text(
-                    "SELECT o.id, o.pessoa_id, o.aplicativo_id, o.fim, m.nome AS modelo, a.nome AS aplicativo"
-                    " FROM ordens_servico o"
-                    " JOIN modelos_ordem m ON m.id = o.modelo_id"
-                    " JOIN aplicativos a ON a.id = o.aplicativo_id"
-                    " WHERE o.situacao = 'ativa' AND o.fim > now() AND o.fim <= now() + make_interval(days => :d)"
-                    " ORDER BY o.fim LIMIT :lote"
-                ),
-                {"d": dias, "lote": LOTE},
-            )
-        ).all()
-        for r in linhas:
-            ordem_id = uuid.UUID(str(r.id))
-            pessoa_id = uuid.UUID(str(r.pessoa_id))
-            entrou = await avisar_pessoa(
-                c,
-                pessoa_id,
-                "ordem_a_vencer",
-                "MCP-CLARO: sua ordem de servico vence em breve",
-                {
-                    "texto": (
-                        f"A ordem de servico {r.modelo}, do aplicativo {r.aplicativo}, vence em {_data(r.fim)}. "
-                        "Depois disso o aplicativo para de ler em seu nome. Se ainda precisar, renove nas telas."
-                    ),
-                    "ordem_id": str(ordem_id),
-                    "modelo": r.modelo,
-                    "aplicativo": r.aplicativo,
-                    "fim": r.fim.isoformat(),
-                },
-                chave_unica=f"ordem_a_vencer:{ordem_id}",
-            )
-            if entrou:
-                novos += 1
-                await registrar(
-                    c,
-                    papel="rotinas",
-                    tipo="ordem_a_vencer",
-                    campos={"modelo": r.modelo, "fim": _data(r.fim)},
-                    pessoa_id=pessoa_id,
-                    aplicativo_id=uuid.UUID(str(r.aplicativo_id)),
-                    dados={"ordem_id": str(ordem_id), "dias_de_aviso": dias},
+    depois_de: tuple[datetime, uuid.UUID] = (datetime.min.replace(tzinfo=UTC), uuid.UUID(int=0))
+    while True:
+        async with engine.begin() as c:
+            linhas = (
+                await c.execute(
+                    text(SQL_A_VENCER),
+                    {"d": dias, "lote": LOTE, "depois_de_fim": depois_de[0], "depois_de_id": depois_de[1]},
                 )
-    return novos
+            ).all()
+            for r in linhas:
+                ordem_id = uuid.UUID(str(r.id))
+                pessoa_id = uuid.UUID(str(r.pessoa_id))
+                entrou = await avisar_pessoa(
+                    c,
+                    pessoa_id,
+                    "ordem_a_vencer",
+                    "MCP-CLARO: sua ordem de servico vence em breve",
+                    {
+                        "texto": (
+                            f"A ordem de servico {r.modelo}, do aplicativo {r.aplicativo}, vence em {_data(r.fim)}. "
+                            "Depois disso o aplicativo para de ler em seu nome. Se ainda precisar, renove nas telas."
+                        ),
+                        "ordem_id": str(ordem_id),
+                        "modelo": r.modelo,
+                        "aplicativo": r.aplicativo,
+                        "fim": r.fim.isoformat(),
+                    },
+                    chave_unica=f"ordem_a_vencer:{ordem_id}",
+                )
+                if entrou:
+                    novos += 1
+                    await registrar(
+                        c,
+                        papel="rotinas",
+                        tipo="ordem_a_vencer",
+                        campos={"modelo": r.modelo, "fim": _data(r.fim)},
+                        pessoa_id=pessoa_id,
+                        aplicativo_id=uuid.UUID(str(r.aplicativo_id)),
+                        dados={"ordem_id": str(ordem_id), "dias_de_aviso": dias},
+                    )
+        if len(linhas) < LOTE:
+            return novos
+        depois_de = (linhas[-1].fim, uuid.UUID(str(linhas[-1].id)))

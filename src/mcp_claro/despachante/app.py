@@ -3,14 +3,22 @@
 Rotas internas (nunca expostas ao portao):
 
 - ``POST /interno/ler``: leitura reconferida, uma chamada ao sistema;
-- ``POST /interno/sondar``: sondagem de versao no cadastro de um sistema;
+- ``POST /interno/sondar``: sondagem de versao no cadastro de um sistema (com o desfecho e as versoes anunciadas;
+  sistema desconhecido: 404);
 - ``POST /interno/declaracoes``: le o que o sistema declara (revisao e mudou-parou);
+- ``POST /interno/revisao_servidor``: conclusao da revisao de um servidor de terceiros pelo ADMIN;
 - ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN).
+
+Toda conversa com um sistema sai por um ponto so (``Despachante.ligacao``, ``ligacao.ponto.ligacao_para``), o
+mesmo da porta de saida: sistema proprio pelo cliente fixado; servidor de terceiros pela sala de visitas
+(``ClienteSala``, montado aqui a partir de ``VISITS_INTERNAL_URL``; sem sala, nada vai ao terceiro). A cifra e por
+origem (``cifra_origem.CifraPorOrigem``): a chave Transit dos terceiros e outra.
 
 Na partida, depois da conferencia de continuidade, sobe a porta unica de saida (``saida.despachante``):
 a fila de acoes e enviada por um despachante so, mesmo com varias copias do papel no ar. Quando o papel entra
-no cofre de verdade, a porta tambem confere a saude dele a cada ``VAULT_CHECK_SECONDS`` e fecha a saida
-enquanto ele estiver trancado (``saida.cofre``).
+no cofre de verdade, ele confere a chave dos terceiros (existe e e ``derived``; senao a partida recusa), e a
+porta tambem confere a saude do cofre a cada ``VAULT_CHECK_SECONDS`` e fecha a saida enquanto ele estiver
+trancado (``saida.cofre``).
 """
 
 from __future__ import annotations
@@ -32,18 +40,49 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.despachante import chaves
 from mcp_claro.despachante.autorizacao import rotas_autorizacao
 from mcp_claro.despachante.chaves import Cifra
-from mcp_claro.despachante.servico import DeclaracoesIndisponiveis, Despachante, LeituraRecusada, PedidoLeitura
+from mcp_claro.despachante.cifra_origem import CifraPorOrigem, conferir_chave_de_terceiros
+from mcp_claro.despachante.servico import (
+    TETO_PUBLICADAS,
+    DeclaracoesIndisponiveis,
+    Despachante,
+    LeituraRecusada,
+    PedidoLeitura,
+    RevisaoRecusada,
+)
 from mcp_claro.extrato import registrar
+from mcp_claro.ligacao.ponto import Ligacao
+from mcp_claro.ligacao.sala_cliente import ClienteSala
 from mcp_claro.logs import logger
 from mcp_claro.saida.despachante import PortaDeSaida
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
+from mcp_claro.visitas.tls import contexto_do_despachante
 
 log = logger("mcp_claro.despachante.app")
 
 
 def _uuid(valor: Any) -> uuid.UUID | None:
-    return uuid.UUID(str(valor)) if valor else None
+    try:
+        return uuid.UUID(str(valor)) if valor else None
+    except ValueError:
+        return None
+
+
+async def _corpo(pedido: Request) -> dict[str, Any]:
+    try:
+        corpo = await pedido.json()
+    except ValueError:
+        return {}
+    return corpo if isinstance(corpo, dict) else {}
+
+
+def montar_sala(p: Parametros) -> ClienteSala | None:
+    """A sala de visitas do despachante, ou None sem ``VISITS_INTERNAL_URL`` (desenvolvimento e teste; fora deles a
+    partida ja exige a sala). Com https, o contexto TLS confia so na ``ca_visitas`` e leva o certificado de cliente
+    do despachante; faltando arquivo, ``ConfiguracaoInvalida`` e a partida recusa."""
+    if not p.VISITS_INTERNAL_URL:
+        return None
+    return ClienteSala(p.VISITS_INTERNAL_URL, tls=contexto_do_despachante(p))
 
 
 class _CifraDoCofre:
@@ -101,14 +140,37 @@ async def _parar_tarefa(tarefa: asyncio.Task[None]) -> None:
         await tarefa
 
 
-def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | None = None) -> Starlette:
-    """Sem ``cifra`` dada, o papel entra no cofre (OpenBao, AppRole do despachante) na partida."""
+def criar_app_despachante(
+    p: Parametros,
+    engine: AsyncEngine,
+    cifra: Cifra | None = None,
+    *,
+    local_para_terceiro: Ligacao | None = None,
+    liberar_locais: bool = False,
+) -> Starlette:
+    """Sem ``cifra`` dada, o papel entra no cofre (OpenBao, AppRole do despachante) na partida e cifra por origem.
+
+    So para testes: ``local_para_terceiro`` fala com servidores de terceiros sem a sala, e ``liberar_locais``
+    aceita endereco local na troca de chave OAuth de um terceiro. Os dois so valem em desenvolvimento e teste.
+    """
     p.conferir()
+    sala = montar_sala(p)
     do_cofre: _CifraDoCofre | None = None
     if cifra is None:
         do_cofre = _CifraDoCofre()
         cifra = do_cofre
-    despachante = Despachante(engine, cifra, prazo_leitura=float(p.RESPONSE_MAX_WAIT_SECONDS))
+    ambiente = str(p.APP_ENV)
+    terceiros_ligados = bool(p.FEATURE_PHASE3_THIRD_PARTY)
+    despachante = Despachante(
+        engine,
+        cifra,
+        prazo_leitura=float(p.RESPONSE_MAX_WAIT_SECONDS),
+        ambiente=ambiente,
+        sala=sala,
+        local_para_terceiro=local_para_terceiro,
+        liberar_locais=liberar_locais,
+        terceiros_ligados=terceiros_ligados,
+    )
     porta = PortaDeSaida(
         engine,
         cifra,
@@ -116,6 +178,8 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         varredura=float(p.OUTBOX_SWEEP_SECONDS),
         acoes_de_programas=p.PROGRAM_ACTIONS_ENABLED,
         limite_exige_passkey=p.FEATURE_PASSKEY,
+        terceiros_ligados=terceiros_ligados,
+        ligacao=despachante.ligacao,
         conferir_cofre=float(p.VAULT_CHECK_SECONDS),
         emails_admin=p.NOTIFY_ADMIN_EMAILS,
     )
@@ -132,23 +196,57 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         return JSONResponse(resultado)
 
     async def sondar(pedido: Request) -> JSONResponse:
-        corpo = await pedido.json()
+        corpo = await _corpo(pedido)
         sistema_id = _uuid(corpo.get("sistema_id"))
-        if sistema_id is None:
+        chave = corpo.get("chave_sondagem")
+        if sistema_id is None or not (chave is None or isinstance(chave, str)):
             return JSONResponse({"mensagem": "sistema_id e obrigatorio"}, status_code=400)
-        sondagem = await despachante.sondar_sistema(sistema_id, corpo.get("chave_sondagem"))
+        try:
+            sondagem = await despachante.sondar_sistema(sistema_id, chave or None)
+        except LookupError:
+            return JSONResponse({"mensagem": "sistema desconhecido"}, status_code=404)
         return JSONResponse(
             {
                 "aceito": sondagem.aceito,
+                "desfecho": sondagem.desfecho,
                 "motivo": sondagem.motivo,
                 "versoes": list(sondagem.versoes),
+                "versoes_anunciadas": list(sondagem.versoes),
                 "inalcancavel": sondagem.inalcancavel,
                 "codigo": sondagem.codigo,
             }
         )
 
+    async def revisao_servidor(pedido: Request) -> JSONResponse:
+        """Conclusao da revisao do servidor: 200 com ``revisado`` verdadeiro, ou falso com ``motivo``, ``mensagem``
+        (para o ADMIN) e ``ferramentas`` [{ferramenta, problema}]; 404 sistema desconhecido; 400 pedido invalido."""
+        corpo = await _corpo(pedido)
+        sistema_id = _uuid(corpo.get("sistema_id"))
+        publicar = corpo.get("publicar")
+        fornecedor, quem = corpo.get("fornecedor"), corpo.get("quem")
+        pessoa_id = _uuid(corpo.get("pessoa_id"))
+        if (
+            sistema_id is None
+            or not isinstance(publicar, list)
+            or len(publicar) > TETO_PUBLICADAS
+            or not all(isinstance(n, str) and n for n in publicar)
+            or not isinstance(fornecedor, str)
+            or not isinstance(quem, str)
+            or (corpo.get("pessoa_id") and pessoa_id is None)
+        ):
+            return JSONResponse({"motivo": "pedido_invalido", "mensagem": "Pedido interno invalido."}, status_code=400)
+        try:
+            feito = await despachante.revisar_servidor(
+                sistema_id, publicar=publicar, fornecedor=fornecedor, quem=quem, pessoa_id=pessoa_id
+            )
+        except LookupError:
+            return JSONResponse({"mensagem": "sistema desconhecido"}, status_code=404)
+        except RevisaoRecusada as recusa:
+            return JSONResponse(recusa.como_json())
+        return JSONResponse(feito)
+
     async def declaracoes(pedido: Request) -> JSONResponse:
-        corpo = await pedido.json()
+        corpo = await _corpo(pedido)
         sistema_id = _uuid(corpo.get("sistema_id"))
         if sistema_id is None:
             return JSONResponse({"mensagem": "sistema_id e obrigatorio"}, status_code=400)
@@ -161,7 +259,7 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
         return JSONResponse({"ferramentas": ferramentas})
 
     async def guardar_chave(pedido: Request) -> JSONResponse:
-        corpo = await pedido.json()
+        corpo = await _corpo(pedido)
         sistema_id = _uuid(corpo.get("sistema_id"))
         segredo = corpo.get("segredo")
         if sistema_id is None or not isinstance(segredo, str) or not segredo:
@@ -196,7 +294,16 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
                 from mcp_claro.cofre import Cofre
 
                 cofre = await pilha.enter_async_context(Cofre(p))
-                do_cofre.alvo = cofre.cifra()
+                # Critica B9: a chave dos terceiros existe e e derived; senao a partida recusa.
+                await conferir_chave_de_terceiros(cofre, p.VAULT_TRANSIT_KEY_THIRD_PARTY)
+                por_origem = CifraPorOrigem.do_banco(
+                    engine, propria=cofre.cifra(), terceiros=cofre.cifra(p.VAULT_TRANSIT_KEY_THIRD_PARTY)
+                )
+                pilha.push_async_callback(por_origem.fechar)
+                # A origem de todos os sistemas de uma vez, antes de atender: so um sistema novo e buscado depois
+                # (por um engine sem pool, nunca pelo pool que a leitura ou a porta estao segurando).
+                await por_origem.carregar()
+                do_cofre.alvo = por_origem
                 # So com o cofre de verdade: a porta confere a saude dele e fecha a saida enquanto estiver trancado.
                 porta.cofre = cofre
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
@@ -208,14 +315,21 @@ def criar_app_despachante(p: Parametros, engine: AsyncEngine, cifra: Cifra | Non
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/interno/ler", ler, methods=["POST"]),
             Route("/interno/sondar", sondar, methods=["POST"]),
             Route("/interno/declaracoes", declaracoes, methods=["POST"]),
+            Route("/interno/revisao_servidor", revisao_servidor, methods=["POST"]),
             Route("/interno/chaves", guardar_chave, methods=["POST"]),
             Route("/saude", saude, methods=["GET"]),
-            *rotas_autorizacao(engine, cifra),
+            *rotas_autorizacao(
+                engine, cifra, ambiente=ambiente, liberar_locais=liberar_locais, terceiros_ligados=terceiros_ligados
+            ),
         ],
         lifespan=ciclo,
     )
+    # Para as provas: o despachante e a porta de saida montados aqui (a mesma ligacao nos dois).
+    app.state.despachante = despachante
+    app.state.porta = porta
+    return app

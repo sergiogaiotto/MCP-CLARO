@@ -26,7 +26,9 @@ Regras do plano, provadas por teste:
   mesmo nome que o cliente HTTP conecta, na forma IDNA), com nome e versao genericos,
   e do ``server/discover`` guarda so uma lista do que fica (``discover_para_guardar``);
 - separa "falha comprovada antes do envio" (conexao recusada) de "duvida"
-  (qualquer falha depois disso): so a primeira pode virar "nao saiu".
+  (qualquer falha depois disso): so a primeira pode virar "nao saiu". O JSON do
+  pedido e montado antes de abrir conexao: pedido que o kit nao consegue escrever
+  (argumentos fundos demais) e ``nao_enviado`` (``PEDIDO_FUNDO_DEMAIS``).
 """
 
 from __future__ import annotations
@@ -89,6 +91,8 @@ PREFIXO_FIO_ANTIGO = "fio_antigo:"
 PEDIDO_A_MAIS = "PedidoAMais"
 ENDERECO_RECUSADO = "EnderecoRecusado"
 NOME_NAO_RESOLVIDO = "NomeNaoResolvido"
+PEDIDO_FUNDO_DEMAIS = "pedido_fundo_demais"
+"""O kit nao consegue escrever o pedido (``_pedido_que_sai``): nada foi enviado. Com ``nao_enviado``."""
 
 _CABECALHOS_DE_RASTRO = frozenset({"traceparent", "tracestate", "baggage"})
 _PREFIXO_ENVELOPE = "io.modelcontextprotocol/"
@@ -824,6 +828,25 @@ async def listar_ferramentas(
     return ferramentas
 
 
+def _pedido_que_sai(nome: str, argumentos: dict[str, Any], meta: dict[str, Any] | None) -> types.CallToolRequest | None:
+    """O pedido ``tools/call``, se o kit consegue escreve-lo; senao None.
+
+    Monta o JSON como o kit monta no envio (``model_dump`` do pedido na sessao, ``model_dump`` da mensagem JSON-RPC
+    no transporte, depois o texto do corpo), antes de abrir conexao. O escritor do pydantic tem um teto de niveis:
+    com argumentos de 256 niveis ou mais (o objeto dos argumentos e o primeiro), o kit levantava ``ValueError`` no
+    meio da chamada, com a conexao ja aberta, e a falha virava "duvida", embora nenhum byte tivesse saido; com 255,
+    o pedido sai. Pedido que nao da para montar por outro motivo (nunca visto: os argumentos vem de JSON) tambem e
+    None: nada saiu."""
+    try:
+        pedido = types.CallToolRequest(params=types.CallToolRequestParams(name=nome, arguments=argumentos, _meta=meta))
+        dados = pedido.model_dump(by_alias=True, mode="json", exclude_none=True)
+        mensagem = types.JSONRPCRequest(jsonrpc="2.0", id=0, method=dados["method"], params=dados.get("params"))
+        json.dumps(mensagem.model_dump(by_alias=True, mode="json", exclude_unset=True))
+    except ValueError, RecursionError:
+        return None
+    return pedido
+
+
 async def chamar_ferramenta(
     endereco: str,
     segredo: Segredo,
@@ -842,10 +865,17 @@ async def chamar_ferramenta(
     """Exatamente um POST ``tools/call``. Devolve o resultado cru ou a classificacao da falha.
 
     ``Resposta.pedidos`` diz o que o sistema pediu no meio (``InputRequiredResult``, -32042 ou pedido barrado no
-    fio antigo). Num terceiro, ``traceparent`` e recusado e o endereco e conferido antes de abrir conexao.
+    fio antigo). Num terceiro, ``traceparent`` e recusado e o endereco e conferido antes de abrir conexao. Pedido que
+    o kit nao consegue escrever (argumentos fundos demais) e ``nao_enviado`` com ``PEDIDO_FUNDO_DEMAIS``, antes de
+    qualquer rede.
     """
     if terceiro and traceparent:
         raise ValueError("rastro nunca vai a servidor de terceiros")
+    meta = {"traceparent": traceparent} if traceparent else None
+    pedido = _pedido_que_sai(nome, argumentos, meta)
+    if pedido is None:
+        # Antes de qualquer rede (nem o nome do terceiro e procurado): nenhum byte saiu.
+        return Resposta("nao_enviado", excecao=PEDIDO_FUNDO_DEMAIS)
     if terceiro:
         recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais)
         if recusa is not None:
@@ -853,7 +883,6 @@ async def chamar_ferramenta(
     tentativa = Tentativa(teto_pedidos=1)
     marca = _TENTATIVA.set(tentativa)
     vazio = otel_context.attach(otel_context.Context())
-    meta = {"traceparent": traceparent} if traceparent else None
     # Cabecalhos Mcp-Param-* que o sistema exige quando o esquema dele marca x-mcp-header.
     cabecalhos = mcp_param_headers(x_mcp_header_map(esquema_declarado), argumentos) if esquema_declarado else {}
     try:
@@ -868,9 +897,6 @@ async def chamar_ferramenta(
             ClientSession(leitura, escrita, client_info=_IDENTIDADE_TERCEIRO if terceiro else _IDENTIDADE) as sessao,
         ):
             sessao.adopt(_discover(discover_json))
-            pedido = types.CallToolRequest(
-                params=types.CallToolRequestParams(name=nome, arguments=argumentos, _meta=meta)
-            )
             try:
                 resultado = await sessao.send_request(pedido, _RESULTADO_CHAMADA, request_read_timeout_seconds=prazo)
             except MCPError as erro:
