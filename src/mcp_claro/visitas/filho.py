@@ -8,9 +8,11 @@ crus (o pai nunca desempacota objeto vindo do filho). Depois morre. Assim, um se
 falha do kit dentro do filho so ve a propria chamada.
 
 Antes de receber o pedido, o filho se fecha: nao gera core nem aceita ser depurado por outro processo do mesmo
-usuario (``PR_SET_DUMPABLE``), morre junto com o pai (``PR_SET_PDEATHSIG``), entra num dominio Landlock so dele
-(``dominio_proprio``) e nao escreve log nem aviso (o texto de um terceiro nunca vai ao log da sala). So depois
-escreve ``PRONTO`` no cano da resposta, e o pai so entrega o pedido a quem ja avisou.
+usuario (``PR_SET_DUMPABLE``), morre junto com a thread do pai que o criou (``PR_SET_PDEATHSIG``; a sala cria
+todos numa thread que vive tanto quanto ela), entra num dominio Landlock so dele (``dominio_proprio``), troca a
+entrada e as saidas herdadas (0, 1 e 2) por ``/dev/null``, fecha o cano herdado do rastreador de recursos do
+``multiprocessing`` (e nunca abre outro) e nao escreve log nem aviso: o texto de um terceiro nunca vai ao log da
+sala. So depois escreve ``PRONTO`` no cano da resposta, e o pai so entrega o pedido a quem ja avisou.
 
 Por que o aviso: do ``spawn`` ate o isolamento (cerca de 0,8 s de import num filho recem-iniciado), o filho ainda e
 um processo comum do usuario da sala. Com o dominio, nenhum filho isolado (por exemplo, um tomado por um terceiro)
@@ -36,7 +38,8 @@ import struct
 import sys
 import threading
 import warnings
-from typing import Any, Final, Protocol
+from multiprocessing import resource_tracker
+from typing import Any, Final, NoReturn, Protocol
 
 import anyio
 
@@ -153,10 +156,37 @@ def _calar(*_: Any) -> None:
     return None
 
 
+def _sem_rastreador(*_: Any) -> NoReturn:
+    raise OSError("o filho da sala nao usa o rastreador de recursos do multiprocessing")
+
+
+def _sem_saidas_herdadas() -> None:
+    """0, 1 e 2 passam a apontar para ``/dev/null``: o stdout e o stderr herdados sao os do log da sala."""
+    nulo = os.open(os.devnull, os.O_RDWR)
+    try:
+        for fd in (0, 1, 2):
+            os.dup2(nulo, fd)
+    finally:
+        if nulo > 2:
+            os.close(nulo)
+
+
+def _sem_cano_do_rastreador() -> None:
+    """Fecha o cano herdado do rastreador de recursos do pai (``spawn`` o passa a todo filho) e impede outro."""
+    rastreador: Any = resource_tracker._resource_tracker  # campos privados, fora dos tipos publicos
+    fd, rastreador._fd = rastreador._fd, None
+    rastreador._launch = _sem_rastreador
+    if fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 def _isolar() -> None:
     nao_depuravel()
     _prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
     dominio_proprio()
+    _sem_saidas_herdadas()
+    _sem_cano_do_rastreador()
     # Nada do terceiro vai ao log: o kit registra excecoes com o texto que recebeu.
     logging.disable(logging.CRITICAL)
     warnings.simplefilter("ignore")

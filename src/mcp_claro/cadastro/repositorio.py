@@ -324,7 +324,8 @@ async def revisar_ferramenta(
     o ADMIN (``esquema.EsquemaRecusado``, um ``EsquemaInvalido``), ``patternProperties``, ``$id``, ``$anchor``,
     ``$dynamicAnchor``, ``$dynamicRef``, ``unevaluatedProperties`` e ``unevaluatedItems`` em qualquer lugar,
     ``$schema`` fora da raiz, referencia que nao seja ``#/$defs/<nome>`` ou ``#/definitions/<nome>``, esquema em
-    ciclo e esquema grande ou fundo demais, contando todas as definicoes e seguindo as referencias
+    ciclo e esquema grande ou fundo demais, contando todas as definicoes e seguindo as referencias a partir da
+    raiz e de cada definicao (citada ou nao), ``enum`` com mais de 1000 valores e esquema limpo com mais de 256 KiB
     (``esquema.conferir_terceiro``). A ``impressao`` e sempre a da definicao declarada, e ``definicao_declarada``
     fica guardada para o antes e depois.
     """

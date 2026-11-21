@@ -27,8 +27,13 @@ Fase 3, servidores de terceiros:
 - vitrine e chamada de terceiro so para quem pode (``terceiros_ligados``: a chave
   ``FEATURE_PHASE3_THIRD_PARTY`` ligada, ou pessoa de teste). Para os outros, a
   ferramenta de terceiro nao existe (``fora_da_vitrine``);
-- argumentos para terceiro passam primeiro pelos tetos de tamanho
-  (``argumentos.conferir_tamanho``), depois pelo esquema revisado;
+- argumentos para terceiro passam primeiro pelos tetos de tamanho, inclusive
+  os de niveis e de digitos (``argumentos.conferir_tamanho``), depois pelo
+  esquema revisado, com o orcamento de passos
+  (``argumentos.conferir_argumentos(..., terceiro=True)``): caro demais, recusa
+  com ``esquema_caro_demais``. Em qualquer sistema, aninhamento que estoura a
+  pilha na conferencia, ou numero que a conta de ``multipleOf`` nao divide,
+  vira a recusa ``argumento_fora_do_esquema``, nunca erro interno;
 - tres sinais: quando o aplicativo recebe texto de um sistema (leitura, acao
   enviada ou consulta de uma acao enviada), a entrada grava os sinais
   (``regras.sinais``) numa transacao que confirma ANTES de devolver o texto.
@@ -57,8 +62,10 @@ from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine, Pessoa
 from mcp_claro.config.settings import Parametros
 from mcp_claro.entrada.argumentos import (
+    RECUSA_ORCAMENTO,
     ArgumentosGrandes,
     ArgumentosInvalidos,
+    OrcamentoEsgotado,
     conferir_argumentos,
     conferir_tamanho,
 )
@@ -148,7 +155,8 @@ def _traceparent(ctx: ServerRequestContext[Any], p: Parametros) -> str | None:
 
 
 def _meta_do_pedido(params: types.CallToolRequestParams) -> Any:
-    return params.model_dump(by_alias=True, exclude_none=True).get("_meta")
+    # So o _meta: copiar o pedido inteiro (model_dump) andaria tambem por todos os argumentos.
+    return params.meta
 
 
 def ja_emoldurado(resultado: dict[str, Any]) -> bool:
@@ -326,7 +334,9 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         if (recusa_chave := programas.recusa_da_chave(q.aplicativo.tipo, ferramenta.sistema.tipo_chave)) is not None:
             raise await recusar(q, params.name, recusa_chave.motivo, recusa_chave.mensagem, trace, tipo)
         if ferramenta.sistema.de_terceiro:
-            # Antes do esquema: a conferencia roda neste laco, e regra do fornecedor pode custar caro com texto longo.
+            # Antes do esquema: a conferencia roda neste laco, e um esquema de fornecedor custa ate o tamanho dele
+            # vezes o tamanho do pedido. Os tetos prendem o pedido; o orcamento de passos (que conta tambem a
+            # comparacao de enum e const) e os cinco primeiros erros, a conferencia.
             try:
                 conferir_tamanho(params.arguments)
             except ArgumentosGrandes as erro:
@@ -339,7 +349,9 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                     tipo,
                 ) from erro
         try:
-            conferir_argumentos(ferramenta.esquema_entrada, params.arguments)
+            conferir_argumentos(ferramenta.esquema_entrada, params.arguments, terceiro=ferramenta.sistema.de_terceiro)
+        except OrcamentoEsgotado as erro:
+            raise await recusar(q, params.name, "esquema_caro_demais", RECUSA_ORCAMENTO, trace, tipo) from erro
         except ArgumentosInvalidos as erro:
             raise await recusar(
                 q,

@@ -1,6 +1,8 @@
 """cadastro/esquema.py: esquema limpo de terceiro (so o que valida fica), descricoes do ADMIN, a revisao de
-terceiro (palavras, referencias, ciclo, partes e niveis) e a copia sem ``pattern`` nem ``uniqueItems`` com que a
-entrada confere os argumentos (critica B3, desenho simples do coordenador; contornos do verificador)."""
+terceiro (palavras, referencias, ciclo, partes, niveis, escolhas e bytes, da raiz e de cada definicao, citada ou
+nao) e a copia sem ``pattern`` nem ``uniqueItems`` com que a entrada confere os argumentos (critica B3, desenho
+simples do coordenador; contornos do verificador). Nenhum percurso usa recursao: os testes rodam com a pilha
+quase cheia."""
 
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ import json
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
@@ -18,8 +21,10 @@ from hypothesis import strategies as st
 
 from mcp_claro.cadastro import esquema as modulo
 from mcp_claro.cadastro.esquema import (
+    BYTES_MAXIMOS,
     CUSTO_MAXIMO,
     DESCRICAO_DE_CAMPO_MAXIMA,
+    ESCOLHAS_MAXIMAS,
     PALAVRAS_RECUSADAS,
     PROFUNDIDADE_MAXIMA,
     SO_NA_RAIZ,
@@ -27,7 +32,10 @@ from mcp_claro.cadastro.esquema import (
     CampoDesconhecido,
     EsquemaRecusado,
     com_descricoes,
+    conferir_documento,
+    conferir_largura,
     conferir_palavras,
+    conferir_referencias,
     conferir_terceiro,
     custo_do_esquema,
     limpar_textos,
@@ -941,6 +949,432 @@ def test_esquema_no_teto_de_niveis_cabe_na_pilha_da_entrada(palavra: str) -> Non
     _na_pilha(160, conferir)
 
 
+# --- Revisao de terceiro: os limites exatos (lacunas do verificador) ----------------------------------------------
+
+
+def _com_niveis(niveis: int) -> dict[str, Any]:
+    """Um esquema com exatamente ``niveis`` niveis no documento: a raiz e o nivel 0, o mais fundo e o ``niveis - 1``."""
+    no: dict[str, Any] = {"type": "string"}
+    for _ in range(niveis - 1):
+        no = {"type": "object", "properties": {"a": no}}
+    return no
+
+
+def test_documento_com_64_niveis_passa_e_com_65_e_recusado() -> None:
+    # Mutacao documento_um_nivel_a_mais do verificador: o teste antigo pulava o limite (62 passava, 64 nao). A raiz
+    # e o nivel 0: o nivel 63 passa (64 niveis, 63 abaixo da raiz), o nivel 64 nao (65 niveis, 64 abaixo da raiz).
+    assert _partes_e_niveis(_com_niveis(PROFUNDIDADE_MAXIMA)) == (PROFUNDIDADE_MAXIMA, PROFUNDIDADE_MAXIMA)
+    conferir_documento(_com_niveis(PROFUNDIDADE_MAXIMA))
+    conferir_terceiro(_com_niveis(PROFUNDIDADE_MAXIMA))
+    for funcao in (conferir_documento, conferir_terceiro):
+        with pytest.raises(EsquemaRecusado) as erro:
+            funcao(_com_niveis(PROFUNDIDADE_MAXIMA + 1))
+        assert erro.value.motivo == "fundo"
+        assert erro.value.onde == "/".join(["properties", "a"] * PROFUNDIDADE_MAXIMA)[:200]
+
+
+def _referencias_em_cadeia(niveis: int) -> dict[str, Any]:
+    """Raiz, ``p`` e uma cadeia de definicoes, cada uma so a referencia para a seguinte, ate um texto: com as
+    referencias seguidas, ``niveis`` niveis (a raiz e o 0); no documento, so 3."""
+    k = niveis - 3
+    defs: dict[str, Any] = {f"d{i}": {"$ref": f"#/$defs/d{i + 1}"} for i in range(k)}
+    defs[f"d{k}"] = {"type": "string"}
+    return {"type": "object", "$defs": defs, "properties": {"p": {"$ref": "#/$defs/d0"}}}
+
+
+def test_com_as_referencias_seguidas_64_niveis_passam_e_65_nao() -> None:
+    conferir_documento(_referencias_em_cadeia(PROFUNDIDADE_MAXIMA + 1))  # no documento, cabe
+    conferir_terceiro(_referencias_em_cadeia(PROFUNDIDADE_MAXIMA))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(_referencias_em_cadeia(PROFUNDIDADE_MAXIMA + 1))
+    assert erro.value.motivo == "fundo"
+    assert erro.value.onde == ("properties/p" + "/$ref" * (PROFUNDIDADE_MAXIMA - 1))[:200]
+
+
+def _definicao_de_700(chamadas: int) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "$defs": {"t": {"anyOf": [True] * 700}},
+        "properties": {f"p{i}": {"$ref": "#/$defs/t"} for i in range(chamadas)},
+    }
+
+
+def test_tres_referencias_a_uma_definicao_de_700_booleanos_passam_do_teto() -> None:
+    # Cada referencia conta a definicao de novo, booleanos tambem: raiz, e por chamada o {"$ref"}, t e 700 true.
+    conferir_documento(_definicao_de_700(3))  # no documento, 705 partes
+    assert custo_do_esquema(_definicao_de_700(2)) == 1 + 2 * (1 + 1 + 700)
+    conferir_terceiro(_definicao_de_700(2))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(_definicao_de_700(3))
+    assert (erro.value.motivo, erro.value.onde) == ("grande", "properties/p2")
+
+
+def _duas_chamadas(*campos: str) -> dict[str, Any]:
+    """Duas referencias a t (997 true) e um texto por campo: a raiz, por chamada o {"$ref"}, t e os 997 true (999),
+    e mais um por campo."""
+    return {
+        "type": "object",
+        "$defs": {"t": {"anyOf": [True] * (CUSTO_MAXIMO // 2 - 3)}},
+        "properties": {"p0": {"$ref": "#/$defs/t"}, "p1": {"$ref": "#/$defs/t"}}
+        | {c: {"type": "string"} for c in campos},
+    }
+
+
+def test_com_as_referencias_seguidas_2000_partes_passam_e_2001_nao() -> None:
+    # Mutacao grande_maior_igual do verificador ('>' por '>=' na soma de _Conta): nenhum teste aceitava exatamente
+    # 2000 partes com as referencias seguidas. No documento, so 1.003.
+    assert custo_do_esquema(_duas_chamadas("x")) == CUSTO_MAXIMO
+    conferir_documento(_duas_chamadas("x", "y"))
+    conferir_terceiro(_duas_chamadas("x"))
+    for funcao in (custo_do_esquema, conferir_terceiro):
+        with pytest.raises(EsquemaRecusado) as erro:
+            funcao(_duas_chamadas("x", "y"))
+        assert (erro.value.motivo, erro.value.onde) == ("grande", "properties/y")
+
+
+def test_definicao_nao_citada_sozinha_cabe_em_2000_partes_e_nao_em_2001() -> None:
+    # a, que ninguem cita, chama b (997 true) duas vezes: a, por chamada o {"$ref"}, b e os 997 true (999), e o que
+    # sobra em true. Contada a partir de a, como se a raiz a chamasse; da raiz, so a raiz.
+    def esquema(sobra: int) -> dict[str, Any]:
+        chamadas: list[Any] = [{"$ref": "#/$defs/b"}, {"$ref": "#/$defs/b"}]
+        return {
+            "type": "object",
+            "$defs": {"a": {"allOf": chamadas + [True] * sobra}, "b": {"anyOf": [True] * (CUSTO_MAXIMO // 2 - 3)}},
+        }
+
+    assert custo_do_esquema(esquema(2)) == 1
+    conferir_documento(esquema(2))
+    conferir_terceiro(esquema(1))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema(2))
+    assert (erro.value.motivo, erro.value.onde) == ("grande", "$defs/a/allOf/3")
+
+
+def test_booleanos_contam_como_partes_no_documento_e_com_as_referencias() -> None:
+    assert custo_do_esquema({"type": "object", "anyOf": [True, False]}) == 3
+    # A raiz, d e os booleanos: 2000 partes passam, 2001 nao, e a parte que passou e o primeiro booleano a mais.
+    conferir_documento({"type": "object", "$defs": {"d": {"anyOf": [True] * (CUSTO_MAXIMO - 2)}}})
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_documento({"type": "object", "$defs": {"d": {"anyOf": [True] * (CUSTO_MAXIMO - 1)}}})
+    assert (erro.value.motivo, erro.value.onde) == ("grande", f"$defs/d/anyOf/{CUSTO_MAXIMO - 2}")
+
+
+class _CamposContados(dict[str, Any]):
+    """Mapa de campos que conta quantos itens ja foram lidos."""
+
+    lidos = 0
+
+    def items(self) -> Any:
+        for item in super().items():
+            self.lidos += 1
+            yield item
+
+
+def test_conferir_documento_para_assim_que_passa_das_partes() -> None:
+    # Mutacao documento_sem_islice do verificador: o veredito e o mesmo, mas a conferencia lia o mapa inteiro antes
+    # de recusar. Ela le so ate a parte que passou do teto.
+    campos = _CamposContados({f"c{i}": True for i in range(100_000)})
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_documento({"type": "object", "properties": campos})
+    assert (erro.value.motivo, erro.value.onde) == ("grande", f"properties/c{CUSTO_MAXIMO - 1}")
+    assert campos.lidos == CUSTO_MAXIMO
+
+
+def test_referencia_para_definicao_booleana_vale() -> None:
+    # Mutacao definicao_booleana_recusada do verificador: true e false sao esquemas, e a entrada os acha.
+    esquema = {
+        "type": "object",
+        "$defs": {"t": True, "f": False},
+        "properties": {"a": {"$ref": "#/$defs/t"}, "b": {"$ref": "#/$defs/f"}},
+    }
+    conferir_esquema(esquema)
+    conferir_terceiro(esquema)
+    assert custo_do_esquema(esquema) == 5  # a raiz e, por campo, o {"$ref"} e a definicao
+    copia = para_conferir(esquema)
+    assert copia == esquema
+    conferir_argumentos(copia, {"a": {"qualquer": ["coisa"]}})
+    with pytest.raises(ArgumentosInvalidos):
+        conferir_argumentos(copia, {"b": 1})
+    assert json.loads(_revisar_entrada("terceiro", esquema)["ee"]) == esquema
+
+
+# --- Revisao de terceiro: definicoes que nenhuma referencia da raiz chama -----------------------------------------
+
+
+def _cadeia_solta(k: int, m: int = 59) -> dict[str, Any]:
+    """Prova cadeia_solta.py do verificador: k definicoes que ninguem cita, cada uma com m niveis de not em volta da
+    referencia para a seguinte. No documento, cada uma cabe; com as referencias seguidas, a cadeia vai a k * (m + 1)
+    niveis."""
+    defs: dict[str, Any] = {f"d{i}": _aninhar({"$ref": f"#/$defs/d{i + 1}"}, m) for i in range(k)}
+    defs[f"d{k}"] = {"type": "string"}
+    return {"type": "object", "properties": {"a": {"type": "string"}}, "$defs": defs}
+
+
+def _revisao_recusada(entrada: dict[str, Any]) -> EsquemaRecusado:
+    """A revisao de verdade (sem banco) de um terceiro: recusa com a frase e nao chega ao INSERT."""
+    from mcp_claro.cadastro import repositorio
+
+    c = _ConexaoFalsa("terceiro")
+    with pytest.raises(EsquemaRecusado) as erro:
+        asyncio.run(
+            repositorio.revisar_ferramenta(
+                cast(Any, c),
+                sistema_id=uuid.uuid4(),
+                definicao_declarada={"name": "consultar", "inputSchema": entrada},
+                nome_vitrine="consultar_x",
+                descricao="Consulta, escrito pelo ADMIN.",
+                classe="le",
+                revisado_por="admin",
+            )
+        )
+    assert c.inserido == {}
+    return erro.value
+
+
+def test_cadeia_de_definicoes_nao_citadas_e_recusada_por_fundo() -> None:
+    # Antes, a revisao aceitava: cada definicao cabia no documento, e a conta com as referencias so partia da raiz.
+    # A copia da entrada seguia as referencias de dentro delas com recursao: RecursionError na revisao (erro, nao
+    # frase) e, se a guarda da revisao faltasse, em cada chamada da entrada.
+    esquema = _cadeia_solta(20)
+    conferir_esquema(esquema)
+    conferir_documento(esquema)
+    conferir_palavras(esquema)
+    assert custo_do_esquema(esquema) == 2  # da raiz, so a raiz e o campo a
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert erro.value.motivo == "fundo"
+    assert erro.value.onde.startswith("$defs/d0/not/not/")
+    assert "fornecedor" in str(erro.value)
+    recusa = _revisao_recusada(esquema)
+    assert (recusa.motivo, recusa.onde) == (erro.value.motivo, erro.value.onde)
+    conferir_terceiro(_cadeia_solta(1))  # uma definicao so cabe: 59 nots, a referencia e o texto
+
+
+def test_definicao_nao_citada_conta_os_niveis_a_partir_do_nivel_1() -> None:
+    # Como se a raiz a chamasse: a definicao fica no nivel 1 (a raiz e o 0). Com n nots em volta da referencia para
+    # um texto, ela vai ate o nivel n + 2: 61 nots passam, 62 nao. No documento, 62 cabem (ate o nivel 63).
+    def solta(nots: int) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "$defs": {"solta": _aninhar({"$ref": "#/$defs/fim"}, nots), "fim": {"type": "string"}},
+        }
+
+    conferir_documento(solta(PROFUNDIDADE_MAXIMA - 2))
+    conferir_terceiro(solta(PROFUNDIDADE_MAXIMA - 3))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(solta(PROFUNDIDADE_MAXIMA - 2))
+    assert erro.value.motivo == "fundo"
+    assert erro.value.onde == ("$defs/solta" + "/not" * (PROFUNDIDADE_MAXIMA - 2) + "/$ref")[:200]
+
+
+def test_definicao_dentro_de_uma_parte_tambem_conta() -> None:
+    # Uma definicao em qualquer lugar (aqui, dentro de um campo) tambem conta, como se a raiz a chamasse. Nenhuma
+    # referencia a acha (so as da raiz sao achadas), mas a copia da entrada anda por ela e segue as referencias dela.
+    a = _aninhar({"type": "string"}, 40)
+
+    def esquema(nots: int) -> dict[str, Any]:
+        n = _aninhar({"$ref": "#/$defs/a"}, nots)
+        return {"type": "object", "$defs": {"a": a}, "properties": {"p": {"type": "string", "$defs": {"n": n}}}}
+
+    conferir_terceiro(esquema(20))  # n no nivel 1, a referencia no 21, a do 22 ao 62
+    conferir_documento(esquema(30))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema(30))
+    assert erro.value.motivo == "fundo"
+    assert erro.value.onde.startswith("properties/p/$defs/n/not/")
+
+
+@pytest.mark.parametrize("chave", ["$defs", "definitions"])
+@pytest.mark.parametrize(
+    ("definicoes", "onde"),
+    [
+        ({"a": {"$ref": "#/$defs/a"}}, "$defs/a/$ref"),
+        # Prova ciclo_solto.py do verificador.
+        ({"a": {"$ref": "#/$defs/b"}, "b": {"not": {"$ref": "#/$defs/a"}}}, "$defs/a/$ref/not/$ref"),
+        # Arvore e lista encadeada: esquemas recursivos que nenhuma referencia da raiz chama.
+        (
+            {"no": {"type": "object", "properties": {"filhos": {"type": "array", "items": {"$ref": "#/$defs/no"}}}}},
+            "$defs/no/properties/filhos/items/$ref",
+        ),
+        (
+            {
+                "lista": {
+                    "type": "object",
+                    "properties": {"proximo": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/lista"}]}},
+                }
+            },
+            "$defs/lista/properties/proximo/anyOf/1/$ref",
+        ),
+    ],
+)
+def test_ciclo_e_esquema_recursivo_entre_definicoes_nao_citadas_sao_recusados(
+    chave: str, definicoes: dict[str, Any], onde: str
+) -> None:
+    esquema = json.loads(
+        json.dumps({"type": "object", "properties": {"a": {"type": "string"}}, "$defs": definicoes}).replace(
+            "$defs", chave
+        )
+    )
+    conferir_esquema(esquema)
+    conferir_palavras(esquema)
+    assert custo_do_esquema(esquema) == 2  # da raiz, nada disso e visitado
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.onde) == ("ciclo", onde.replace("$defs", chave))
+    recusa = _revisao_recusada(esquema)
+    assert (recusa.motivo, recusa.onde) == (erro.value.motivo, erro.value.onde)
+
+
+# --- Revisao de terceiro: largura (escolhas e bytes), a segunda barreira ------------------------------------------
+
+
+@pytest.mark.parametrize("lugar", LUGARES)
+def test_enum_de_terceiro_ate_1000_valores(lugar: str) -> None:
+    conferir_terceiro(_em(lugar, {"enum": list(range(ESCOLHAS_MAXIMAS))}))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(_em(lugar, {"enum": list(range(ESCOLHAS_MAXIMAS + 1))}))
+    assert (erro.value.motivo, erro.value.onde, erro.value.palavra) == ("escolhas", lugar, None)
+    assert f"mais de {ESCOLHAS_MAXIMAS} valores" in str(erro.value)
+    assert "fornecedor" in str(erro.value)
+
+
+def test_dados_grandes_dentro_de_enum_e_const_nao_sao_escolhas() -> None:
+    # So os valores do enum contam: um valor que e uma lista grande e um const grande sao dados (contam nos bytes).
+    conferir_terceiro(
+        {
+            "type": "object",
+            "properties": {
+                "a": {"enum": [list(range(5000)), "b"]},
+                "b": {"const": list(range(5000))},
+                "c": {"const": {"enum": list(range(5000))}},
+                "enum": {"type": "string"},
+            },
+        }
+    )
+
+
+def _com_bytes(tamanho: int, letra: str) -> dict[str, Any]:
+    """Um esquema com exatamente ``tamanho`` bytes em JSON compacto e UTF-8: um const de texto com ``letra`` (de 1 a 3
+    bytes) e o que faltar em "x"."""
+    vazio = {"type": "object", "properties": {"a": {"const": ""}}}
+    falta = tamanho - len(json.dumps(vazio, separators=(",", ":")).encode())
+    largura = len(letra.encode())
+    esquema = {"type": "object", "properties": {"a": {"const": letra * (falta // largura) + "x" * (falta % largura)}}}
+    assert len(json.dumps(esquema, ensure_ascii=False, separators=(",", ":")).encode()) == tamanho
+    return esquema
+
+
+@pytest.mark.parametrize("letra", ["x", "ç", "€"])
+def test_esquema_de_terceiro_ate_256_kib(letra: str) -> None:
+    # Em bytes UTF-8 do JSON compacto: com letras de 2 e 3 bytes, contar letras (ou trocar por \\u, ou por espacos)
+    # erraria o limite.
+    conferir_terceiro(_com_bytes(BYTES_MAXIMOS, letra))
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(_com_bytes(BYTES_MAXIMOS + 1, letra))
+    assert (erro.value.motivo, erro.value.onde) == ("pesado", "(raiz)")
+    assert "256 KiB" in str(erro.value)
+    assert "fornecedor" in str(erro.value)
+
+
+def test_metade_de_um_par_unicode_conta_3_bytes_sem_erro() -> None:
+    # Defesa (mutacao bytes_utf8_estrito do verificador): o parser de JSON do kit recusa um "\ud800" sozinho, mas, se
+    # chegasse, a conta de bytes nao pode virar erro interno (UnicodeEncodeError). Conta 3 bytes, como os outros
+    # caracteres de 3 bytes.
+    esquema = json.loads('{"type":"object","properties":{"a":{"const":"\\ud800"}}}')
+    conferir_terceiro(esquema)
+    assert modulo._bytes(esquema) == len(json.dumps(esquema, separators=(",", ":"))) - len("\\ud800") + 3
+
+
+def test_bytes_contados_depois_da_limpeza_e_escolhas_antes_dos_bytes() -> None:
+    # O texto do fornecedor sai antes da conta: uma descricao de 300 KB nao pesa. Um const de 300 KB pesa.
+    declarada = {"type": "object", "description": "x" * 300_000, "properties": {"a": {"type": "string"}}}
+    assert json.loads(_revisar_entrada("terceiro", declarada)["ee"]) == {
+        "type": "object",
+        "properties": {"a": {"type": "string"}},
+    }
+    pesado = {"type": "object", "properties": {"a": {"const": "x" * 300_000}}}
+    assert _revisao_recusada(pesado).motivo == "pesado"
+    # Um enum enorme passa dos dois tetos: a recusa diz onde ele esta.
+    recusa = _revisao_recusada({"type": "object", "properties": {"a": {"enum": list(range(200_000))}}})
+    assert (recusa.motivo, recusa.onde) == ("escolhas", "properties/a")
+    conferir_largura({"type": "object", "properties": {"a": {"enum": list(range(ESCOLHAS_MAXIMAS))}}})
+
+
+# --- Sem recursao: nenhum percurso estoura a pilha, e o estouro de uma biblioteca vira recusa ----------------------
+
+
+def test_nenhum_percurso_usa_recursao() -> None:
+    # Um documento de 5000 niveis, uma cadeia de 3000 referencias e a cadeia solta do verificador (30 definicoes, 1800
+    # niveis seguindo as referencias), com so 100 quadros livres na pilha: com recursao, cada percurso daria
+    # RecursionError. A revisao recusa com a frase.
+    fundo = _com_niveis(5000)
+    cadeia = _referencias_em_cadeia(3000)
+    solta = _cadeia_solta(30)
+
+    def tudo() -> None:
+        assert limpar_textos(fundo) == fundo
+        assert limpar_textos(fundo, descricoes_de_campo=True) == fundo
+        assert com_descricoes(fundo, {"a": "Escrito pelo ADMIN."})["properties"]["a"]["description"]
+        assert para_conferir(fundo) == fundo
+        assert para_conferir(cadeia) == cadeia
+        assert para_conferir(solta) == solta
+        conferir_palavras(fundo)
+        conferir_palavras(cadeia)
+        conferir_largura(fundo)
+        for esquema, motivo in ((fundo, "fundo"), (cadeia, "grande"), (solta, "fundo")):
+            with pytest.raises(EsquemaRecusado) as erro:
+                conferir_terceiro(esquema)
+            assert erro.value.motivo == motivo  # a cadeia tem 3000 definicoes: passa das partes antes
+            with pytest.raises(EsquemaRecusado) as erro:
+                conferir_referencias(esquema)
+            assert erro.value.motivo == "fundo"
+        with pytest.raises(EsquemaRecusado):
+            custo_do_esquema(cadeia)
+
+    _na_pilha(sys.getrecursionlimit() - 100, tudo)
+
+
+_ESTOUROS = [
+    limpar_textos,
+    conferir_documento,
+    conferir_largura,
+    conferir_palavras,
+    custo_do_esquema,
+    conferir_referencias,
+    conferir_terceiro,
+    para_conferir,
+]
+
+
+@pytest.mark.parametrize("funcao", _ESTOUROS, ids=[f.__name__ for f in _ESTOUROS])
+def test_estouro_da_pilha_vira_recusa_fundo(funcao: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def estoura(*_args: Any, **_kwargs: Any) -> Any:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(modulo, "_filhos", estoura)
+    monkeypatch.setattr(modulo, "_copia", estoura)
+    with pytest.raises(EsquemaRecusado) as erro:
+        funcao({"type": "object", "properties": {"a": {"not": {"type": "string"}}}})
+    assert (erro.value.motivo, erro.value.onde) == ("fundo", "(raiz)")
+    assert isinstance(erro.value.__cause__, RecursionError)
+    assert "na raiz do esquema" in str(erro.value)
+
+
+def test_dado_fundo_demais_para_o_json_vira_recusa() -> None:
+    # Um const com 200 mil listas, uma dentro da outra: o json da biblioteca estoura a pilha (ou, se aguentar, o
+    # esquema passa dos bytes). Nunca erro interno na revisao.
+    dado: Any = []
+    for _ in range(200_000):
+        dado = [dado]
+    esquema = {"type": "object", "properties": {"a": {"const": dado}}}
+    try:
+        json.dumps(dado)
+        esperado = "pesado"
+    except RecursionError:
+        esperado = "fundo"
+    assert _revisao_recusada(esquema).motivo == esperado
+
+
 # --- A copia com que a entrada confere os argumentos de um terceiro ----------------------------------------------
 
 
@@ -1074,6 +1508,28 @@ def _nao_cresce(copia: Any, esquema: Any) -> bool:
     """A copia tem no maximo as partes e os niveis do esquema (cada um, nao a dupla em ordem)."""
     (partes_copia, niveis_copia), (partes, niveis) = _partes_e_niveis(copia), _partes_e_niveis(esquema)
     return partes_copia <= partes and niveis_copia <= niveis
+
+
+@pytest.mark.parametrize("primeiro", ["n", "o"])
+def test_copia_lembra_a_regra_de_uma_definicao_usada_duas_vezes(primeiro: str) -> None:
+    # A regra fica dois niveis dentro da definicao, e duas referencias a chamam: a segunda pergunta (venha ela do not
+    # ou do oneOf) le a memoria da primeira. Se a memoria guardasse "sem regra" para as partes de cima, o oneOf
+    # ficaria oneOf na copia, e "b" (so o segundo ramo, no esquema) passaria nos dois ramos afrouxados: recusado.
+    campos = {
+        "n": {"not": {"$ref": "#/$defs/d"}},
+        "o": {"oneOf": [{"$ref": "#/$defs/d"}, {"type": "string", "maxLength": 1}]},
+    }
+    esquema = {
+        "type": "object",
+        "$defs": {"d": {"allOf": [{"allOf": [{"type": "string", "pattern": "^a"}]}]}},
+        "properties": {nome: campos[nome] for nome in sorted(campos, key=lambda nome: nome != primeiro)},
+    }
+    conferir_terceiro(esquema)
+    copia = para_conferir(esquema)
+    assert "not" not in copia["properties"]["n"]
+    assert copia["properties"]["o"] == {"anyOf": [{"$ref": "#/$defs/d"}, {"type": "string", "maxLength": 1}]}
+    conferir_argumentos(esquema, {"o": "b"})
+    conferir_argumentos(copia, {"o": "b"})
 
 
 def test_copia_troca_no_mesmo_lugar_ou_tira() -> None:
@@ -1259,6 +1715,146 @@ def test_a_copia_aceita_tudo_o_que_o_esquema_aceita(esquema: dict[str, Any], dad
     for pedido in [*pedidos, {}]:
         if _veredito(esquema, pedido) is None:
             assert _veredito(copia, pedido) is None, pedido
+
+
+# Redes de definicoes para a prova da revisao: ate 5 definicoes, cada uma com ate 64 envoltorios em volta de uma folha
+# ou de uma referencia para outra (ou para ela mesma), citadas pela raiz ou nao. Cada envoltorio poe um nivel em volta
+# do que tem dentro e soma as partes dele (com ``largura`` booleanos ao lado, no ultimo).
+_JEITOS = ("not", "allOf", "anyOf", "items", "properties", "oneOf", "if", "regra", "contains", "largo")
+_FOLHAS_DA_REDE: list[Any] = [
+    {"type": "string"},
+    {"type": "string", "pattern": "^a"},
+    {"type": "array", "uniqueItems": True},
+    True,
+    False,
+]
+
+
+def _envolver(no: Any, jeito: str, largura: int) -> tuple[Any, int]:
+    """(o envoltorio, quantas partes ele soma alem de ``no``)."""
+    envoltorios: dict[str, tuple[Any, int]] = {
+        "not": ({"not": no}, 1),
+        "allOf": ({"allOf": [no]}, 1),
+        "anyOf": ({"anyOf": [no, True]}, 2),
+        "items": ({"type": "array", "items": no}, 1),
+        "properties": ({"type": "object", "properties": {"a": no}}, 1),
+        "oneOf": ({"oneOf": [no, {"type": "null"}]}, 2),
+        "if": ({"if": no, "then": {"type": "integer"}}, 2),
+        "regra": ({"type": "string", "pattern": "^a", "not": no}, 1),
+        "contains": ({"type": "array", "contains": no, "maxContains": 1}, 1),
+        "largo": ({"anyOf": [no, *([True] * largura)]}, 1 + largura),
+    }
+    return envoltorios[jeito]
+
+
+def _altura(envoltorios: list[tuple[str, int]], dentro: int) -> int:
+    """Niveis dos envoltorios em volta de algo com ``dentro`` niveis: cada um poe um; o then do if e o ramo null do
+    oneOf, que ficam ao lado, tem um nivel (contam quando dentro e um booleano)."""
+    altura = dentro
+    for jeito, _ in envoltorios:
+        altura = 1 + max(altura, 1 if jeito in ("if", "oneOf") else 0)
+    return altura
+
+
+@dataclass
+class _Rede:
+    esquema: dict[str, Any]
+    aceita: bool
+
+
+@st.composite
+def _redes(draw: Any) -> _Rede:
+    k = draw(st.integers(1, 5))
+    formas: list[tuple[list[tuple[str, int]], int | None, int]] = []
+    defs: dict[str, Any] = {}
+    for i in range(k):
+        quantos = draw(st.integers(0, PROFUNDIDADE_MAXIMA))
+        envoltorios = draw(
+            st.lists(st.tuples(st.sampled_from(_JEITOS), st.integers(0, 80)), min_size=quantos, max_size=quantos)
+        )
+        alvo = draw(st.none() | st.integers(0, k - 1))
+        folha = draw(st.integers(0, len(_FOLHAS_DA_REDE) - 1))
+        no: Any = {"$ref": f"#/$defs/d{alvo}"} if alvo is not None else copy.deepcopy(_FOLHAS_DA_REDE[folha])
+        for jeito, largura in envoltorios:
+            no, _ = _envolver(no, jeito, largura)
+        defs[f"d{i}"] = no
+        formas.append((envoltorios, alvo, folha))
+    citadas = draw(st.lists(st.integers(0, k - 1), max_size=12))
+    esquema = {
+        "type": "object",
+        "properties": {f"p{j}": {"$ref": f"#/$defs/d{c}"} for j, c in enumerate(citadas)},
+        "$defs": defs,
+    }
+    return _Rede(esquema, _a_revisao_aceitaria(formas, citadas))
+
+
+def _a_revisao_aceitaria(formas: list[tuple[list[tuple[str, int]], int | None, int]], citadas: list[int]) -> bool:
+    """O veredito esperado, calculado da forma da rede, sem percorrer o esquema: nenhum ciclo; no documento, cada
+    definicao ate o nivel 63 (ela fica no 1) e ate ``CUSTO_MAXIMO`` partes; com as referencias seguidas, a partir da
+    raiz e de cada definicao (no nivel 1), ate o nivel 63 e ``CUSTO_MAXIMO`` partes."""
+    altura_doc: list[int] = []  # niveis da definicao, ela inclusive, no documento
+    partes_doc: list[int] = []
+    for envoltorios, alvo, folha in formas:
+        altura_folha = 1 if alvo is not None or isinstance(_FOLHAS_DA_REDE[folha], dict) else 0
+        altura_doc.append(_altura(envoltorios, altura_folha))
+        partes_doc.append(sum(_envolver(None, j, w)[1] for j, w in envoltorios) + 1)
+    seguida: list[tuple[int, int] | None] = []  # (altura, partes) com as referencias seguidas; None: ciclo
+    for i in range(len(formas)):
+        caminho = [i]
+        while formas[caminho[-1]][1] is not None and len(caminho) <= len(formas):
+            caminho.append(cast(int, formas[caminho[-1]][1]))
+        if len(caminho) > len(formas):
+            seguida.append(None)
+            continue
+        altura, partes = altura_doc[caminho[-1]], partes_doc[caminho[-1]]
+        for d in reversed(caminho[:-1]):
+            # Os envoltorios de d em volta do {"$ref"} (ja nas partes do documento) e da definicao que ele acha.
+            altura, partes = _altura(formas[d][0], 1 + altura), partes_doc[d] + partes
+        seguida.append((altura, partes))
+    if any(s is None for s in seguida):
+        return False
+    contas = [cast(tuple[int, int], s) for s in seguida]
+    if any(a > PROFUNDIDADE_MAXIMA - 1 for a in altura_doc) or any(a > PROFUNDIDADE_MAXIMA - 1 for a, _ in contas):
+        return False
+    if 1 + len(citadas) + sum(partes_doc) > CUSTO_MAXIMO or any(p > CUSTO_MAXIMO for _, p in contas):
+        return False
+    # Da raiz: ela (nivel 0), o campo (1) e a definicao citada (do 2 em diante).
+    altura_raiz = max((1 + contas[c][0] for c in citadas), default=0)
+    return altura_raiz <= PROFUNDIDADE_MAXIMA - 1 and 1 + sum(1 + contas[c][1] for c in citadas) <= CUSTO_MAXIMO
+
+
+@settings(max_examples=300, deadline=None, database=None, suppress_health_check=[HealthCheck.too_slow])
+@given(_redes(), st.data())
+def test_a_revisao_aceita_so_redes_de_definicoes_nos_tetos_e_a_copia_sempre_confere(rede: _Rede, dados: Any) -> None:
+    # Prova da guarda da revisao (conferir_esquema(para_conferir(esquema)) em repositorio.revisar_ferramenta, mutacao
+    # revisao_sem_conferir_a_copia): com as definicoes contadas uma a uma, a guarda nao recusa mais nada. Para todo
+    # esquema que a revisao aceita, a copia e um esquema valido, nao cresce, e a entrada a confere com a pilha
+    # quase cheia; a guarda fica como defesa. O veredito e o calculado da forma da rede (ciclo, niveis e partes, da
+    # raiz e de cada definicao), e a copia termina tambem quando a revisao recusa (sem recursao). Toda rede e um
+    # esquema valido (check_schema, que custa caro, so roda nas aceitas, como na revisao).
+    esquema = rede.esquema
+    copia = para_conferir(esquema)
+    if not rede.aceita:
+        with pytest.raises(EsquemaRecusado) as erro:
+            conferir_terceiro(esquema)
+        assert erro.value.motivo in ("fundo", "grande", "ciclo")
+        return
+    conferir_esquema(esquema)
+    conferir_terceiro(esquema)
+    assert _nao_cresce(copia, esquema)
+    assert custo_do_esquema(copia) <= custo_do_esquema(esquema)
+    pedidos = dados.draw(
+        st.lists(st.dictionaries(st.sampled_from([*esquema["properties"], "outro"]), VALORES_COPIA), max_size=2)
+    )
+
+    def conferir() -> None:
+        conferir_esquema(copia)  # a guarda da revisao
+        modulo_argumentos._validador.cache_clear()  # um esquema novo: check_schema roda de novo na entrada
+        for pedido in [*pedidos, {}]:
+            if _veredito(esquema, pedido) is None:
+                assert _veredito(copia, pedido) is None, pedido
+
+    _na_pilha(160, conferir)
 
 
 # Regras e listas que travavam a conferencia (contornos do verificador): exponenciais, compostas, olhar adiante

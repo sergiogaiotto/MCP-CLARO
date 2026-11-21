@@ -18,7 +18,9 @@ eles: prova, na imagem de verdade (seccomp padrao do Docker, sem capacidades), q
 
 O banco usa a imagem oficial do PostgreSQL com os scripts do repositorio montados, sem o pgBackRest (que so muda o
 backup), para a prova nao depender do repositorio apt do PGDG. A imagem do gateway e construida aqui, com uma
-etiqueta so desta rodada, salvo se ``MCP_CLARO_IMAGEM`` apontar uma imagem pronta (feita do mesmo codigo).
+etiqueta so desta rodada, salvo se ``MCP_CLARO_IMAGEM`` apontar uma imagem pronta (feita do mesmo codigo). Sem rede
+para construir a imagem, a prova e pulada numa maquina comum, mas falha no CI (variavel ``CI`` ligada), com o fim do
+log: no CI, ela nunca some em silencio.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -190,6 +192,17 @@ anyio.run(principal)
 """
 
 
+def _no_ci() -> bool:
+    return os.environ.get("CI", "").strip().lower() not in {"", "0", "false", "no"}
+
+
+def _sem_rede_para_construir(log: str) -> NoReturn:
+    """A imagem nao construiu por falta de rede: pula a prova fora do CI; no CI, falha com o fim do log."""
+    if _no_ci():
+        pytest.fail(f"a imagem do gateway nao construiu no CI (sem rede para as dependencias):\n{log[-4000:]}")
+    pytest.skip("a imagem do gateway nao constroi aqui (sem rede para as dependencias)")
+
+
 class Projeto:
     def __init__(self, raiz: Path, nome: str, imagem: str) -> None:
         self.raiz = raiz
@@ -262,7 +275,7 @@ def projeto() -> Iterator[Projeto]:
             if construcao.returncode != 0:
                 texto = construcao.stdout + construcao.stderr
                 if any(sinal in texto for sinal in SEM_REDE):
-                    pytest.skip("a imagem do gateway nao constroi aqui (sem rede para as dependencias)")
+                    _sem_rede_para_construir(texto)
                 raise AssertionError(f"a imagem nao construiu:\n{texto[-4000:]}")
         p.compose("up", "-d", "--wait", "despachante", "visitas", prazo=900)
         yield p
@@ -376,3 +389,26 @@ def test_um_filho_tomado_nao_alcanca_o_pai_nem_os_outros_filhos(projeto: Projeto
         assert vistos["dominio"] is True, vistos  # o seccomp padrao do Docker deixa o filho entrar no dominio
     if vistos["landlock"] >= 6:
         assert vistos["sinais"] == ["EPERM"], vistos  # nem derrubar o pai ou um irmao
+
+
+@pytest.mark.parametrize("ci", ["true", "1", "yes"])
+def test_sem_rede_para_construir_a_imagem_falha_no_ci(monkeypatch: pytest.MonkeyPatch, ci: str) -> None:
+    monkeypatch.setenv("CI", ci)
+    log = "passo 1\n" * 1000 + "error: Could not resolve host: pypi.org\n"
+    # Pegar tambem o pulo: se a prova so pulasse, este teste tambem pularia em silencio.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as falha:
+        _sem_rede_para_construir(log)
+    assert falha.type is pytest.fail.Exception
+    assert "nao construiu no CI" in str(falha.value)
+    assert str(falha.value).endswith("Could not resolve host: pypi.org\n")  # o fim do log vai junto
+    assert len(str(falha.value)) < 4200
+
+
+@pytest.mark.parametrize("ci", [None, "", "false", "0"])
+def test_sem_rede_para_construir_a_imagem_pula_fora_do_ci(monkeypatch: pytest.MonkeyPatch, ci: str | None) -> None:
+    if ci is None:
+        monkeypatch.delenv("CI", raising=False)
+    else:
+        monkeypatch.setenv("CI", ci)
+    with pytest.raises(pytest.skip.Exception, match="sem rede para as dependencias"):
+        _sem_rede_para_construir("Could not resolve host")

@@ -17,7 +17,10 @@ filhos ja iniciados e sem dado nenhum (``PRONTOS``), cada um para uma chamada so
 - devolve o status e os bytes que o filho escreveu, sem ler nem conferir (o despachante confere o contrato);
 - erro inesperado do filho (saiu sem resposta, resposta fora do formato, prazo da sala esgotado): 500, que o
   despachante le como duvida;
-- se o despachante desiste da conexao, o filho daquela chamada e morto na hora.
+- se o despachante desiste da conexao, o filho daquela chamada e morto na hora;
+- cria todos os filhos numa thread so (``CRIADORA``), aberta em ``Sala.ligada()`` e fechada no fim: o
+  ``PR_SET_PDEATHSIG`` do filho vale pela thread que o criou, nao pelo processo, e um filho criado numa thread do
+  anyio morreria no meio da chamada quando o anyio aposenta a thread ociosa.
 
 Logs so com a rota, o status HTTP, o desfecho do filho e a duracao.
 """
@@ -30,6 +33,7 @@ import multiprocessing
 import os
 import time
 from collections.abc import AsyncIterator, Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection
@@ -56,6 +60,7 @@ MAX_CHAMADAS: Final = 32  # chamadas ao mesmo tempo, cada uma no seu processo
 TETO_CHAMADA: Final = 660.0  # segundos: o maior prazo do contrato (600) com folga; nenhum filho vive mais que isso
 TETO_RESPOSTA: Final = 3 + sala_contrato.TETO_SALTO  # status e corpo que o filho escreve
 TETO_ESPERA_FIM: Final = 5.0
+CRIADORA: Final = "mcp-claro-visitas-criadora"  # nome da thread que cria os filhos
 _PEDACO: Final = 1024 * 1024
 _JSON: Final = "application/json"
 _ERRO: Final = b'{"erro":"a sala de visitas nao atendeu"}'
@@ -194,6 +199,7 @@ class Sala:
         self._vagas: anyio.Semaphore | None = None
         self._teto_chamada = teto_chamada
         self._tarefas: anyio.abc.TaskGroup | None = None
+        self._criadora: ThreadPoolExecutor | None = None
         self._repondo = False
         self._log = logger("mcp_claro.visitas")
 
@@ -215,13 +221,29 @@ class Sala:
             escritor_do_filho.close()
         return _Filho(processo, pedidos, respostas)
 
-    async def _pegar(self) -> _Filho:
+    async def _novo(self, destino: list[_Filho] | collections.deque[_Filho]) -> None:
+        """Inicia um filho na thread criadora e o poe em ``destino`` (quem o encerra no fim).
+
+        So na criadora: ``PR_SET_PDEATHSIG`` mata o filho quando morre a thread que o criou. Uma thread do anyio
+        so espera o fim do ``start`` (rapido: o ``spawn`` carrega o filho depois, sozinho). Sem janela de cancelamento
+        entre o inicio e o ``destino``: nenhum filho fica sem dono.
+        """
+        criadora = self._criadora
+        if criadora is None:
+            raise RuntimeError("a sala de visitas so inicia filhos ligada (Sala.ligada)")
+        with anyio.CancelScope(shield=True):
+            destino.append(await anyio.to_thread.run_sync(criadora.submit(self._iniciar).result))
+
+    async def _pegar(self, filhos: list[_Filho]) -> None:
+        """Poe em ``filhos`` um filho pronto que ainda vive ou, sem nenhum, um novo."""
         while self._prontos:
             pronto = self._prontos.popleft()
             if pronto.processo.is_alive():
-                return pronto
-            await anyio.to_thread.run_sync(pronto.encerrar)
-        return await anyio.to_thread.run_sync(self._iniciar)
+                filhos.append(pronto)
+                return
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(pronto.encerrar)
+        await self._novo(filhos)
 
     async def repor(self) -> None:
         """Completa os filhos prontos. Falha ao iniciar nao derruba a sala: a chamada inicia o seu."""
@@ -230,7 +252,7 @@ class Sala:
         self._repondo = True
         try:
             while len(self._prontos) < self._quantos_prontos:
-                self._prontos.append(await anyio.to_thread.run_sync(self._iniciar))
+                await self._novo(self._prontos)
         except Exception as erro:  # noqa: BLE001 - so o nome do erro vai ao log
             self._log.warning("filho_pronto_nao_iniciou", erro=type(erro).__name__)
         finally:
@@ -242,27 +264,37 @@ class Sala:
 
     @asynccontextmanager
     async def ligada(self) -> AsyncIterator[None]:
+        """A sala no ar: a thread criadora, as vagas e a reposicao dos prontos. No fim, mata os prontos e fecha a
+        criadora (com ela, morre qualquer filho ja isolado que ainda viva, pelo ``PR_SET_PDEATHSIG``)."""
         self._vagas = anyio.Semaphore(self._max_chamadas)
-        async with anyio.create_task_group() as tarefas:
-            self._tarefas = tarefas
-            self.pedir_reposicao()
-            try:
-                yield
-            finally:
-                self._tarefas = None
-                tarefas.cancel_scope.cancel()
-                with anyio.CancelScope(shield=True):
-                    while self._prontos:
-                        await anyio.to_thread.run_sync(self._prontos.popleft().encerrar)
+        self._criadora = ThreadPoolExecutor(max_workers=1, thread_name_prefix=CRIADORA)
+        try:
+            async with anyio.create_task_group() as tarefas:
+                self._tarefas = tarefas
+                self.pedir_reposicao()
+                try:
+                    yield
+                finally:
+                    self._tarefas = None
+                    tarefas.cancel_scope.cancel()
+        finally:
+            # Depois do grupo: a reposicao ja terminou e nao poe mais nenhum pronto.
+            with anyio.CancelScope(shield=True):
+                while self._prontos:
+                    await anyio.to_thread.run_sync(self._prontos.popleft().encerrar)
+                criadora, self._criadora = self._criadora, None
+                if criadora is not None:
+                    await anyio.to_thread.run_sync(criadora.shutdown)
 
     async def atender(self, rota: str, corpo: bytes) -> Atendimento:
         """Um filho por chamada. O corpo devolvido e o que o filho escreveu, sem leitura."""
-        if self._vagas is None:
-            self._vagas = anyio.Semaphore(self._max_chamadas)
+        if self._vagas is None or self._criadora is None:
+            raise RuntimeError("a sala de visitas so atende ligada (Sala.ligada)")
         async with self._vagas:
-            filhos = [await self._pegar()]
-            self.pedir_reposicao()
+            filhos: list[_Filho] = []
             try:
+                await self._pegar(filhos)
+                self.pedir_reposicao()
                 with anyio.fail_after(self._teto_chamada):
                     mensagem = await self._entregar_e_receber(filhos, rota, corpo)
             except _NaoIsolou:
@@ -290,7 +322,7 @@ class Sala:
         """
         for tentativa in range(2):
             if tentativa:
-                filhos.append(await anyio.to_thread.run_sync(self._iniciar))
+                await self._novo(filhos)
             atual = filhos[-1]
             if not await atual.esperar_isolamento():
                 continue

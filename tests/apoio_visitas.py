@@ -12,10 +12,16 @@ Os alvos ficam aqui, num modulo importavel, porque o filho e iniciado por ``spaw
   (sem rede). Num pedido que pede para espiar, ele faz o papel de um filho tomado por um terceiro: ja isolado,
   procura irmaos recem-iniciados e tenta abrir os canos e a memoria deles, e a memoria do pai.
 - ``nao_se_isola`` e ``nao_se_isola_na_primeira``: filhos que morrem antes de avisar que se isolaram.
+- ``atende_devagar``: o ``filho.principal`` de verdade com o ``atender`` de teste; ``{"dormir": s}`` grava
+  ``<pid>.dormindo`` (o filho ja se isolou e recebeu o pedido) e demora ``s`` segundos para responder.
+- ``responde_cru``: com ``functools.partial``, escreve no cano da resposta exatamente os bytes dados.
+- ``escreve_depois_de_isolar``: depois de ``filho._isolar()``, escreve nos descritores 1 e 2 e devolve para onde
+  apontam 0, 1 e 2 e o que sobrou do cano do rastreador de recursos do ``multiprocessing``.
 """
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import errno
 import ipaddress
@@ -25,6 +31,7 @@ import select
 import sys
 import time
 from dataclasses import dataclass
+from multiprocessing import resource_tracker
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +44,9 @@ from mcp_claro.ligacao import sala_contrato
 from mcp_claro.visitas import filho
 
 ESPIAO = "MCP_CLARO_TESTE_ESPIAO_VISITAS"
+# Modulo posto em sys.modules so no processo de teste (o pai): um filho por fork o herdaria; por spawn, nunca.
+# Os modulos do pytest nao servem para isso: o spawn roda de novo o script de partida do pai (``bin/pytest``).
+SO_DO_PAI = "mcp_claro_teste_modulo_so_do_pai"
 JANELA = 1.0  # segundos que ``lento_antes_de_isolar`` espera antes de se isolar
 PEDIDO_DE_ESPIAR = b'{"espiar":true}'
 
@@ -53,7 +63,7 @@ def espiao(pedidos: Any, respostas: Any, ambiente: str, liberar_locais: bool, te
         dados = ler(fd, teto)
         if fd == pedidos.fileno():
             (_pasta() / f"{pid}.pedido").write_bytes(dados or b"")
-            so_do_pai = sorted(m for m in ("pytest", "_pytest", "tests.unidade.test_visitas_app") if m in sys.modules)
+            so_do_pai = sorted(m for m in (SO_DO_PAI, "tests.unidade.test_visitas_app") if m in sys.modules)
             (_pasta() / f"{pid}.processo").write_text(
                 json.dumps(
                     {
@@ -108,6 +118,44 @@ def responde_status_invalido(pedidos: Any, respostas: Any, *_: Any) -> None:
     filho.escrever_tudo(respostas.fileno(), b"abc{}")
 
 
+def responde_cru(saida: bytes, pedidos: Any, respostas: Any, *_: Any) -> None:
+    """Escreve ``saida`` como a resposta inteira (use com ``functools.partial``)."""
+    filho.avisar_pronto(respostas)
+    filho.ler_ate_o_fim(pedidos.fileno(), 1 << 30)
+    filho.escrever_tudo(respostas.fileno(), saida)
+
+
+MARCA_NA_SAIDA = b"marca-do-filho-isolado-"
+
+
+def _para_onde(fd: int) -> str:
+    try:
+        estado = os.fstat(fd)
+    except OSError as erro:
+        return errno.errorcode.get(erro.errno or 0, str(erro.errno))
+    return "devnull" if os.path.samestat(estado, os.stat(os.devnull)) else "outro"
+
+
+def escreve_depois_de_isolar(pedidos: Any, respostas: Any, *_: Any) -> None:
+    """Um filho isolado que escreve no stdout e no stderr herdados do pai (como o texto de um terceiro faria)."""
+    rastreador = resource_tracker._resource_tracker._fd
+    filho._isolar()
+    for fd in (1, 2):
+        with contextlib.suppress(OSError):
+            os.write(fd, MARCA_NA_SAIDA + str(fd).encode() + b"\n")
+    print(MARCA_NA_SAIDA.decode() + "print", flush=True)
+    print(MARCA_NA_SAIDA.decode() + "stderr", file=sys.stderr, flush=True)
+    vistos = {
+        "descritores": {str(fd): _para_onde(fd) for fd in (0, 1, 2)},
+        "rastreador_herdado": rastreador is not None,
+        "rastreador_fechado": rastreador is None or _para_onde(rastreador) == "EBADF",
+        "rastreador_agora": resource_tracker._resource_tracker._fd,
+    }
+    filho.avisar_pronto(respostas)
+    filho.ler_ate_o_fim(pedidos.fileno(), 1 << 30)
+    filho.escrever_tudo(respostas.fileno(), b"200" + json.dumps(vistos).encode())
+
+
 def responde_bytes_crus(pedidos: Any, respostas: Any, *_: Any) -> None:
     filho.avisar_pronto(respostas)
     filho.ler_ate_o_fim(pedidos.fileno(), 1 << 30)
@@ -145,26 +193,51 @@ def nao_se_isola_na_primeira(pedidos: Any, respostas: Any, *args: Any) -> None:
 
 
 def lento_antes_de_isolar(pedidos: Any, respostas: Any, ambiente: str, liberar_locais: bool, teto_pedido: int) -> None:
+    """Demora ``JANELA`` antes de rodar o ``filho.principal`` de verdade, e anota, em ``<pid>.ordem``, cada passo
+    dele: o isolamento e o aviso ao pai (com ``filho.depuravel()`` no momento do aviso)."""
     pid = os.getpid()
     time.sleep(JANELA)
     chegou = bool(select.select([pedidos.fileno()], [], [], 0)[0])
     (_pasta() / f"{pid}.antes").write_text(json.dumps({"pedido_antes_de_isolar": chegou}), encoding="utf-8")
-    isolar = filho._isolar
+    isolar, avisar = filho._isolar, filho.avisar_pronto
+
+    def anotar(passo: dict[str, Any]) -> None:
+        with (_pasta() / f"{pid}.ordem").open("a", encoding="utf-8") as ordem:
+            ordem.write(json.dumps(passo) + "\n")
 
     def isolar_e_anotar() -> None:
         isolar()
         (_pasta() / f"{pid}.isolou").write_text(repr(time.monotonic()), encoding="utf-8")
+        anotar({"passo": "isolou"})
+
+    def avisar_e_anotar(ponta: filho.Ponta) -> None:
+        anotar({"passo": "aviso", "depuravel": filho.depuravel()})
+        avisar(ponta)
 
     filho._isolar = isolar_e_anotar  # type: ignore[assignment]  # so neste processo de teste
+    filho.avisar_pronto = avisar_e_anotar  # type: ignore[assignment]
     sala_contrato.atender = _atender_de_teste  # type: ignore[assignment]
     filho.principal(pedidos, respostas, ambiente, liberar_locais, teto_pedido)
 
 
-async def _atender_de_teste(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: bool) -> tuple[int, bytes]:
-    if corpo == PEDIDO_DE_ESPIAR:
-        import anyio.to_thread
+def atende_devagar(pedidos: Any, respostas: Any, ambiente: str, liberar_locais: bool, teto_pedido: int) -> None:
+    """O ``filho.principal`` de verdade, com o ``atender`` de teste (sem rede)."""
+    sala_contrato.atender = _atender_de_teste  # type: ignore[assignment]  # so neste processo de teste
+    filho.principal(pedidos, respostas, ambiente, liberar_locais, teto_pedido)
 
+
+async def _atender_de_teste(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: bool) -> tuple[int, bytes]:
+    import anyio
+    import anyio.to_thread
+
+    if corpo == PEDIDO_DE_ESPIAR:
         return 200, json.dumps(await anyio.to_thread.run_sync(_espiar)).encode()
+    if corpo.startswith(b'{"dormir":'):
+        segundos = float(json.loads(corpo)["dormir"])
+        # Ja isolado e com o pedido: o pai sabe por aqui que a chamada esta em andamento no filho.
+        (_pasta() / f"{os.getpid()}.dormindo").write_text(repr(segundos), encoding="utf-8")
+        await anyio.sleep(segundos)
+        return 200, b'{"dormiu":%d}' % os.getpid()
     (_pasta() / f"{os.getpid()}.pedido").write_bytes(rota.encode() + b"\n" + corpo)
     return 200, b'{"recebido":%d}' % len(corpo)
 

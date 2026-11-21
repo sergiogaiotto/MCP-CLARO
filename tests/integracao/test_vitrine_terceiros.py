@@ -4,8 +4,9 @@
   vigente (nem de uma revisao antiga, nem de uma gravada que nao ficou vigente); rever uma ferramenta tira so ela;
   quarentena tira o servidor inteiro; ativo sem revisao vigente, nada dele aparece.
 - A revisao de ferramenta de terceiro grava o esquema limpo, as descricoes do ADMIN, nenhuma dica do fornecedor,
-  ``texto_de_fora`` e a definicao declarada; recusa palavras e referencias que a revisao de terceiro nao aceita
-  (critica B3, grupo G2b), sem gravar nada.
+  ``texto_de_fora`` e a definicao declarada; recusa palavras e referencias que a revisao de terceiro nao aceita,
+  ciclo e niveis demais tambem entre definicoes que ninguem cita, enum com mais de 1000 valores e esquema com mais
+  de 256 KiB (critica B3, grupo G2b), sem gravar nada. No teto exato, grava e a ferramenta pode ser chamada.
 - Para chamar, o esquema de entrada de um terceiro vem sem ``pattern`` nem ``uniqueItems``; a vitrine mostra o
   ``pattern``.
 - Sistema proprio sem a marca: como nas Fases 1 e 2, com ``terceiros`` ligado ou nao.
@@ -32,7 +33,7 @@ from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import FIM_DA_DESCRICAO_TERCEIRO, FerramentaVitrine
 from mcp_claro.config.settings import Parametros
 from mcp_claro.db.engine import criar_engine
-from mcp_claro.entrada.argumentos import EsquemaInvalido, conferir_argumentos
+from mcp_claro.entrada.argumentos import ArgumentosInvalidos, EsquemaInvalido, conferir_argumentos
 from mcp_claro.versao import VERSAO_MCP
 from tests.apoio_terceiros import cadastrar_terceiro, definicao, gravar_revisao_do_servidor, por_em_quarentena
 
@@ -376,6 +377,29 @@ def _aninhar(no: Any, niveis: int, palavra: str) -> Any:
     return no
 
 
+def _no_teto_de_largura(*, bytes_a_mais: int = 0, escolhas_a_mais: int = 0) -> dict[str, Any]:
+    """Um esquema no teto da largura: um enum de 1000 valores, uma definicao booleana e um const de letras de 2 bytes
+    que completa exatamente 256 KiB em JSON compacto (UTF-8). Com ``bytes_a_mais`` ou ``escolhas_a_mais``, passa."""
+    esquema: dict[str, Any] = {
+        "type": "object",
+        "$defs": {"qualquer": True},
+        "properties": {
+            "cor": {"enum": [f"cor{i}" for i in range(1000 + escolhas_a_mais)]},
+            "livre": {"$ref": "#/$defs/qualquer"},
+            "fixo": {"const": ""},
+        },
+        "required": ["cor"],
+    }
+
+    def tamanho() -> int:
+        return len(json.dumps(esquema, ensure_ascii=False, separators=(",", ":")).encode())
+
+    falta = 256 * 1024 + bytes_a_mais - tamanho()
+    esquema["properties"]["fixo"]["const"] = "\u00e7" * (falta // 2) + "x" * (falta % 2)
+    assert tamanho() == 256 * 1024 + bytes_a_mais
+    return esquema
+
+
 def _recusados() -> list[tuple[dict[str, Any], str, str | None]]:
     """Esquemas que a revisao de terceiro recusa, com o motivo e a palavra: os contornos do verificador e o resto."""
     defs: dict[str, Any] = {f"d{i}": {"allOf": [{"$ref": f"#/$defs/d{i + 1}"}] * 2} for i in range(20)}
@@ -384,6 +408,10 @@ def _recusados() -> list[tuple[dict[str, Any], str, str | None]]:
     fundas: dict[str, Any] = {"d0": _aninhar({"type": "string"}, 60, "not")}
     for i in range(1, 7):
         fundas[f"d{i}"] = _aninhar({"$ref": f"#/$defs/d{i - 1}"}, 60, "not")
+    # Prova cadeia_solta.py do verificador: 20 definicoes que ninguem cita, cada uma com 59 nots em volta da
+    # referencia para a seguinte (antes, a revisao aceitava e a copia da entrada dava RecursionError).
+    soltas: dict[str, Any] = {f"d{i}": _aninhar({"$ref": f"#/$defs/d{i + 1}"}, 59, "not") for i in range(20)}
+    soltas["d20"] = {"type": "string"}
     return [
         (  # contorno: regra escondida num enum, chamada por $ref
             {
@@ -475,6 +503,27 @@ def _recusados() -> list[tuple[dict[str, Any], str, str | None]]:
             "ciclo",
             None,
         ),
+        ({"type": "object", "properties": {"a": {"type": "string"}}, "$defs": soltas}, "fundo", None),
+        (  # prova ciclo_solto.py do verificador: ciclo entre definicoes que a raiz nao cita
+            {"type": "object", "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"not": {"$ref": "#/$defs/a"}}}},
+            "ciclo",
+            None,
+        ),
+        (  # arvore que a raiz nao cita (esquema recursivo)
+            {
+                "type": "object",
+                "$defs": {
+                    "no": {
+                        "type": "object",
+                        "properties": {"filhos": {"type": "array", "items": {"$ref": "#/$defs/no"}}},
+                    }
+                },
+            },
+            "ciclo",
+            None,
+        ),
+        (_no_teto_de_largura(escolhas_a_mais=1), "escolhas", None),
+        (_no_teto_de_largura(bytes_a_mais=1), "pesado", None),
     ]
 
 
@@ -499,6 +548,28 @@ async def test_revisao_de_terceiro_recusa_palavras_referencias_e_esquema_caro_e_
             )
         ).all()
     assert [(i, s) for i, s in linhas] == [(antiga, "ativa")]
+
+
+async def test_esquema_no_teto_de_escolhas_e_bytes_e_gravado_e_chamado(dono: AsyncEngine) -> None:
+    # No teto exato (1000 valores no enum, 256 KiB), a revisao grava; a vitrine mostra o esquema inteiro, e a copia
+    # para chamar (sem nada a afrouxar) e igual a ele. A definicao booleana vale.
+    cena = await _cena(dono)
+    esquema = _no_teto_de_largura()
+    async with dono.begin() as c:
+        ferramenta = await _revisar(c, cena.terceiro_id, definicao("consultar_saldo", f"{MARCA}", esquema=esquema))
+        await gravar_revisao_do_servidor(c, cena.terceiro_id, [ferramenta, cena.b])
+        gravado = (
+            await c.execute(text("SELECT esquema_entrada FROM ferramentas_revisadas WHERE id = :i"), {"i": ferramenta})
+        ).scalar_one()
+    assert gravado == esquema
+    (vista,) = [f for f in await _vitrine(dono, cena, terceiros=True) if f.id == ferramenta]
+    assert vista.como_tool()["inputSchema"] == esquema
+    achada = await _na_vitrine(dono, cena, ferramenta, terceiros=True)
+    assert achada is not None
+    assert achada.esquema_entrada == esquema
+    conferir_argumentos(achada.esquema_entrada, {"cor": "cor999", "livre": {"qualquer": ["coisa"]}})
+    with pytest.raises(ArgumentosInvalidos):
+        conferir_argumentos(achada.esquema_entrada, {"cor": "cor1000"})
 
 
 # Regras que travavam a conferencia (contornos do verificador) e uma lista comparada item a item.

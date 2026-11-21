@@ -1482,19 +1482,32 @@ async def test_grafana_le_as_visoes_e_nao_as_tabelas(dono: AsyncEngine, cena: Ce
 CAMINHO = "search_path=pg_catalog, public, pg_temp"
 
 
+TEMPORARIA = "SELECT has_database_privilege(:papel, current_database(), 'TEMPORARY')"
+
+
 async def com_sombra(dono: AsyncEngine, papel: str, sombras: list[str], sql: str, **params: Any) -> Any:
     """Como ``papel``, cria tabelas temporarias com o nome de tabelas do esquema (``sombras``) e roda ``sql``, numa
     transacao que sempre volta atras. Sem caminho de busca fixo, ``pg_temp`` vem antes de ``public`` e de
-    ``pg_catalog`` e a guarda leria a sombra. Devolve a primeira linha."""
+    ``pg_catalog`` e a guarda leria a sombra. Devolve a primeira linha.
+
+    Os papeis do app nao criam tabela temporaria (``REVOKE TEMPORARY ... FROM PUBLIC``, como no
+    ``docker/postgres/iniciar/10-papeis.sh``). Para provar a defesa de baixo, o caminho de busca fixo, como se essa
+    primeira falhasse, o dono da o TEMPORARY a ``papel`` so dentro desta transacao; ela volta atras e leva a concessao
+    junto (conferido no fim)."""
+    assert re.fullmatch(r"[a-z_]+", papel)
     async with dono.connect() as c:
         transacao = await c.begin()
+        antes = (await c.execute(text(TEMPORARIA), {"papel": papel})).scalar_one()
         try:
+            banco = (await c.execute(text("SELECT quote_ident(current_database())"))).scalar_one()
+            await c.execute(text(f"GRANT TEMPORARY ON DATABASE {banco} TO {papel}"))
             await como(c, papel)
             for sombra in sombras:
                 await c.execute(text(sombra), params)
             return (await c.execute(text(sql), params)).first()
         finally:
             await transacao.rollback()
+            assert (await c.execute(text(TEMPORARIA), {"papel": papel})).scalar_one() == antes
 
 
 async def test_sombra_de_sistemas_nao_tira_a_marca_de_estranhos(dono: AsyncEngine, cena: Cena) -> None:

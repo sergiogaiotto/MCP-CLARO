@@ -16,6 +16,8 @@ Ferramentas (chave curta -> nome original, classe, risco, campos pessoais, traz 
 
 Pessoas: ``ana`` e ``bia`` (de teste), ``real`` (pessoa real, fora do periodo de experiencia) e ``eva`` (de teste,
 no periodo de experiencia). Aplicativos ``A`` (todas) e ``B`` (so a Ana).
+
+``subir_mundo(..., extras=...)`` acrescenta ferramentas com esquema proprio (``Extra``), na mesma ordem de servico.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx2
 import pytest
 from mcp.shared.exceptions import MCPError
 from sqlalchemy import text
@@ -44,7 +47,7 @@ from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.pedidos import CONSULTA, Pedido
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 from tests import apoio_terceiros as t3
-from tests.apoio import cliente_mcp, porta_livre, servidor
+from tests.apoio import cabecalhos_2026, cliente_mcp, pedido_2026, porta_livre, servidor
 from tests.idp_falso import IdpFalso
 from tests.integracao.test_autorizacao import engine_do_papel
 
@@ -74,6 +77,15 @@ PROPRIO: dict[str, tuple[str, str, str, tuple[str, ...], bool]] = {
     "p_cancelar": ("cancelar_servico", "muda", "alto", (), False),
 }
 TEXTO_DO_SISTEMA = "Texto que o sistema escreveu."
+
+
+@dataclass(frozen=True)
+class Extra:
+    """Ferramenta a mais num ``Mundo``: no terceiro ou no proprio, com o esquema dado."""
+
+    terceiro: bool
+    spec: tuple[str, str, str, tuple[str, ...], bool]
+    esquema: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -160,6 +172,18 @@ class Mundo:
             except MCPError as erro:
                 recusa = erro
         raise recusa
+
+    async def chamar_cru(
+        self, pessoa: str, chave: str, argumentos: dict[str, Any], app: str = "A"
+    ) -> tuple[int, dict[str, Any]]:
+        """Uma chamada em JSON cru, sem o cliente do kit (que nao serializa mais de uns 250 niveis). Devolve o status
+        HTTP e a resposta JSON-RPC inteira (``result`` ou ``error``)."""
+        nome = self.f[chave].nome
+        corpo = json.dumps(pedido_2026("tools/call", {"name": nome, "arguments": argumentos}))
+        cabecalhos = cabecalhos_2026("tools/call", nome, self.cracha(pessoa, app))
+        async with httpx2.AsyncClient(follow_redirects=False, timeout=30) as http:
+            r = await http.post(f"{self.url}/mcp", content=corpo, headers=cabecalhos)
+        return r.status_code, r.json()
 
     async def consultar(self, pessoa: str, protocolo: str, app: str = "A") -> Any:
         async with cliente_mcp(f"{self.url}/mcp", self.cracha(pessoa, app)) as c:
@@ -289,13 +313,18 @@ class Mundo:
 
 
 async def _revisar(
-    c: Any, sistema_id: uuid.UUID, chave: str, spec: tuple[str, str, str, tuple[str, ...], bool], sufixo: str
+    c: Any,
+    sistema_id: uuid.UUID,
+    chave: str,
+    spec: tuple[str, str, str, tuple[str, ...], bool],
+    sufixo: str,
+    esquema: dict[str, Any] = ESQUEMA,
 ) -> Ferramenta:
     nome, classe, risco, pessoais, de_fora = spec
     r = await t3.revisar_ferramenta(
         c,
         sistema_id,
-        t3.definicao(nome, esquema=ESQUEMA),
+        t3.definicao(nome, esquema=esquema),
         nome_vitrine=f"{chave}_{sufixo}",
         classe=classe,
         risco=risco,
@@ -307,10 +336,15 @@ async def _revisar(
 
 @contextlib.asynccontextmanager
 async def subir_mundo(
-    banco: Parametros, *, terceiros_ligados: bool = False, extra: dict[str, Any] | None = None
+    banco: Parametros,
+    *,
+    terceiros_ligados: bool = False,
+    extra: dict[str, Any] | None = None,
+    extras: dict[str, Extra] | None = None,
 ) -> AsyncIterator[Mundo]:
     """Sobe a entrada com o leitor falso e monta o cadastro. ``terceiros_ligados``: ``FEATURE_PHASE3_THIRD_PARTY``
-    (pelo construtor, como nos testes de outras chaves que a partida recusa)."""
+    (pelo construtor, como nos testes de outras chaves que a partida recusa). ``extra``: parametros a mais.
+    ``extras``: ferramentas a mais (chave curta -> ``Extra``), revisadas antes da revisao do servidor."""
     sufixo = uuid.uuid4().hex[:8]
     porta_idp = porta_livre()
     idp = IdpFalso(emissor=f"http://127.0.0.1:{porta_idp}/realms/mcp-claro")
@@ -369,6 +403,9 @@ async def subir_mundo(
                 ferramentas[chave] = await _revisar(c, terceiro_id, chave, spec, sufixo)
             for chave, spec in PROPRIO.items():
                 ferramentas[chave] = await _revisar(c, proprio_id, chave, spec, sufixo)
+            for chave, mais in (extras or {}).items():
+                sistema = terceiro_id if mais.terceiro else proprio_id
+                ferramentas[chave] = await _revisar(c, sistema, chave, mais.spec, sufixo, mais.esquema)
             revisao_id = await t3.gravar_revisao_do_servidor(c, terceiro_id)
             modelo = await repositorio.criar_modelo_ordem(
                 c,

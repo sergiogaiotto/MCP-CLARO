@@ -20,18 +20,28 @@ terceiro (critica B3, desenho simples do coordenador):
 - ``conferir_terceiro`` (revisao): recusa ``patternProperties`` (regra de formato nos nomes de campo), ``$id``,
   ``$anchor``, ``$dynamicAnchor``, ``$dynamicRef``, ``unevaluatedProperties`` e ``unevaluatedItems`` em qualquer
   lugar, ``$schema`` fora da raiz, toda referencia que nao seja ``#/$defs/<nome>`` ou ``#/definitions/<nome>`` para
-  uma definicao que existe, esquema em ciclo e esquema com mais de ``CUSTO_MAXIMO`` partes ou
-  ``PROFUNDIDADE_MAXIMA`` niveis, contando todas as definicoes e seguindo as referencias.
+  uma definicao que existe, esquema em ciclo, esquema com mais de ``CUSTO_MAXIMO`` partes ou
+  ``PROFUNDIDADE_MAXIMA`` niveis (contando todas as definicoes e seguindo as referencias, da raiz e de cada
+  definicao, citada ou nao), ``enum`` com mais de ``ESCOLHAS_MAXIMAS`` valores e esquema com mais de
+  ``BYTES_MAXIMOS`` bytes.
+
+Nenhum percurso deste modulo usa recursao: cada um anda com uma pilha propria. Se mesmo assim a pilha do Python
+estourar (numa biblioteca, como o ``json`` com dados muito fundos), as funcoes publicas levantam
+``EsquemaRecusado`` com o motivo ``fundo``, nunca erro interno.
 
 O que sobra: sem essas palavras, cada parte do esquema (com as referencias seguidas) confere cada parte do pedido no
 maximo uma vez, entao a conferencia custa ate o tamanho do esquema, mais os valores de ``enum`` e ``const``, vezes o
-tamanho do pedido. Com o esquema e o pedido nos tetos, isso ainda pode levar segundos. Nada disso e garantia.
+tamanho do pedido. A primeira barreira e o orcamento de passos da entrada (``entrada.argumentos``); os tetos desta
+revisao sao a segunda. Nada disso e garantia.
 """
 
 from __future__ import annotations
 
-import copy
-from collections.abc import Iterator, Mapping
+import json
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
+from functools import wraps
+from itertools import islice
 from typing import Any, Final, Literal
 from urllib.parse import unquote
 
@@ -47,11 +57,21 @@ DESCRICAO_DE_CAMPO_MAXIMA: Final = 300
 
 CUSTO_MAXIMO: Final = 2000
 """Partes de um esquema de entrada de terceiro: todas as do documento (definicoes nao citadas tambem) e, a parte,
-as que a conferencia visita com as referencias seguidas (cada referencia conta a definicao de novo)."""
+as que a conferencia visita com as referencias seguidas (cada referencia conta a definicao de novo), a partir da
+raiz e de cada definicao."""
 
 PROFUNDIDADE_MAXIMA: Final = 64
-"""Niveis de um esquema de entrada de terceiro, no documento e com as referencias seguidas. No teto, a conferencia
-de um esquema novo na entrada (check_schema e o pedido) gasta uns 800 dos 1000 quadros da pilha de Python."""
+"""Niveis de um esquema de entrada de terceiro, no documento e com as referencias seguidas, a partir da raiz e de
+cada definicao (citada ou nao, no nivel 1, como se a raiz a chamasse). A raiz e o nivel 0: o mais fundo pode ser o
+63, e o 64 ja e recusado. No teto, a conferencia de um esquema novo na entrada (check_schema e o pedido) gasta uns
+800 dos 1000 quadros da pilha de Python."""
+
+BYTES_MAXIMOS: Final = 256 * 1024
+"""Bytes de um esquema de entrada de terceiro ja limpo, em JSON compacto (sem espacos, letras fora do ASCII como
+estao), contados em UTF-8."""
+
+ESCOLHAS_MAXIMAS: Final = 1000
+"""Valores de cada ``enum`` de um esquema de entrada de terceiro."""
 
 # Palavras que valem para a validacao (JSON Schema 2020-12, as do Draft202012Validator e as que ele le junto:
 # then/else com if, minContains/maxContains com contains) e as de estrutura, que as referencias usam.
@@ -154,13 +174,13 @@ class CampoDesconhecido(ValueError):
         super().__init__("campos fora do esquema de entrada: " + ", ".join(marcar_escondidos(c) for c in campos))
 
 
-MotivoEsquema = Literal["palavra", "referencia", "ciclo", "grande", "fundo"]
+MotivoEsquema = Literal["palavra", "referencia", "ciclo", "grande", "fundo", "pesado", "escolhas"]
 
 
 class EsquemaRecusado(EsquemaInvalido):
     """Esquema valido que a revisao de terceiro nao aceita. A mensagem e para o ADMIN; ``onde`` (com os
-    escondidos ja marcados), ``motivo`` (um de ``MotivoEsquema``) e ``palavra`` (a palavra recusada, com o motivo
-    ``palavra``) servem para a tela montar a propria frase."""
+    escondidos ja marcados; ``(raiz)`` quando e a raiz ou o esquema inteiro), ``motivo`` (um de ``MotivoEsquema``)
+    e ``palavra`` (a palavra recusada, com o motivo ``palavra``) servem para a tela montar a propria frase."""
 
     def __init__(self, mensagem: str, *, onde: str, motivo: MotivoEsquema, palavra: str | None = None) -> None:
         self.onde = onde
@@ -169,29 +189,85 @@ class EsquemaRecusado(EsquemaInvalido):
         super().__init__(mensagem)
 
 
-def _limpar(no: Any, *, descricoes_de_campo: bool) -> Any:
-    if not isinstance(no, dict):
-        return copy.deepcopy(no)  # esquema booleano (true/false) ou valor que o validador recusa depois
-    limpo: dict[str, Any] = {}
-    for chave, valor in no.items():
-        if chave in _MAPA_DE_ESQUEMAS and isinstance(valor, dict):
-            limpo[chave] = {nome: _limpar(sub, descricoes_de_campo=False) for nome, sub in valor.items()}
-            if descricoes_de_campo and chave == "properties":
-                for nome, sub in valor.items():
-                    if isinstance(sub, dict) and isinstance(sub.get("description"), str):
-                        limpo[chave][nome]["description"] = sub["description"]
-        elif chave in _LISTA_DE_ESQUEMAS and isinstance(valor, list):
-            limpo[chave] = [_limpar(sub, descricoes_de_campo=False) for sub in valor]
-        elif chave in _UM_ESQUEMA:
-            limpo[chave] = _limpar(valor, descricoes_de_campo=False)
-        elif chave == "format":
-            if valor in FORMATOS:
-                limpo[chave] = valor
-        elif chave in _VALIDACAO or chave in _ESTRUTURA or chave in _MAPA_DE_ESQUEMAS or chave in _LISTA_DE_ESQUEMAS:
-            limpo[chave] = copy.deepcopy(valor)  # dado (enum, const, required...), nunca descido
-    return limpo
+# --- Copias sem recursao --------------------------------------------------------------------------------------------
 
 
+def _copia(valor: Any) -> Any:
+    """Copia de um valor JSON (um dado do esquema, como ``enum`` ou ``const``, ou o esquema inteiro), sem recursao:
+    listas e objetos novos, o resto (texto, numero, booleano, nulo) como esta."""
+    if not isinstance(valor, dict | list):
+        return valor
+    raiz: Any = {} if isinstance(valor, dict) else []
+    pilha: list[tuple[Any, Any]] = [(valor, raiz)]
+    while pilha:
+        original, copia = pilha.pop()
+        for chave, item in original.items() if isinstance(original, dict) else enumerate(original):
+            novo = item
+            if isinstance(item, dict | list):
+                novo = {} if isinstance(item, dict) else []
+                pilha.append((item, novo))
+            if isinstance(copia, dict):
+                copia[chave] = novo
+            else:
+                copia.append(novo)
+    return raiz
+
+
+# (no do fornecedor, copia limpa em montagem, deixa as descricoes de campo deste no, guarda a descricao deste no)
+type _ParaLimpar = tuple[dict[str, Any], dict[str, Any], bool, bool]
+
+
+def _vaga_limpa(sub: Any, pilha: list[_ParaLimpar], *, guardar_descricao: bool = False) -> Any:
+    """O lugar de ``sub`` na copia limpa: um objeto novo, preenchido quando sair da pilha, ou a copia do valor."""
+    if not isinstance(sub, dict):
+        return _copia(sub)  # esquema booleano (true/false) ou valor que o validador recusa depois
+    novo: dict[str, Any] = {}
+    pilha.append((sub, novo, False, guardar_descricao))
+    return novo
+
+
+def _limpar(raiz: Any, *, descricoes_de_campo: bool) -> Any:
+    if not isinstance(raiz, dict):
+        return _copia(raiz)
+    saida: dict[str, Any] = {}
+    pilha: list[_ParaLimpar] = [(raiz, saida, descricoes_de_campo, False)]
+    while pilha:
+        no, limpo, descricoes, guardar_descricao = pilha.pop()
+        for chave, valor in no.items():
+            if chave in _MAPA_DE_ESQUEMAS and isinstance(valor, dict):
+                guardar = descricoes and chave == "properties"
+                limpo[chave] = {nome: _vaga_limpa(sub, pilha, guardar_descricao=guardar) for nome, sub in valor.items()}
+            elif chave in _LISTA_DE_ESQUEMAS and isinstance(valor, list):
+                limpo[chave] = [_vaga_limpa(sub, pilha) for sub in valor]
+            elif chave in _UM_ESQUEMA:
+                limpo[chave] = _vaga_limpa(valor, pilha)
+            elif chave == "format":
+                if isinstance(valor, str) and valor in FORMATOS:
+                    limpo[chave] = valor
+            elif (
+                chave in _VALIDACAO or chave in _ESTRUTURA or chave in _MAPA_DE_ESQUEMAS or chave in _LISTA_DE_ESQUEMAS
+            ):
+                limpo[chave] = _copia(valor)  # dado (enum, const, required...), nunca descido
+        if guardar_descricao and isinstance(no.get("description"), str):
+            limpo["description"] = no["description"]
+    return saida
+
+
+def _sem_estouro[**P, R](funcao: Callable[P, R]) -> Callable[P, R]:
+    """Defesa: ``RecursionError`` (de uma biblioteca, ja que este modulo nao usa recursao) vira ``EsquemaRecusado``
+    com o motivo ``fundo`` e ``onde`` na raiz, nunca erro interno."""
+
+    @wraps(funcao)
+    def protegida(*args: P.args, **kwargs: P.kwargs) -> R:
+        try:
+            return funcao(*args, **kwargs)
+        except RecursionError as erro:
+            raise _recusa((), "fundo") from erro
+
+    return protegida
+
+
+@_sem_estouro
 def limpar_textos(esquema: Mapping[str, Any], *, descricoes_de_campo: bool = False) -> dict[str, Any]:
     """Copia do esquema so com o que valida: tira ``description``, ``title``, ``examples``, ``$comment``,
     ``default``, ``deprecated``, ``readOnly``, ``writeOnly``, ``x-*``, ``content*`` e qualquer palavra que o JSON
@@ -209,7 +285,7 @@ def com_descricoes(esquema: Mapping[str, Any], descricoes: Mapping[str, str]) ->
 
     Campo que o esquema nao tem levanta ``CampoDesconhecido``; descricao longa demais, ``ValueError``.
     """
-    saida = copy.deepcopy(dict(esquema))
+    saida: dict[str, Any] = _copia(dict(esquema))
     textos = {campo: str(texto).strip() for campo, texto in descricoes.items() if str(texto).strip()}
     if not textos:
         return saida
@@ -251,13 +327,26 @@ def _filhos(no: dict[str, Any], *, com_definicoes: bool = True) -> Iterator[tupl
             yield (chave,), valor
 
 
-def _esquemas(no: Any, caminho: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], dict[str, Any]]]:
-    """Cada objeto de esquema, com o caminho ate ele (definicoes tambem, citadas ou nao)."""
-    if not isinstance(no, dict):
-        return
-    yield caminho, no
-    for sub_caminho, sub in _filhos(no):
-        yield from _esquemas(sub, (*caminho, *sub_caminho))
+def _esquemas(raiz: Any, caminho: tuple[str, ...] = ()) -> Iterator[tuple[tuple[str, ...], dict[str, Any]]]:
+    """Cada objeto de esquema, com o caminho ate ele (definicoes tambem, citadas ou nao), na ordem do documento
+    (cada parte antes das de baixo dela). Sem recursao."""
+    pilha: list[tuple[tuple[str, ...], Any]] = [(caminho, raiz)]
+    while pilha:
+        caminho_no, no = pilha.pop()
+        if not isinstance(no, dict):
+            continue
+        yield caminho_no, no
+        filhos = [((*caminho_no, *sub_caminho), sub) for sub_caminho, sub in _filhos(no)]
+        pilha.extend(reversed(filhos))
+
+
+def _definicoes(raiz: dict[str, Any]) -> Iterator[tuple[tuple[str, ...], Any]]:
+    """Cada definicao (``$defs`` e ``definitions``) do documento, em qualquer lugar, citada ou nao, com o caminho."""
+    for caminho, no in _esquemas(raiz):
+        for chave, valor in no.items():
+            if chave in _DEFINICOES and isinstance(valor, dict):
+                for nome, sub in valor.items():
+                    yield (*caminho, chave, str(nome)), sub
 
 
 def _lugar(caminho: tuple[str, ...]) -> str:
@@ -304,29 +393,35 @@ _FRASES_DAS_PALAVRAS: Final[dict[str, str]] = {
 
 def _recusa(caminho: tuple[str, ...], motivo: MotivoEsquema, palavra: str | None = None) -> EsquemaRecusado:
     onde = _lugar(caminho)
+    lugar = "na raiz do esquema" if onde == "(raiz)" else f"em {onde}"
     frases: dict[str, str] = {
-        "palavra": f"o esquema usa {_FRASES_DAS_PALAVRAS.get(palavra or '', palavra)} em {onde}; a revisao de "
+        "palavra": f"o esquema usa {_FRASES_DAS_PALAVRAS.get(palavra or '', palavra)} {lugar}; a revisao de "
         "terceiro nao aceita essa palavra",
-        "referencia": f"a referencia ($ref) em {onde} nao aponta para uma definicao deste esquema; a revisao de "
+        "referencia": f"a referencia ($ref) {lugar} nao aponta para uma definicao deste esquema; a revisao de "
         "terceiro so aceita referencia da forma #/$defs/<nome> ou #/definitions/<nome>, para uma definicao que existe",
-        "ciclo": f"a referencia em {onde} volta a uma parte que a contem (esquema em ciclo); a revisao de "
+        "ciclo": f"a referencia {lugar} volta a uma parte que a contem (esquema em ciclo); a revisao de "
         "terceiro nao aceita esquema em ciclo",
         "grande": f"o esquema tem mais de {CUSTO_MAXIMO} partes, contando todas as definicoes e seguindo as "
-        f"referencias ($ref) (passou em {onde}); isso pode travar o MCP-CLARO a cada chamada",
+        f"referencias ($ref) (passou {lugar}); isso pode travar o MCP-CLARO a cada chamada",
         "fundo": f"o esquema tem mais de {PROFUNDIDADE_MAXIMA} niveis, contando as definicoes e seguindo as "
-        f"referencias (passou em {onde})",
+        f"referencias (passou {lugar})",
+        "pesado": f"o esquema tem mais de {BYTES_MAXIMOS // 1024} KiB ({BYTES_MAXIMOS} bytes) depois da limpeza; "
+        "isso pode travar o MCP-CLARO a cada chamada",
+        "escolhas": f"a lista de escolhas (enum) {lugar} tem mais de {ESCOLHAS_MAXIMAS} valores; isso pode travar o "
+        "MCP-CLARO a cada chamada",
     }
     return EsquemaRecusado(
         frases[motivo] + ". Peca ao fornecedor um esquema mais simples", onde=onde, motivo=motivo, palavra=palavra
     )
 
 
+@_sem_estouro
 def conferir_documento(esquema: Mapping[str, Any]) -> None:
     """Todas as partes do documento, citadas ou nao, sem seguir as referencias: ate ``CUSTO_MAXIMO`` partes
-    (motivo ``grande``) e ``PROFUNDIDADE_MAXIMA`` niveis (motivo ``fundo``). A copia da entrada
-    (``para_conferir``) e a conferencia do esquema (check_schema) andam por todas, inclusive pelas definicoes que
-    nenhuma referencia chama. Sem recursao: em ``conferir_terceiro``, roda antes das outras, que descem pelo
-    esquema com recursao."""
+    (motivo ``grande``) e ``PROFUNDIDADE_MAXIMA`` niveis, da raiz (o 0) ao 63 (motivo ``fundo``). A
+    copia da entrada (``para_conferir``) e a conferencia do esquema (check_schema) andam por todas, inclusive pelas
+    definicoes que nenhuma referencia chama. Sem recursao, e para assim que passa de um teto: em
+    ``conferir_terceiro``, roda antes das outras."""
     partes = 1
     pilha: list[tuple[Any, tuple[str, ...], int]] = [(dict(esquema), (), 0)]
     while pilha:
@@ -335,13 +430,35 @@ def conferir_documento(esquema: Mapping[str, Any]) -> None:
             continue
         if nivel >= PROFUNDIDADE_MAXIMA:
             raise _recusa(caminho, "fundo")
-        filhos = list(_filhos(no))
+        filhos = list(islice(_filhos(no), CUSTO_MAXIMO - partes + 1))
         if partes + len(filhos) > CUSTO_MAXIMO:
             raise _recusa((*caminho, *filhos[CUSTO_MAXIMO - partes][0]), "grande")  # a parte que passou do teto
         partes += len(filhos)
         pilha.extend((sub, (*caminho, *sub_caminho), nivel + 1) for sub_caminho, sub in filhos)
 
 
+def _bytes(esquema: Mapping[str, Any]) -> int:
+    """O tamanho do esquema em JSON compacto, com as letras fora do ASCII como estao, em bytes UTF-8."""
+    texto = json.dumps(dict(esquema), ensure_ascii=False, separators=(",", ":"))
+    return len(texto.encode("utf-8", "surrogatepass"))
+
+
+@_sem_estouro
+def conferir_largura(esquema: Mapping[str, Any]) -> None:
+    """A largura que os outros tetos nao contam: cada ``enum``, em qualquer lugar do esquema (definicoes nao
+    citadas tambem), com ate ``ESCOLHAS_MAXIMAS`` valores (motivo ``escolhas``), e o esquema inteiro com ate
+    ``BYTES_MAXIMOS`` bytes (motivo ``pesado``, ``onde`` na raiz): os valores de ``enum`` e ``const`` e os nomes de
+    campo nao sao partes, mas a conferencia de cada pedido passa por eles."""
+    raiz = dict(esquema)
+    for caminho, no in _esquemas(raiz):
+        escolhas = no.get("enum")
+        if isinstance(escolhas, list) and len(escolhas) > ESCOLHAS_MAXIMAS:
+            raise _recusa(caminho, "escolhas")
+    if _bytes(raiz) > BYTES_MAXIMOS:
+        raise _recusa((), "pesado")
+
+
+@_sem_estouro
 def conferir_palavras(esquema: Mapping[str, Any]) -> None:
     """Revisao de terceiro das palavras e referencias, em todo lugar do esquema (definicoes nao citadas tambem).
 
@@ -363,49 +480,91 @@ def conferir_palavras(esquema: Mapping[str, Any]) -> None:
                 raise _recusa(caminho, "referencia")
 
 
+@dataclass(slots=True)
+class _Quadro:
+    """Uma parte em conta, na pilha de ``_Conta``: o que ja somou e o que falta (``partes``, a partir de
+    ``proxima``)."""
+
+    no: dict[str, Any]
+    caminho: tuple[str, ...]
+    partes: list[tuple[tuple[str, ...], Any]] = field(default_factory=list)
+    proxima: int = 0
+    total: int = 1
+    altura: int = 1
+
+
 class _Conta:
-    """O custo do esquema com as referencias seguidas. A memoria guarda, de cada parte ja contada, as partes e a
-    altura (niveis dela para baixo): achada de novo mais funda, a parte nao e percorrida outra vez, mas os niveis
-    dela contam a partir de onde ela foi achada."""
+    """O custo do esquema com as referencias seguidas, sem recursao. A memoria guarda, de cada parte ja contada, as
+    partes e a altura (niveis dela para baixo): achada de novo mais funda, a parte nao e percorrida outra vez, mas
+    os niveis dela contam a partir de onde ela foi achada. A mesma conta (e a mesma memoria) serve para a raiz e
+    para cada definicao."""
 
     def __init__(self, raiz: dict[str, Any]) -> None:
         self.raiz = raiz
         self.memoria: dict[int, tuple[int, int]] = {}
-        self.pilha: set[int] = set()
+        self.andamento: set[int] = set()
 
-    def custo(self, no: Any, caminho: tuple[str, ...]) -> tuple[int, int]:
-        """(partes, altura) de ``no``; a parte esta no nivel ``len(self.pilha)``."""
+    def _sabido(self, no: Any, caminho: tuple[str, ...], nivel: int) -> tuple[int, int] | None:
+        """(partes, altura) de ``no`` no nivel ``nivel`` sem abrir a parte, ou None se ela precisa ser aberta.
+        Levanta a recusa de ciclo (a parte ja esta em conta acima dela) e de fundo."""
         if not isinstance(no, dict):
             return 1, 0  # esquema booleano: conta como parte, nao como nivel
         chave = id(no)
         if chave in self.memoria:
             total, altura = self.memoria[chave]
-            if len(self.pilha) + altura > PROFUNDIDADE_MAXIMA:
+            if nivel + altura > PROFUNDIDADE_MAXIMA:
                 raise _recusa(caminho, "fundo")
             return total, altura
-        if chave in self.pilha:
+        if chave in self.andamento:
             raise _recusa(caminho, "ciclo")
-        if len(self.pilha) >= PROFUNDIDADE_MAXIMA:
+        if nivel >= PROFUNDIDADE_MAXIMA:
             raise _recusa(caminho, "fundo")
-        self.pilha.add(chave)
-        total, altura = 1, 1
-        partes = [((*caminho, *sub_caminho), sub) for sub_caminho, sub in _filhos(no, com_definicoes=False)]
+        return None
+
+    def _abrir(self, no: dict[str, Any], caminho: tuple[str, ...]) -> _Quadro:
+        self.andamento.add(id(no))
+        quadro = _Quadro(no, caminho)
+        quadro.partes = [((*caminho, *sub_caminho), sub) for sub_caminho, sub in _filhos(no, com_definicoes=False)]
         if "$ref" in no:
             alvo = _definicao(self.raiz, no["$ref"])
             if alvo is None:
                 raise _recusa(caminho, "referencia")
-            partes.append(((*caminho, "$ref"), alvo))
-        for sub_caminho, sub in partes:
-            custo_sub, altura_sub = self.custo(sub, sub_caminho)
-            total += custo_sub
-            altura = max(altura, altura_sub + 1)
-            if total > CUSTO_MAXIMO:
-                raise _recusa(sub_caminho, "grande")
-        self.pilha.discard(chave)
-        self.memoria[chave] = (total, altura)
-        return total, altura
+            quadro.partes.append(((*caminho, "$ref"), alvo))
+        return quadro
+
+    @staticmethod
+    def _somar(quadro: _Quadro, caminho: tuple[str, ...], custo: tuple[int, int]) -> None:
+        quadro.total += custo[0]
+        quadro.altura = max(quadro.altura, custo[1] + 1)
+        if quadro.total > CUSTO_MAXIMO:
+            raise _recusa(caminho, "grande")
+
+    def custo(self, no: Any, caminho: tuple[str, ...], nivel: int = 0) -> tuple[int, int]:
+        """(partes, altura) de ``no``, que esta no nivel ``nivel`` (a raiz e o 0)."""
+        sabido = self._sabido(no, caminho, nivel)
+        if sabido is not None:
+            return sabido
+        pilha = [self._abrir(no, caminho)]
+        while True:
+            quadro = pilha[-1]
+            if quadro.proxima < len(quadro.partes):
+                sub_caminho, sub = quadro.partes[quadro.proxima]
+                quadro.proxima += 1
+                sabido = self._sabido(sub, sub_caminho, nivel + len(pilha))
+                if sabido is None:
+                    pilha.append(self._abrir(sub, sub_caminho))
+                else:
+                    self._somar(quadro, sub_caminho, sabido)
+                continue
+            pilha.pop()
+            self.andamento.discard(id(quadro.no))
+            self.memoria[id(quadro.no)] = (quadro.total, quadro.altura)
+            if not pilha:
+                return quadro.total, quadro.altura
+            self._somar(pilha[-1], quadro.caminho, (quadro.total, quadro.altura))
 
 
+@_sem_estouro
 def custo_do_esquema(esquema: Mapping[str, Any]) -> int:
     """Quantas partes a conferencia de um argumento pode visitar: cada objeto de esquema conta uma vez, e cada
     ``$ref`` conta de novo a definicao que ele acha (aqui, ``$defs`` so contam quando citados). Levanta
@@ -417,16 +576,49 @@ def custo_do_esquema(esquema: Mapping[str, Any]) -> int:
     return _Conta(raiz).custo(raiz, ())[0]
 
 
+@_sem_estouro
+def conferir_referencias(esquema: Mapping[str, Any]) -> None:
+    """A conta de ``custo_do_esquema`` a partir da raiz e, depois, a partir de cada definicao do documento
+    (``$defs`` e ``definitions``, em qualquer lugar, citada ou nao), como se a raiz a chamasse: a definicao fica no
+    nivel 1. Cada uma, sozinha, tem de caber nos tetos de partes e de niveis, sem ciclo. A copia da entrada
+    (``para_conferir``) anda por todas as definicoes e segue as referencias de dentro delas; sem esta conta, uma
+    cadeia de definicoes que nenhuma referencia da raiz chama ficava funda sem limite, e um ciclo entre elas, ou
+    um esquema recursivo (arvore, lista encadeada), passava."""
+    raiz = dict(esquema)
+    conta = _Conta(raiz)
+    conta.custo(raiz, ())
+    for caminho, definicao in _definicoes(raiz):
+        conta.custo(definicao, caminho, 1)
+
+
+@_sem_estouro
 def conferir_terceiro(esquema: Mapping[str, Any]) -> None:
-    """Revisao de terceiro do esquema de entrada ja limpo: ``conferir_documento``, ``conferir_palavras`` e
-    ``custo_do_esquema``. Levanta ``EsquemaRecusado`` (um ``EsquemaInvalido``) com a frase para o ADMIN. A copia da
-    entrada (``para_conferir``) nunca e maior nem mais funda que o esquema, entao os tetos valem para ela."""
+    """Revisao de terceiro do esquema de entrada ja limpo (com as descricoes do ADMIN), nesta ordem:
+    ``conferir_documento``, ``conferir_largura``, ``conferir_palavras`` e ``conferir_referencias``. Levanta
+    ``EsquemaRecusado`` (um ``EsquemaInvalido``) com a frase para o ADMIN. A copia da entrada (``para_conferir``)
+    nunca e maior nem mais funda que o esquema, entao os tetos valem para ela."""
     conferir_documento(esquema)
+    conferir_largura(esquema)
     conferir_palavras(esquema)
-    custo_do_esquema(esquema)
+    conferir_referencias(esquema)
 
 
 # --- A copia que a entrada usa para conferir os argumentos de um terceiro ------------------------------------------
+
+_NA_DUVIDA: Final = object()
+"""O alvo de uma referencia de outra forma (que a revisao recusa), para ``_Afrouxar.tem_regra``: conta como regra."""
+
+type _ParaAfrouxar = tuple[dict[str, Any], dict[str, Any]]
+"""(no do esquema, copia afrouxada em montagem)."""
+
+
+def _vaga_afrouxada(sub: Any, pilha: list[_ParaAfrouxar]) -> Any:
+    """O lugar de ``sub`` na copia: um objeto novo, preenchido quando sair da pilha, ou o proprio valor."""
+    if not isinstance(sub, dict):
+        return sub  # esquema booleano ou valor que o validador recusa
+    novo: dict[str, Any] = {}
+    pilha.append((sub, novo))
+    return novo
 
 
 class _Afrouxar:
@@ -443,7 +635,8 @@ class _Afrouxar:
 
     Cada parte fica no lugar dela ou sai: a copia nunca e maior nem mais funda que o esquema, e os tetos da revisao
     valem para ela. ``unevaluated*`` e recusado na revisao, entao tirar uma parte nunca muda o que outra ve. Os
-    dados (``enum``, ``const``...) sao os mesmos objetos do original: ninguem os muda.
+    dados (``enum``, ``const``...) sao os mesmos objetos do original: ninguem os muda. Sem recursao: as duas
+    andam com uma pilha propria, entao nem um esquema que a revisao recusaria derruba a entrada.
     """
 
     def __init__(self, raiz: dict[str, Any]) -> None:
@@ -451,7 +644,18 @@ class _Afrouxar:
         self.memoria: dict[int, bool] = {}
         self.andamento: set[int] = set()
 
-    def tem_regra(self, no: Any) -> bool:
+    def _seguintes(self, no: dict[str, Any]) -> Iterator[Any]:
+        """As partes que a conferencia de ``no`` visita: as de baixo dele e o alvo da referencia."""
+        for _, sub in _filhos(no, com_definicoes=False):
+            yield sub
+        if "$ref" in no:
+            alvo = _definicao(self.raiz, no["$ref"])
+            yield _NA_DUVIDA if alvo is None else alvo  # referencia de outra forma: na duvida, afrouxa
+
+    def _sabido(self, no: Any) -> bool | None:
+        """Se ``no`` tem regra, sem abrir as partes de baixo dele; None se e preciso abrir."""
+        if no is _NA_DUVIDA:
+            return True
         if not isinstance(no, dict):
             return False
         chave = id(no)
@@ -459,51 +663,76 @@ class _Afrouxar:
             return self.memoria[chave]
         if chave in self.andamento:
             return True  # ciclo (a revisao recusa): afrouxar a mais nunca recusa um pedido valido
-        self.andamento.add(chave)
-        achou = any(palavra in no for palavra in SO_O_TERCEIRO_CONFERE) or any(
-            self.tem_regra(sub) for _, sub in _filhos(no, com_definicoes=False)
-        )
-        if not achou and "$ref" in no:
-            alvo = _definicao(self.raiz, no["$ref"])
-            achou = alvo is None or self.tem_regra(alvo)  # referencia de outra forma: na duvida, afrouxa
-        self.andamento.discard(chave)
-        self.memoria[chave] = achou
-        return achou
+        if any(palavra in no for palavra in SO_O_TERCEIRO_CONFERE):
+            self.memoria[chave] = True
+            return True
+        return None
 
-    def afrouxar(self, no: Any) -> Any:
-        if not isinstance(no, dict):
-            return no  # esquema booleano ou valor que o validador recusa
-        saida: dict[str, Any] = {}
-        condicao_com_regra = "if" in no and self.tem_regra(no["if"])
-        for chave, valor in no.items():
-            if (
-                chave in SO_O_TERCEIRO_CONFERE
-                or (chave == "not" and self.tem_regra(valor))
-                or (chave in ("if", "then", "else") and condicao_com_regra)
-                or (chave == "maxContains" and self.tem_regra(no.get("contains")))
-            ):
-                continue
-            if chave == "oneOf" and isinstance(valor, list) and any(self.tem_regra(s) for s in valor):
-                if "anyOf" not in no:
-                    saida["anyOf"] = [self.afrouxar(sub) for sub in valor]
-            elif chave in _MAPA_DE_ESQUEMAS and isinstance(valor, dict):
-                saida[chave] = {nome: self.afrouxar(sub) for nome, sub in valor.items()}
-            elif chave in _LISTA_DE_ESQUEMAS and isinstance(valor, list):
-                saida[chave] = [self.afrouxar(sub) for sub in valor]
-            elif chave in _UM_ESQUEMA:
-                saida[chave] = self.afrouxar(valor)
+    def tem_regra(self, no: Any) -> bool:
+        """``no`` ou alguma parte que a conferencia dele visita (seguindo as referencias) tem regra tirada."""
+        sabido = self._sabido(no)
+        if sabido is not None:
+            return sabido
+        self.andamento.add(id(no))
+        pilha: list[tuple[dict[str, Any], Iterator[Any]]] = [(no, self._seguintes(no))]
+        while pilha:
+            atual, seguintes = pilha[-1]
+            for sub in seguintes:
+                sabido = self._sabido(sub)
+                if sabido is None:
+                    self.andamento.add(id(sub))
+                    pilha.append((sub, self._seguintes(sub)))
+                    break
+                if sabido:
+                    # A regra esta abaixo de todas as partes da pilha: todas tem regra.
+                    for parte, _ in pilha:
+                        self.andamento.discard(id(parte))
+                        self.memoria[id(parte)] = True
+                    return True
             else:
-                saida[chave] = valor
+                pilha.pop()
+                self.andamento.discard(id(atual))
+                self.memoria[id(atual)] = False
+        return False
+
+    def afrouxar(self, raiz: Any) -> Any:
+        if not isinstance(raiz, dict):
+            return raiz
+        saida: dict[str, Any] = {}
+        pilha: list[_ParaAfrouxar] = [(raiz, saida)]
+        while pilha:
+            no, copia = pilha.pop()
+            condicao_com_regra = "if" in no and self.tem_regra(no["if"])
+            for chave, valor in no.items():
+                if (
+                    chave in SO_O_TERCEIRO_CONFERE
+                    or (chave == "not" and self.tem_regra(valor))
+                    or (chave in ("if", "then", "else") and condicao_com_regra)
+                    or (chave == "maxContains" and self.tem_regra(no.get("contains")))
+                ):
+                    continue
+                if chave == "oneOf" and isinstance(valor, list) and any(self.tem_regra(s) for s in valor):
+                    if "anyOf" not in no:
+                        copia["anyOf"] = [_vaga_afrouxada(sub, pilha) for sub in valor]
+                elif chave in _MAPA_DE_ESQUEMAS and isinstance(valor, dict):
+                    copia[chave] = {nome: _vaga_afrouxada(sub, pilha) for nome, sub in valor.items()}
+                elif chave in _LISTA_DE_ESQUEMAS and isinstance(valor, list):
+                    copia[chave] = [_vaga_afrouxada(sub, pilha) for sub in valor]
+                elif chave in _UM_ESQUEMA:
+                    copia[chave] = _vaga_afrouxada(valor, pilha)
+                else:
+                    copia[chave] = valor
         return saida
 
 
+@_sem_estouro
 def para_conferir(esquema: Mapping[str, Any]) -> dict[str, Any]:
     """A copia do esquema revisado de um terceiro que a entrada usa para conferir os argumentos: sem
     ``pattern`` e sem ``uniqueItems`` em nenhum lugar de esquema (nomes de campo e dados ficam como estao).
 
     Todo pedido que o esquema aceita, a copia aceita (``_Afrouxar`` explica os casos); o que so a regra tirada
     recusaria, o servidor do terceiro recusa. Sem essas palavras, a copia e igual ao esquema. Espera um esquema
-    que passou em ``conferir_terceiro``.
+    que passou em ``conferir_terceiro``; sem recursao, termina com qualquer esquema que veio de JSON.
     """
     raiz = dict(esquema)
     return dict(_Afrouxar(raiz).afrouxar(raiz))

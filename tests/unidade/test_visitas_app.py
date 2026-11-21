@@ -5,6 +5,8 @@
 - A1: cada chamada roda num processo filho novo; duas chamadas a terceiros diferentes ao mesmo tempo rodam em
   processos diferentes, e o processo de X nao recebe a chave de Y;
 - o pai devolve o que o filho escreveu, sem ler; erro inesperado do filho, ou prazo da sala, vira 500 (duvida);
+- o filho so avisa que esta pronto depois de se isolar, e isolado nao escreve no stdout nem no stderr da sala;
+- os filhos nascem numa thread da sala que vive tanto quanto ela (``PR_SET_PDEATHSIG`` vale pela thread);
 - o ambiente que vale e o da sala; enderecos locais so em desenvolvimento;
 - partida: sem ``DATABASE_*``, ``DB_*``, ``VAULT_*`` nem outro segredo, e so com mTLS.
 """
@@ -13,16 +15,23 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import functools
 import json
 import os
+import select
 import socket
 import ssl
 import sys
+import threading
+import time
+import types
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
 import anyio
+import anyio._backends._asyncio
+import anyio.to_thread
 import httpx2
 import pytest
 from starlette.applications import Starlette
@@ -249,8 +258,9 @@ class _Encontro:
 
 
 async def test_duas_chamadas_a_terceiros_diferentes_ao_mesmo_tempo_rodam_em_processos_diferentes(
-    certificados: Certificados, espiao: Path
+    certificados: Certificados, espiao: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setitem(sys.modules, apoio_visitas.SO_DO_PAI, types.ModuleType(apoio_visitas.SO_DO_PAI))
     encontro = _Encontro()
     x, y = terceiro_falante.criar(), terceiro_falante.criar()
     chaves = {"x": "chave-ana", "y": "chave-bia"}  # as chaves que os dubles aceitam
@@ -334,6 +344,20 @@ async def test_filho_recem_iniciado_so_recebe_o_pedido_depois_de_avisar_que_se_i
     assert (espiao / f"{pid}.pedido").read_bytes() == b'/interno/visitas/chamar\n{"chave":"chave-da-bia"}'
 
 
+async def test_o_filho_so_avisa_que_esta_pronto_depois_de_se_isolar(espiao: Path) -> None:
+    """Dentro do ``filho.principal`` de verdade: o aviso ``PRONTO`` vem depois do ``_isolar()``, e no momento do aviso
+    o processo ja nao pode ser depurado por outro do mesmo usuario."""
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=apoio_visitas.lento_antes_de_isolar, prontos=0)
+    async with sala.ligada():
+        atendimento = await sala.atender(sala_contrato.ROTA_CHAMAR, b'{"chave":"k"}')
+    assert (atendimento.status, atendimento.desfecho) == (200, "filho")
+    [pid] = _pids_com(espiao, "ordem")
+    passos = [json.loads(linha) for linha in (espiao / f"{pid}.ordem").read_text().splitlines()]
+    assert [passo["passo"] for passo in passos] == ["isolou", "aviso"]
+    if filho.depuravel() is not None:  # Linux
+        assert passos[1]["depuravel"] is False
+
+
 async def test_filho_tomado_nao_alcanca_o_cano_nem_a_memoria_de_um_irmao_que_ainda_nao_se_isolou(
     espiao: Path,
 ) -> None:
@@ -405,6 +429,124 @@ def test_os_canos_do_pai_com_o_filho_nao_se_reabrem_pelo_proc() -> None:
         novo.encerrar()
 
 
+async def test_filho_isolado_nao_escreve_na_saida_da_sala_e_a_chamada_responde(
+    espiao: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """Depois de ``_isolar()``, 0, 1 e 2 apontam para ``/dev/null`` e o cano do rastreador de recursos do
+    ``multiprocessing`` (herdado do pai) fica fechado: um filho tomado nao escreve no log da sala."""
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=apoio_visitas.escreve_depois_de_isolar, prontos=0)
+    capfd.readouterr()
+    async with sala.ligada():
+        atendimento = await sala.atender(sala_contrato.ROTA_CHAMAR, b"{}")
+    capturado = capfd.readouterr()
+    assert (atendimento.status, atendimento.desfecho) == (200, "filho")
+    assert apoio_visitas.MARCA_NA_SAIDA.decode() not in capturado.out + capturado.err
+    vistos = json.loads(atendimento.corpo)
+    assert vistos == {
+        "descritores": {"0": "devnull", "1": "devnull", "2": "devnull"},
+        "rastreador_herdado": True,
+        "rastreador_fechado": True,
+        "rastreador_agora": None,
+    }
+
+
+async def _atender_com_resposta(saida: bytes) -> visitas_app.Atendimento:
+    alvo = functools.partial(apoio_visitas.responde_cru, saida)
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=alvo, prontos=0)
+    async with sala.ligada():
+        return await sala.atender(sala_contrato.ROTA_CHAMAR, b"{}")
+
+
+@pytest.mark.parametrize("saida", [b"999{}", b"000{}", b"600{}", b"099{}", b"20{}"])
+async def test_status_de_tres_digitos_fora_de_100_a_599_vira_500_resposta_invalida(saida: bytes) -> None:
+    atendimento = await _atender_com_resposta(saida)
+    assert (atendimento.status, atendimento.corpo, atendimento.desfecho) == (
+        500,
+        visitas_app._ERRO,
+        "filho_resposta_invalida",
+    )
+
+
+@pytest.mark.parametrize("saida", [b"100{}", b"599{}", b"2000"])
+async def test_status_nas_pontas_da_faixa_passa_sem_o_pai_ler_o_corpo(saida: bytes) -> None:
+    atendimento = await _atender_com_resposta(saida)
+    assert (atendimento.status, atendimento.corpo, atendimento.desfecho) == (int(saida[:3]), saida[3:], "filho")
+
+
+# --- os filhos nascem numa thread que vive tanto quanto a sala -----------------------------------------------------
+
+
+async def test_filhos_nascem_sempre_na_thread_criadora_da_sala(monkeypatch: pytest.MonkeyPatch, espiao: Path) -> None:
+    """``PR_SET_PDEATHSIG`` vale pela thread que criou o filho, nao pelo processo. Todo filho (os prontos da
+    reposicao, o da chamada sem pronto e o que troca um filho que nao se isolou) nasce na thread criadora da sala,
+    aberta em ``Sala.ligada()`` e fechada no fim; nunca numa thread do anyio, que o anyio aposenta quando ociosa."""
+    onde: list[threading.Thread] = []
+    iniciar = visitas_app.Sala._iniciar
+
+    def anotar(self: visitas_app.Sala) -> Any:
+        onde.append(threading.current_thread())
+        return iniciar(self)
+
+    monkeypatch.setattr(visitas_app.Sala, "_iniciar", anotar)
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=apoio_visitas.nao_se_isola_na_primeira, prontos=1)
+    resultados: list[visitas_app.Atendimento] = []
+
+    async def chamar() -> None:
+        resultados.append(await sala.atender(sala_contrato.ROTA_CHAMAR, b'{"chave":"k"}'))
+
+    async with sala.ligada():
+        async with anyio.create_task_group() as tarefas:
+            for _ in range(3):
+                tarefas.start_soon(chamar)
+        await chamar()
+    assert [(r.status, r.desfecho) for r in resultados] == [(200, "filho")] * 4
+    assert len(onde) >= 5  # o primeiro pronto, o que o trocou, os das chamadas sem pronto e a reposicao
+    assert not [t.name for t in onde if t.name.startswith("AnyIO worker thread")]
+    [criadora] = set(onde)
+    assert criadora.name.startswith(visitas_app.CRIADORA)
+    assert criadora is not threading.main_thread()
+    assert not criadora.is_alive()  # fechada no fim da sala
+
+
+async def test_filho_nao_morre_quando_o_anyio_aposenta_uma_thread_ociosa(
+    monkeypatch: pytest.MonkeyPatch, espiao: Path
+) -> None:
+    """Com o intervalo ocioso do anyio curto (0,2 s), threads do anyio vem e vao durante as chamadas. Nenhum filho
+    morre por isso: em cada rodada, duas chamadas longas (cada uma num filho que demora 1 s) estao em andamento no
+    filho, ja isolado, quando chega outra, depois do intervalo ocioso, que faz o anyio aposentar as threads ociosas.
+
+    Sem prontos, cada chamada inicia o seu filho; as duas longas, ao mesmo tempo, em duas threads diferentes. Com os
+    filhos criados em threads do anyio, a chamada que chega aposentava a thread de uma das duas longas, e o filho
+    dela morria no meio (500, ``filho_sem_resposta``): uma por rodada."""
+    monkeypatch.setattr(anyio._backends._asyncio.WorkerThread, "MAX_IDLE_TIME", 0.2)
+    sala = visitas_app.Sala(Parametros(APP_ENV="teste"), alvo=apoio_visitas.atende_devagar, prontos=0, teto_chamada=60)
+    resultados: list[tuple[str, visitas_app.Atendimento]] = []
+
+    async def chamar(nome: str, corpo: bytes) -> None:
+        resultados.append((nome, await sala.atender(sala_contrato.ROTA_CHAMAR, corpo)))
+
+    def longas_em_andamento() -> int:
+        return sum((espiao / f"{pid}.dormindo").read_text() == "1.0" for pid in _pids_com(espiao, "dormindo"))
+
+    async with sala.ligada():
+        # Varias threads do anyio ao mesmo tempo; depois, todas ociosas por mais que o intervalo.
+        async with anyio.create_task_group() as tarefas:
+            for _ in range(8):
+                tarefas.start_soon(anyio.to_thread.run_sync, time.sleep, 0.05)
+        await anyio.sleep(0.5)
+        for rodada in range(1, 11):
+            async with anyio.create_task_group() as tarefas:
+                for _ in range(2):
+                    tarefas.start_soon(chamar, "longa", b'{"dormir":1.0}')
+                with anyio.fail_after(60):  # as duas longas ja estao no filho isolado (sem relogio de parede)
+                    while longas_em_andamento() < 2 * rodada:  # noqa: ASYNC110 - espera o filho
+                        await anyio.sleep(0.02)
+                await anyio.sleep(0.3)  # mais que o intervalo ocioso
+                tarefas.start_soon(chamar, "depois", b'{"dormir":0.0}')
+    assert len(resultados) == 30
+    assert [(nome, r.status, r.desfecho) for nome, r in resultados if (r.status, r.desfecho) != (200, "filho")] == []
+
+
 async def test_o_pai_devolve_os_bytes_do_filho_sem_ler(certificados: Certificados) -> None:
     async with _sala_no_ar(certificados, alvo=apoio_visitas.responde_bytes_crus) as (cs, p, _):
         contexto = contexto_do_despachante(p)
@@ -435,21 +577,35 @@ async def test_erro_inesperado_do_filho_vira_500_e_o_despachante_le_duvida(
     assert (s.desfecho, s.excecao) == ("inalcancavel", sala_contrato.SALA_RESPOSTA_INVALIDA)
 
 
+async def _prontos_isolados(sala: visitas_app.Sala) -> None:
+    """Espera os filhos prontos avisarem que se isolaram (o aviso fica no cano ate a chamada o ler). Assim, o prazo
+    de um teste conta so o atendimento, e nao a partida de um filho numa maquina carregada."""
+    with anyio.fail_after(60):
+        while len(sala._prontos) < visitas_app.PRONTOS or not all(  # noqa: ASYNC110 - espera a reposicao
+            select.select([f.respostas.fileno()], [], [], 0)[0] for f in sala._prontos
+        ):
+            await anyio.sleep(0.05)
+
+
 async def test_prazo_da_sala_esgotado_mata_o_filho_e_vira_500(certificados: Certificados, espiao: Path) -> None:
-    async with _sala_no_ar(certificados, alvo=apoio_visitas.dorme, teto_chamada=1.0) as (_, p, _):
+    teto = 3.0
+    async with _sala_no_ar(certificados, alvo=apoio_visitas.dorme, teto_chamada=teto) as (_, p, sala):
+        await _prontos_isolados(sala)
         inicio = anyio.current_time()
-        async with httpx2.AsyncClient(verify=contexto_do_despachante(p), timeout=30) as http:
+        async with httpx2.AsyncClient(verify=contexto_do_despachante(p), timeout=60) as http:
             resposta = await http.post(f"{p.VISITS_INTERNAL_URL}{sala_contrato.ROTA_CHAMAR}", content=b"{}")
         demora = anyio.current_time() - inicio
     assert resposta.status_code == 500
-    assert demora < 10
+    # Foi o prazo da sala: nem antes dele, nem os 120 s em que o filho dormiria, nem o prazo do cliente (60 s).
+    assert teto <= demora < teto + 15
     vivos = _vivos_do_espiao(espiao)
-    assert vivos
+    assert len(vivos) == 1  # o filho recebeu o pedido antes do prazo
     assert not any(_vivo(pid) for pid in vivos)
 
 
 async def test_despachante_que_desiste_derruba_o_filho_da_chamada(certificados: Certificados, espiao: Path) -> None:
-    async with _sala_no_ar(certificados, alvo=apoio_visitas.dorme) as (_, p, _):
+    async with _sala_no_ar(certificados, alvo=apoio_visitas.dorme) as (_, p, sala):
+        await _prontos_isolados(sala)
         async with httpx2.AsyncClient(verify=contexto_do_despachante(p), timeout=2) as http:
             with pytest.raises(httpx2.ReadTimeout):
                 await http.post(f"{p.VISITS_INTERNAL_URL}{sala_contrato.ROTA_CHAMAR}", content=b"{}")

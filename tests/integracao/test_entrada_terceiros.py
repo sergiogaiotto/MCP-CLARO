@@ -1,5 +1,6 @@
 """Entrada com servidores de terceiros (Fase 3, G4): quem ve e chama terceiro, -32021 de terceiro, tetos de tamanho
-dos argumentos e a moldura de texto de estranhos na resposta de leitura.
+dos argumentos (antes do esquema), orcamento de passos da conferencia do esquema e a moldura de texto de estranhos
+na resposta de leitura.
 
 Entrada real com o leitor falso no lugar do despachante (``test_entrada_terceiros_apoio``).
 """
@@ -12,13 +13,17 @@ from typing import Any
 import mcp_types as types
 import pytest
 from mcp.shared.exceptions import MCPError
+from sqlalchemy import text
 
+from mcp_claro.cadastro.esquema import ESCOLHAS_MAXIMAS, PROFUNDIDADE_MAXIMA, conferir_terceiro
 from mcp_claro.config.settings import Parametros
-from mcp_claro.entrada.argumentos import TETO_LISTA, TETO_TEXTO
+from mcp_claro.entrada import servidor as servidor_mod
+from mcp_claro.entrada.argumentos import RECUSA_ORCAMENTO, TETO_DIGITOS, TETO_LISTA, TETO_TEXTO
 from mcp_claro.regras import estranhos
 from mcp_claro.versao import MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META
 from tests.integracao.test_entrada_terceiros_apoio import (
     TEXTO_DO_SISTEMA,
+    Extra,
     Mundo,
     resultado_do_sistema,
     resultado_nosso,
@@ -43,6 +48,15 @@ async def mundo_ligado(banco_migrado: Parametros) -> AsyncIterator[Mundo]:
 
 def de_terceiro(m: Mundo) -> set[str]:
     return {m.f[k].nome for k in ("t_ler", "t_ver", "t_enviar")}
+
+
+async def operacoes(m: Mundo) -> int:
+    async with m.dono.connect() as c:
+        return int(
+            (
+                await c.execute(text("SELECT count(*) FROM operacoes WHERE aplicativo_id = :a"), {"a": m.apps["A"]})
+            ).scalar_one()
+        )
 
 
 # --- Quem ve e chama terceiro ---------------------------------------------------------------------------------
@@ -121,16 +135,29 @@ async def test_32021_de_terceiro_chega_como_erro_legivel_e_o_de_proprio_continua
 # --- Tetos de tamanho (pedido do G2) --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("argumentos", "frase"),
-    [
-        ({"texto": "a" * (TETO_TEXTO + 1)}, f"texto: texto com mais de {TETO_TEXTO} letras"),
-        ({"b" * (TETO_TEXTO + 1): "x"}, f"(raiz): nome de campo com mais de {TETO_TEXTO} letras"),
-        ({"lista": list(range(TETO_LISTA + 1))}, f"lista: lista com mais de {TETO_LISTA} itens"),
-        ({"lista": [{"fundo": [["c" * (TETO_TEXTO + 1)]]}]}, "lista/0/fundo/0/0: texto com mais de"),
-    ],
-    ids=["texto", "nome_de_campo", "lista", "fundo"],
-)
+def com_niveis(n: int) -> dict[str, Any]:
+    """``n`` niveis de listas e objetos, um dentro do outro (o objeto dos argumentos e o primeiro)."""
+    valor: Any = []
+    for _ in range(n - 2):
+        valor = [valor]
+    return {"lista": valor}
+
+
+GRANDES = [
+    ({"texto": "a" * (TETO_TEXTO + 1)}, f"texto: texto com mais de {TETO_TEXTO} letras"),
+    ({"b" * (TETO_TEXTO + 1): "x"}, f"(raiz): nome de campo com mais de {TETO_TEXTO} letras"),
+    ({"lista": list(range(TETO_LISTA + 1))}, f"lista: lista com mais de {TETO_LISTA} itens"),
+    ({"lista": [{"fundo": [["c" * (TETO_TEXTO + 1)]]}]}, "lista/0/fundo/0/0: texto com mais de"),
+    (
+        com_niveis(PROFUNDIDADE_MAXIMA + 1),
+        f"lista/.../{'/'.join(['0'] * 8)}: mais de {PROFUNDIDADE_MAXIMA} niveis de listas e objetos",
+    ),
+    ({"lista": [1, 10**TETO_DIGITOS]}, f"lista/1: numero com mais de {TETO_DIGITOS} digitos"),
+]
+IDS_GRANDES = ["texto", "nome_de_campo", "lista", "fundo", "niveis", "digitos"]
+
+
+@pytest.mark.parametrize(("argumentos", "frase"), GRANDES, ids=IDS_GRANDES)
 async def test_argumentos_grandes_para_terceiro_sao_recusados_antes_do_esquema(
     mundo: Mundo, argumentos: dict[str, Any], frase: str
 ) -> None:
@@ -150,13 +177,7 @@ async def test_argumentos_grandes_para_terceiro_sao_recusados_antes_do_esquema(
         assert linhas
         assert "argumento_grande_demais" in linhas[-1].frase
     assert m.leitor.chamadas == []
-    async with m.dono.connect() as c:
-        from sqlalchemy import text
-
-        novas = (
-            await c.execute(text("SELECT count(*) FROM operacoes WHERE aplicativo_id = :a"), {"a": m.apps["A"]})
-        ).scalar_one()
-    assert novas == 0
+    assert await operacoes(m) == 0
 
     # Num sistema proprio, os tetos nao valem: o mesmo pedido segue ao leitor.
     r = await m.chamar("ana", "p_simples", argumentos)
@@ -164,11 +185,125 @@ async def test_argumentos_grandes_para_terceiro_sao_recusados_antes_do_esquema(
     assert len(m.leitor.chamadas) == 1
 
 
+@pytest.mark.parametrize(("argumentos", "frase"), GRANDES, ids=IDS_GRANDES)
+async def test_tetos_rodam_antes_da_conferencia_do_esquema(
+    mundo: Mundo, monkeypatch: pytest.MonkeyPatch, argumentos: dict[str, Any], frase: str
+) -> None:
+    """A conferencia do esquema roda no laco da entrada: os tetos tem de vir antes, em leitura e em acao."""
+    m = mundo
+    chamadas: list[Any] = []
+
+    def nao_pode_rodar(*args: Any, **kwargs: Any) -> int:
+        chamadas.append(args)
+        raise AssertionError("a conferencia do esquema rodou antes dos tetos")
+
+    monkeypatch.setattr(servidor_mod, "conferir_argumentos", nao_pode_rodar)
+    for chave in ("t_ler", "t_enviar"):
+        with pytest.raises(MCPError) as erro:
+            await m.chamar("ana", chave, argumentos)
+        assert erro.value.error.data == {PREFIXO_META + "motivo": "argumento_grande_demais"}
+        mensagem = erro.value.error.message
+        assert mensagem.startswith("Argumentos grandes demais para um servidor de terceiros: ")
+        assert frase in mensagem
+    assert chamadas == []
+    assert m.leitor.chamadas == []
+    assert await operacoes(m) == 0
+
+    # O falso esta no caminho: dentro dos tetos, a entrada chama a conferencia (e o falso falha, como erro interno).
+    with pytest.raises(MCPError) as erro:
+        await m.chamar("ana", "t_ler", {"texto": "oi"})
+    assert erro.value.error.code == types.INTERNAL_ERROR
+    assert len(chamadas) == 1
+
+
 async def test_argumentos_no_teto_seguem_para_o_terceiro(mundo: Mundo) -> None:
     m = mundo
     r = await m.chamar("ana", "t_ler", {"texto": "a" * TETO_TEXTO, "lista": list(range(TETO_LISTA))})
     assert not r.is_error
     assert len(m.leitor.chamadas) == 1
+    r = await m.chamar("ana", "t_ler", {"lista": com_niveis(PROFUNDIDADE_MAXIMA - 1)["lista"]})
+    assert not r.is_error
+    assert len(m.leitor.chamadas) == 2
+
+
+# --- Orcamento de passos da conferencia do esquema (risco de largura do G2b) ----------------------------------
+
+ANYOF_CONST = {
+    "type": "object",
+    "properties": {"l": {"type": "array", "items": {"anyOf": [{"const": n} for n in range(1990)]}}},
+}
+ENUM_NO_TETO = {
+    "type": "object",
+    "properties": {"l": {"type": "array", "items": {"enum": list(range(ESCOLHAS_MAXIMAS))}}},
+}
+"""O enum mais longo que a revisao de terceiro aceita (o de 200 mil valores medido pelo G2b ela ja recusa)."""
+
+
+def quase(k: int) -> list[list[int]]:
+    valor = [[0] * 998 for _ in range(5)]
+    valor[4] = [0] * 997 + [k + 1]
+    return valor
+
+
+PEDIDO_ESTRUTURADO = {"l": [[0] * 998 for _ in range(5)]}
+ENUM_ESTRUTURADO = {
+    "type": "object",
+    "properties": {"l": {"allOf": [{"$ref": "#/$defs/e"}] * 995}},
+    "$defs": {"e": {"enum": [quase(k) for k in range(23)] + [PEDIDO_ESTRUTURADO["l"]]}},
+}
+"""O caso do verificador: 995 referencias a um enum de 24 listas de 5 mil partes. Antes da comparacao contada, um
+pedido valido levava uns 5 s pela entrada, dentro do orcamento."""
+CAROS = {
+    "t_caro_ler": Extra(True, ("ler_caro", "le", "medio", (), False), ANYOF_CONST),
+    "t_caro_mudar": Extra(True, ("mudar_caro", "muda", "medio", (), False), ENUM_NO_TETO),
+    "t_caro_estruturado": Extra(True, ("ler_estruturado", "le", "medio", (), False), ENUM_ESTRUTURADO),
+    "p_caro_ler": Extra(False, ("ler_caro_proprio", "le", "medio", (), False), ANYOF_CONST),
+}
+
+
+@pytest.fixture
+async def mundo_caro(banco_migrado: Parametros) -> AsyncIterator[Mundo]:
+    for extra in CAROS.values():
+        conferir_terceiro(extra.esquema)  # cada esquema caro passa na revisao de terceiro de hoje
+    async with subir_mundo(banco_migrado, extras=CAROS) as m:
+        yield m
+
+
+async def test_esquema_de_terceiro_caro_demais_e_recusado_com_frase_em_leitura_e_acao(mundo_caro: Mundo) -> None:
+    # Os esquemas passam na revisao de terceiro (a fixture confere) e os pedidos passam nos tetos: so o orcamento
+    # recusa. Os pedidos da acao e do enum estruturado sao validos: um esquema caro recusa ate pedido valido.
+    m = mundo_caro
+    for chave, pedido, tipo in (
+        ("t_caro_ler", {"l": [-1] * 300}, "leitura_recusada"),
+        ("t_caro_mudar", {"l": [ESCOLHAS_MAXIMAS - 1] * 50}, "acao_recusada"),
+        ("t_caro_estruturado", PEDIDO_ESTRUTURADO, "leitura_recusada"),
+    ):
+        with pytest.raises(MCPError) as erro:
+            await m.chamar("ana", chave, pedido)
+        assert erro.value.error.code == types.INVALID_PARAMS
+        assert erro.value.error.message == RECUSA_ORCAMENTO
+        assert erro.value.error.data == {PREFIXO_META + "motivo": "esquema_caro_demais"}
+        assert "esquema_caro_demais" in (await m.extrato(tipo, pessoa="ana"))[-1].frase
+    assert m.leitor.chamadas == []
+    assert await operacoes(m) == 0
+
+    # Pedido barato no mesmo esquema: cabe no orcamento e segue.
+    r = await m.chamar("ana", "t_caro_ler", {"l": [0, 1]})
+    assert not r.is_error
+    assert [c.ferramenta_id for c in m.leitor.chamadas] == [m.f["t_caro_ler"].id]
+
+
+async def test_esquema_proprio_caro_confere_como_antes(mundo_caro: Mundo) -> None:
+    # D3: num sistema proprio nao ha orcamento; a recusa e a de sempre, com os cinco primeiros problemas.
+    m = mundo_caro
+    with pytest.raises(MCPError) as erro:
+        await m.chamar("ana", "p_caro_ler", {"l": [-1] * 300})
+    assert erro.value.error.data == {PREFIXO_META + "motivo": "argumento_fora_do_esquema"}
+    assert erro.value.error.message == "Argumentos fora do esquema revisado: " + "; ".join(
+        f"l/{n}: regra 'anyOf' nao atendida" for n in range(5)
+    )
+    r = await m.chamar("ana", "p_caro_ler", {"l": [1989] * 300})
+    assert not r.is_error
 
 
 # --- Moldura de estranhos na leitura ---------------------------------------------------------------------------
