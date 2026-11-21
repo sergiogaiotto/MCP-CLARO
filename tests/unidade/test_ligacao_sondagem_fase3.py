@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import anyio
+import httpx2
 import pytest
 from mcp import ClientSession
 from starlette.applications import Starlette
@@ -299,6 +300,9 @@ async def test_sse_sem_json_rpc_nao_e_mcp() -> None:
     assert s.desfecho == "nao_mcp"
 
 
+_ERRO_SSE = {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "Method not found"}}
+
+
 def _sse_em_linhas(m: dict[str, Any], fim: bytes = b"\n") -> bytes:
     """Um evento SSE com o JSON quebrado em varias linhas ``data:`` (valido no SSE: o leitor junta com quebra)."""
     texto = json.dumps(m, indent=1).splitlines()
@@ -306,13 +310,39 @@ def _sse_em_linhas(m: dict[str, Any], fim: bytes = b"\n") -> bytes:
     return b"".join(linha + fim for linha in linhas) + fim
 
 
-@pytest.mark.parametrize("fim", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("fim", [b"\n", b"\r\n", b"\r"], ids=["lf", "crlf", "cr"])
 async def test_sse_com_json_rpc_em_varias_linhas_data_e_versao(fim: bytes) -> None:
     def resposta(m: dict[str, Any]) -> Response:
         erro = {"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "Method not found"}}
-        return Response(b": comentario\n\n" + _sse_em_linhas(erro, fim), media_type="text/event-stream")
+        return Response(b": comentario" + fim + fim + _sse_em_linhas(erro, fim), media_type="text/event-stream")
 
     async with servidor(_app(resposta)) as base:
+        s = await cliente.sondar(f"{base}/mcp", _chave, prazo=2)
+    assert (s.desfecho, s.codigo) == ("versao", -32601)
+
+
+@pytest.mark.parametrize("fim", [b"\r\n", b"\r"], ids=["crlf", "cr"])
+async def test_sse_com_fim_de_linha_partido_entre_pedacos_e_lido_uma_vez(fim: bytes) -> None:
+    """Cada pedaco acaba logo depois do ``\\r``: o ``\\n`` do ``\\r\\n`` chega no comeco do pedaco seguinte e nao vira
+    uma linha vazia a mais (que fecharia o evento no meio). Com ``\\r`` sozinho, o pedaco seguinte e outra linha."""
+
+    async def mcp(pedido: Request) -> Response:
+        m = await pedido.json()
+        erro = {"jsonrpc": "2.0", "id": m["id"], "error": {"code": -32601, "message": "Method not found"}}
+        corpo = _sse_em_linhas(erro, fim)
+        cortes = [i + 1 for i, b in enumerate(corpo) if b == ord("\r")]
+        pedacos = [corpo[a:b] for a, b in zip([0, *cortes], [*cortes, len(corpo)], strict=True) if corpo[a:b]]
+        assert len(pedacos) > 3
+        assert all(p.endswith(b"\r") for p in pedacos[:-1])
+
+        async def eventos() -> AsyncIterator[bytes]:
+            for pedaco in pedacos:
+                yield pedaco
+                await anyio.sleep(0.001)  # pedacos separados no fio
+
+        return StreamingResponse(eventos(), media_type="text/event-stream")
+
+    async with servidor(Starlette(routes=[Route("/mcp", mcp, methods=["POST"])])) as base:
         s = await cliente.sondar(f"{base}/mcp", _chave, prazo=2)
     assert (s.desfecho, s.codigo) == ("versao", -32601)
 
@@ -343,3 +373,30 @@ async def test_sse_com_varias_linhas_sem_json_rpc_nao_e_mcp() -> None:
     async with servidor(_app(resposta)) as base:
         s = await cliente.sondar(f"{base}/mcp", _chave, prazo=2)
     assert s.desfecho == "nao_mcp"
+
+
+@pytest.mark.parametrize(
+    "pedacos",
+    [
+        [b"data: " + json.dumps(_ERRO_SSE).encode() + b"\r", b"\n", b"\n"],
+        [b"data: " + json.dumps(_ERRO_SSE).encode() + b"\r", b"\n", b"\r"],
+        [b"data: " + json.dumps(_ERRO_SSE).encode() + b"\r", b"\r"],
+        [b"data: " + json.dumps(_ERRO_SSE).encode() + b"\n\r\n"],
+    ],
+    ids=["cr-lf-lf", "cr-lf-cr", "cr-cr", "lf-crlf"],
+)
+def test_farejador_fecha_o_evento_na_linha_vazia_certa(pedacos: list[bytes]) -> None:
+    """Um ``\\n`` sozinho logo depois de um ``\\r`` so completa o ``\\r\\n``; a linha vazia seguinte fecha o evento."""
+    tentativa = cliente.Tentativa()
+    farejador = cliente._SseFarejado(httpx2.ByteStream(b""), tentativa, 1024)
+    vistos = [farejador._farejar(p) for p in pedacos]
+    assert vistos == [False] * (len(pedacos) - 1) + [True]
+
+
+def test_farejador_nao_fecha_o_evento_com_o_lf_do_crlf_partido() -> None:
+    tentativa = cliente.Tentativa()
+    farejador = cliente._SseFarejado(httpx2.ByteStream(b""), tentativa, 1024)
+    assert farejador._farejar(b'data: {"jsonrpc":"2.0",\r') is False
+    assert farejador._farejar(b'\ndata: "id":1,"error":{"code":-1,"message":"x"}}\r') is False
+    assert farejador._farejar(b"\n") is False
+    assert farejador._farejar(b"\r\n") is True

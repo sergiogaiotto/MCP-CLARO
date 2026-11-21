@@ -243,7 +243,13 @@ _vitrine_de_verdade = repositorio.ferramenta_na_vitrine
 
 
 async def _vitrine_furada(
-    c: AsyncConnection, pessoa_id: uuid.UUID, aplicativo_id: uuid.UUID, nome_vitrine: str, versao: str
+    c: AsyncConnection,
+    pessoa_id: uuid.UUID,
+    aplicativo_id: uuid.UUID,
+    nome_vitrine: str,
+    versao: str,
+    *,
+    terceiros: bool = False,
 ) -> Any:
     """Falha plantada: acha a ferramenta na ordem de qualquer pessoa, como se fosse de quem pediu."""
     dona = (
@@ -258,8 +264,8 @@ async def _vitrine_furada(
         )
     ).first()
     if dona is None:
-        return await _vitrine_de_verdade(c, pessoa_id, aplicativo_id, nome_vitrine, versao)
-    return await _vitrine_de_verdade(c, dona.pessoa_id, dona.aplicativo_id, nome_vitrine, versao)
+        return await _vitrine_de_verdade(c, pessoa_id, aplicativo_id, nome_vitrine, versao, terceiros=terceiros)
+    return await _vitrine_de_verdade(c, dona.pessoa_id, dona.aplicativo_id, nome_vitrine, versao, terceiros=terceiros)
 
 
 async def test_vitrine_furada_a_ronda_acusa_e_fecha_a_entrada(

@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+import anyio
 import httpx2
 import pytest
 from mcp.shared import _otel as kit_otel
@@ -31,6 +32,7 @@ from exemplos import terceiro_falante
 from mcp_claro import __version__
 from mcp_claro.cadastro.modelos import Sistema
 from mcp_claro.ligacao import cliente, ponto
+from mcp_claro.ligacao.sala_cliente import FOLGA_PADRAO
 from mcp_claro.ligacao.sala_contrato import SALA_FORA
 from mcp_claro.versao import VERSAO_MCP
 from tests.apoio import servidor
@@ -327,6 +329,37 @@ async def test_endereco_recusado_nao_abre_conexao(ambiente: str) -> None:
     assert (r.tipo, r.excecao) == ("nao_enviado", cliente.ENDERECO_RECUSADO)
     assert (s.desfecho, s.excecao, s.aceito) == ("inalcancavel", cliente.ENDERECO_RECUSADO, False)
     assert app.state.recebidos == []
+
+
+async def test_resolvedor_lento_nao_come_o_prazo_da_chamada(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A conferencia do nome tem prazo curto e fixo (o mesmo connect de 3 s), nunca o prazo da chamada.
+
+    Com um resolvedor que nunca responde, chamar, sondar e listar desistem em ``PRAZO_CONEXAO``, sem enviar nada.
+    Assim o tempo na sala (nome + conexao + prazo da chamada) cabe no prazo mais a folga que o salto espera.
+    """
+
+    async def getaddrinfo(*_: Any, **__: Any) -> list[Any]:
+        await anyio.sleep(3600)
+        return []
+
+    monkeypatch.setattr(cliente.anyio, "getaddrinfo", getaddrinfo)
+    url, prazo, regras = "https://servidor.fornecedor.exemplo/mcp", 8.0, {"terceiro": True, "ambiente": "piloto"}
+    teto = cliente.PRAZO_CONEXAO + 1
+    inicio = anyio.current_time()
+    r = await cliente.chamar_ferramenta(url, _chave, None, "x", {}, prazo=prazo, **regras)
+    depois_de_chamar = anyio.current_time()
+    s = await cliente.sondar(url, _chave, prazo=prazo, **regras)
+    depois_de_sondar = anyio.current_time()
+    with anyio.fail_after(teto + 1), pytest.raises(TimeoutError):  # TimeoutError e OSError: nome nao resolvido
+        await cliente.listar_ferramentas(url, _chave, None, **regras)
+    fim = anyio.current_time()
+    assert (r.tipo, r.excecao, r.status_http) == ("nao_enviado", cliente.NOME_NAO_RESOLVIDO, ())
+    assert (s.desfecho, s.excecao) == ("inalcancavel", cliente.NOME_NAO_RESOLVIDO)
+    assert depois_de_chamar - inicio < teto
+    assert depois_de_sondar - depois_de_chamar < teto
+    assert fim - depois_de_sondar < teto
+    # Nome e conexao, cada um no seu prazo fixo, cabem juntos na folga do salto ate a sala.
+    assert 2 * cliente.PRAZO_CONEXAO < FOLGA_PADRAO
 
 
 async def test_nome_que_nao_resolve_e_nao_enviado() -> None:

@@ -2,21 +2,37 @@
 
 Antes da rota: com argumento que traz o caractere nulo (U+0000, que o banco nao guarda), com bloqueio que vale
 para o pedido, ou com a porta de saida fechada, a acao e recusada antes de virar protocolo (nada e gasto,
-nenhuma ficha e montada).
+nenhuma ficha e montada). Ferramenta de servidor de terceiros: sob a mesma trava, a ferramenta e lida de novo
+(``ferramenta_da_ordem``, com ``Pedido.terceiros``); servidor em quarentena recusa com
+``sistema_em_quarentena``, e o resto que a tirou da vitrine com ``fora_da_vitrine``.
 
 Escolha da rota, nesta ordem:
 
 1. pedido igual: a original que ainda pode sair (esperando a ficha, liberada ou enviando) e devolvida em
    qualquer idade; a que ja saiu ou ficou nao confirmada, por ``DUPLICATE_WINDOW_MINUTES``. Nada novo sai;
-2. teto de fichas por aplicativo (``CONFIRM_CAP_PER_HOUR``): acima dele, o aplicativo pausa;
+2. teto de fichas por aplicativo (``CONFIRM_CAP_PER_HOUR``): acima dele, o aplicativo pausa. As fichas do
+   alerta dos tres sinais contam (D25);
 3. risco alto: ficha com passkey (``FEATURE_PASSKEY``), nunca limite;
 4. periodo de experiencia (``TRIAL_PERIOD_DAYS``): tudo passa pela pessoa, nunca limite;
-5. limite por aproximacao que cobre o pedido e tem saldo (com a passkey ligada, so limite feito com ela):
+5. alerta dos tres sinais (``regras.sinais``, janela ``THREE_SIGNALS_WINDOW_MINUTES``): o aplicativo leu texto
+   de fora e viu dado privado da pessoa, e agora quer enviar algo. A acao vai para a ficha sem consultar nem
+   gastar limite, e a ficha guarda o retrato (``fichas.sinais``). Risco alto e experiencia mantem a rota deles
+   e tambem levam o retrato. O aplicativo nao fica sabendo do alerta (D24): recebe a resposta de qualquer ficha;
+6. limite por aproximacao que cobre o pedido e tem saldo (com a passkey ligada, so limite feito com ela):
    liberada com a espera visivel;
-6. senao, ficha.
+7. senao, ficha.
+
+Uma acao ja liberada antes do alerta (por um limite) sai: o alerta vale para o que for pedido depois.
 
 A entrada nunca chama o sistema: quem envia e o despachante unico. Enquanto espera, a entrada so
 olha o estado da fila, no maximo ``RESPONSE_MAX_WAIT_SECONDS``.
+
+Resposta de uma acao enviada (``resposta``): o bloco "Protocolo X: enviada uma vez ao sistema." vem primeiro, fora
+da moldura; o resultado de estranhos (servidor de terceiros ou ferramenta marcada "traz texto de fora") vem
+depois, emoldurado por ``regras.estranhos.marcar``. O aviso de partes sem texto retiradas pela medida fica fora da
+moldura so quando a porta de saida guardou a conta (``fila.META_RETIRADAS``); sem ela, vai dentro, como texto do
+sistema. ``operacoes.resultado`` continua gravado so com a mascara, sem moldura (uma marca nova a cada resposta), e
+o ``_meta`` guardado nunca vai ao aplicativo.
 """
 
 from __future__ import annotations
@@ -31,17 +47,18 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine
 from mcp_claro.config.settings import Parametros
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, estado, politica, programas
+from mcp_claro.regras import bloqueios, estado, estranhos, politica, programas, sinais
 from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import FINAIS, FRASE, Estado
 from mcp_claro.saida.fila import Operacao, Rota
 from mcp_claro.saida.protocolo import FUSO, chave_pedido_igual, protocolo_valido
-from mcp_claro.versao import PREFIXO_META
+from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.saida.pedidos")
 
@@ -73,6 +90,9 @@ FERRAMENTA_CONSULTA: Final[dict[str, Any]] = {
 }
 
 
+RECUSA_QUARENTENA: Final = "O servidor desta ferramenta esta em quarentena ate nova revisao do ADMIN. Nada foi enviado."
+
+
 class AcaoRecusada(Exception):
     def __init__(self, motivo: str, mensagem: str) -> None:
         self.motivo = motivo
@@ -88,6 +108,10 @@ class Pedido:
     argumentos: dict[str, Any]
     aplicativo_diz: str | None
     trace_id: str | None = None
+    terceiros: bool = False
+    """Servidores de terceiros valem para quem pede: chave da Fase 3 ligada ou pessoa de teste. Decide a
+    releitura de uma ferramenta de terceiro e se o sinal "leu texto de fora" vindo de terceiro conta no alerta
+    dos tres sinais (o de ferramenta propria marcada conta sempre)."""
 
 
 RECUSA_NULO: Final = (
@@ -148,6 +172,10 @@ class Pedidos:
             # saida toma exclusiva: a leitura aqui vale.
             if not (await estado.ler_saida(c)).aberta:
                 raise AcaoRecusada("saida_fechada", estado.MENSAGEM_SAIDA_FECHADA)
+            if f.sistema.de_terceiro:
+                # Sob a trava compartilhada do sistema, a mesma que a quarentena toma exclusiva: ou ela entrou antes
+                # (e e vista aqui), ou espera este pedido terminar (e o cancela).
+                await self._reler_terceiro(c, pedido)
             valores = await politica.varios(
                 c,
                 "DUPLICATE_WINDOW_MINUTES",
@@ -155,6 +183,7 @@ class Pedidos:
                 "TRIAL_PERIOD_DAYS",
                 "CARD_TTL_MINUTES",
                 "OUTBOX_HOLD_SECONDS",
+                sinais.CHAVE_JANELA,
             )
             original = await fila.pedido_igual(c, chave, valores["DUPLICATE_WINDOW_MINUTES"])
             if original is not None:
@@ -206,6 +235,31 @@ class Pedidos:
         CONTADORES.somar("acoes_pedidas", rota=rota.motivo)
         return op, False
 
+    async def _reler_terceiro(self, c: Any, pedido: Pedido) -> None:
+        """A ferramenta de terceiro ainda vale para esta pessoa, neste aplicativo, na mesma ordem e versao."""
+        f = pedido.ferramenta
+        if f.ordem_id is None:
+            raise AcaoRecusada("fora_da_ordem", "Ferramenta fora da sua ordem de servico. Nada foi enviado.")
+        atual = await repositorio.ferramenta_da_ordem(
+            c,
+            pessoa_id=pedido.pessoa_id,
+            aplicativo_id=pedido.aplicativo.id,
+            ordem_id=f.ordem_id,
+            ferramenta_id=f.id,
+            versao=VERSAO_MCP,
+            terceiros=pedido.terceiros,
+        )
+        if atual is not None:
+            return
+        situacao = (
+            await c.execute(text("SELECT situacao FROM sistemas WHERE id = :s"), {"s": f.sistema.id})
+        ).scalar_one_or_none()
+        if situacao == "quarentena":
+            raise AcaoRecusada("sistema_em_quarentena", RECUSA_QUARENTENA)
+        raise AcaoRecusada(
+            "fora_da_vitrine", f"A ferramenta {f.nome_vitrine} nao esta na sua vitrine. Nada foi enviado."
+        )
+
     def _prazo_da_ficha(self, pedido: Pedido, valores: dict[str, int]) -> int:
         """Programa que roda sozinho (decisao 9): a ficha vence no prazo ``PROGRAM_PENDING_TIMEOUT_HOURS``.
         Para assistentes, ``CARD_TTL_MINUTES``.
@@ -218,10 +272,21 @@ class Pedidos:
 
     async def _rota(self, c: Any, pedido: Pedido, valores: dict[str, int]) -> Rota | None:
         f = pedido.ferramenta
+        alerta = await sinais.alerta(
+            c,
+            pessoa_id=pedido.pessoa_id,
+            aplicativo_id=pedido.aplicativo.id,
+            janela_minutos=valores[sinais.CHAVE_JANELA],
+            terceiros=pedido.terceiros,
+        )
+        retrato = alerta.retrato() if alerta is not None else None
         if f.risco == "alto":
-            rota = Rota(exige_passkey=self.p.FEATURE_PASSKEY, motivo="risco_alto")
+            rota = Rota(exige_passkey=self.p.FEATURE_PASSKEY, motivo="risco_alto", sinais=retrato)
         elif await fila.em_experiencia(c, pedido.pessoa_id, pedido.aplicativo.id, valores["TRIAL_PERIOD_DAYS"]):
-            rota = Rota(motivo="periodo_de_experiencia")
+            rota = Rota(motivo="periodo_de_experiencia", sinais=retrato)
+        elif retrato is not None:
+            # Tres sinais: nenhum limite e consultado nem gasto.
+            rota = Rota(motivo="tres_sinais", sinais=retrato)
         else:
             limite = await fila.gastar_limite(
                 c,
@@ -364,8 +429,18 @@ def resposta(op: Operacao, *, selo: int | None = None, repetida: bool = False) -
     if repetida:
         meta[PREFIXO_META + "repetido"] = True
     if op.estado == Estado.ENVIADA and op.resultado is not None:
-        corpo = {k: v for k, v in op.resultado.items() if k != "_meta"}
         aviso = {"type": "text", "text": f"Protocolo {op.protocolo}: enviada uma vez ao sistema."}
+        if op.de_estranhos:
+            # O aviso do protocolo e nosso: fica fora da moldura. O resto sai emoldurado, com marca nova. O aviso de
+            # partes retiradas pela medida tambem sai fora, so com a conta guardada pela porta de saida.
+            marcado = estranhos.marcar(
+                op.resultado, sistema=op.sistema_nome, de_terceiro=op.de_terceiro, retiradas=op.retiradas
+            )
+            corpo = {k: v for k, v in marcado.items() if k not in ("content", "_meta")}
+            corpo["content"] = [aviso, *marcado["content"]]
+            corpo["_meta"] = meta | dict(marcado["_meta"])
+            return corpo
+        corpo = {k: v for k, v in op.resultado.items() if k != "_meta"}
         corpo["content"] = [aviso, *list(corpo.get("content") or [])]
         corpo["_meta"] = meta
         return corpo

@@ -147,6 +147,9 @@ _TENTATIVA: contextvars.ContextVar[Tentativa | None] = contextvars.ContextVar("m
 
 
 TETO_RESPOSTA_PADRAO = 8 * 1024 * 1024
+# Prazo para abrir a conexao com o sistema. A conferencia do nome de um servidor de terceiros (DNS) usa o mesmo
+# prazo, curto e fixo: o tempo na sala cabe no prazo da chamada mais a folga do salto, mesmo com resolvedor lento.
+PRAZO_CONEXAO = 3.0
 
 
 class RespostaGrandeDemais(httpx2.StreamError):
@@ -289,11 +292,15 @@ def _tem_jsonrpc(cabecalhos: httpx2.Headers, bruto: bytes) -> bool:
         return False
 
 
+_FIM_DE_LINHA_SSE = re.compile(rb"\r\n|\r|\n")
+
+
 class _SseFarejado(_CorpoVigiado):
     """Passa o SSE adiante sem esperar o fim (o stream pode ficar aberto) e marca se veio JSON-RPC nele.
 
     Le os eventos como o SSE manda: as linhas ``data:`` de um evento se juntam (com quebra de linha) ate a linha
-    vazia que fecha o evento; so entao o JSON do evento e conferido.
+    vazia que fecha o evento; so entao o JSON do evento e conferido. Fim de linha e ``\\r\\n``, ``\\r`` ou ``\\n``,
+    como no SSE (e no leitor do kit); um ``\\r\\n`` partido entre dois pedacos conta uma vez so.
     """
 
     def __init__(self, interno: httpx2.AsyncByteStream, tentativa: Tentativa, teto: int) -> None:
@@ -303,6 +310,7 @@ class _SseFarejado(_CorpoVigiado):
         self._marcas.append(False)
         self._pendente: list[bytes] = []  # pedacos da linha ainda sem fim
         self._dados: list[bytes] = []  # linhas data: do evento aberto
+        self._acabou_em_cr = False  # o pedaco anterior terminou em \r: um \n logo no comeco do proximo e o mesmo fim
 
     async def __aiter__(self) -> AsyncGenerator[bytes]:
         async for pedaco in super().__aiter__():
@@ -311,7 +319,12 @@ class _SseFarejado(_CorpoVigiado):
             yield pedaco
 
     def _farejar(self, pedaco: bytes) -> bool:
-        partes = pedaco.split(b"\n")
+        if self._acabou_em_cr and pedaco.startswith(b"\n"):
+            pedaco = pedaco[1:]
+        self._acabou_em_cr = pedaco.endswith(b"\r")
+        if not pedaco:
+            return False
+        partes = _FIM_DE_LINHA_SSE.split(pedaco)
         if len(partes) == 1:
             self._pendente.append(pedaco)
             return False
@@ -321,7 +334,6 @@ class _SseFarejado(_CorpoVigiado):
 
     def _linha(self, linha: bytes) -> bool:
         """Uma linha do SSE; True quando ela fecha um evento cujo JSON e uma resposta JSON-RPC."""
-        linha = linha.removesuffix(b"\r")
         if not linha:
             dados, self._dados = self._dados, []
             return bool(dados) and _dados_jsonrpc(b"\n".join(dados))
@@ -464,7 +476,7 @@ def http_para_sistema(
         ),
         auth=_ChaveDoCofre(segredo),
         headers={"User-Agent": agente} | (cabecalhos or {}),
-        timeout=httpx2.Timeout(connect=3.0, read=prazo_leitura, write=10.0, pool=3.0),
+        timeout=httpx2.Timeout(connect=PRAZO_CONEXAO, read=prazo_leitura, write=10.0, pool=3.0),
         follow_redirects=False,
         max_redirects=0,
         trust_env=False,
@@ -542,10 +554,13 @@ async def conferir_endereco_terceiro(endereco: str, ambiente: str, *, liberar_lo
             raise EnderecoRecusado("endereco que nao e publico")
 
 
-async def _endereco_do_terceiro(endereco: str, ambiente: str, liberar_locais: bool, prazo: float) -> str | None:
-    """None se o endereco pode ser chamado; senao, o nome da recusa (nada foi enviado)."""
+async def _endereco_do_terceiro(endereco: str, ambiente: str, liberar_locais: bool) -> str | None:
+    """None se o endereco pode ser chamado; senao, o nome da recusa (nada foi enviado).
+
+    O prazo e fixo (``PRAZO_CONEXAO``), nunca o da chamada: um resolvedor lento nao come o prazo do sistema.
+    """
     try:
-        with anyio.fail_after(prazo):
+        with anyio.fail_after(PRAZO_CONEXAO):
             await conferir_endereco_terceiro(endereco, ambiente, liberar_locais=liberar_locais)
     except ValueError:  # EnderecoRecusado e qualquer outro nome que nao serve
         return ENDERECO_RECUSADO
@@ -729,7 +744,7 @@ async def sondar(
     erro JSON-RPC do proprio servidor (400 do kit 1.x, -32022, -32601), 405, ou ``DiscoverResult`` sem a versao.
     """
     if terceiro:
-        recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais, prazo)
+        recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais)
         if recusa is not None:
             return Sondagem("inalcancavel", MOTIVO_ENDERECO_RECUSADO, excecao=recusa)
     tentativa = Tentativa(teto_pedidos=1, espiar=True)
@@ -775,10 +790,12 @@ async def listar_ferramentas(
 ) -> list[dict[str, Any]]:
     """Lista o que o sistema declara hoje (para revisao e mudou-parou). Uma pagina por POST, ate 50.
 
-    Num terceiro, endereco fora do combinado levanta ``EnderecoRecusado`` (nome que nao resolve, ``OSError``).
+    Num terceiro, endereco fora do combinado levanta ``EnderecoRecusado`` (nome que nao resolve, ``OSError``; a
+    conferencia do nome tem o prazo fixo ``PRAZO_CONEXAO`` e, esgotado, levanta ``TimeoutError``, que e ``OSError``).
     """
     if terceiro:
-        await conferir_endereco_terceiro(endereco, ambiente, liberar_locais=liberar_locais)
+        with anyio.fail_after(PRAZO_CONEXAO):
+            await conferir_endereco_terceiro(endereco, ambiente, liberar_locais=liberar_locais)
     ferramentas: list[dict[str, Any]] = []
     cursor: str | None = None
     tentativa = Tentativa(teto_pedidos=_PAGINAS)
@@ -830,7 +847,7 @@ async def chamar_ferramenta(
     if terceiro and traceparent:
         raise ValueError("rastro nunca vai a servidor de terceiros")
     if terceiro:
-        recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais, prazo)
+        recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais)
         if recusa is not None:
             return Resposta("nao_enviado", excecao=recusa)
     tentativa = Tentativa(teto_pedidos=1)

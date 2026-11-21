@@ -8,8 +8,9 @@
 # Contra um OpenBao recem-subido:
 #   1. inicia o cofre se preciso (com o selo static ele destrava sozinho) e guarda o token raiz e a chave de
 #      recuperacao em .segredos/ (so teste: no piloto o cofre usa Shamir com guardioes, decisao 6);
-#   2. liga o Transit e cria a chave `mcp-claro-chaves`, derived: cada texto cifrado fica amarrado ao contexto
-#      (sistema, dono) e so o mesmo contexto decifra;
+#   2. liga o Transit e cria a chave `mcp-claro-chaves` (sistemas proprios) e a chave `mcp-claro-chaves-terceiros`
+#      (so os servidores de terceiros, Fase 3), as duas derived: cada texto cifrado fica amarrado ao contexto
+#      (sistema, dono) e so o mesmo contexto decifra, e o cifrado de um terceiro nunca abre com a chave dos proprios;
 #   3. liga o KV v2 e cria a chave inicial do estado das confirmacoes (32 bytes aleatorios, ate 5 versoes);
 #   4. grava as politicas de docker/cofre/politicas/ e cria os papeis AppRole entrada, despachante e rotinas,
 #      com token curto e renovavel;
@@ -18,8 +19,8 @@
 #
 # Variaveis: BAO_ADDR, BAO_CACERT, BAO_CLIENT_CERT e BAO_CLIENT_KEY (da CLI); BAO_TOKEN (se o cofre ja foi
 # iniciado por outro meio); COFRE_SEGREDOS e COFRE_POLITICAS (pastas); COFRE_TOKEN_TTL e COFRE_TOKEN_MAX_TTL.
-# Os nomes abaixo precisam bater com as politicas e com VAULT_TRANSIT_MOUNT, VAULT_TRANSIT_KEY, VAULT_KV_MOUNT e
-# VAULT_STATE_KEY_PATH do gateway.
+# Os nomes abaixo precisam bater com as politicas e com VAULT_TRANSIT_MOUNT, VAULT_TRANSIT_KEY,
+# VAULT_TRANSIT_KEY_THIRD_PARTY, VAULT_KV_MOUNT e VAULT_STATE_KEY_PATH do gateway.
 set -eu
 umask 077
 
@@ -41,6 +42,7 @@ DEST=${COFRE_SEGREDOS:-$AQUI/../.segredos}
 POLITICAS=${COFRE_POLITICAS:-$AQUI/../docker/cofre/politicas}
 TRANSIT=transit
 CHAVE=mcp-claro-chaves
+CHAVE_TERCEIROS=mcp-claro-chaves-terceiros
 KV=kv
 ESTADO=mcp-claro/estado-confirmacoes
 APPROLE=approle
@@ -112,13 +114,16 @@ fi
 
 montado() { bao secrets list -format=json | grep -q "\"$1/\""; }
 
-# Transit: chave do gateway, derived (contexto obrigatorio), nao exportavel e sem apagar.
+# Transit: as chaves do gateway, derived (contexto obrigatorio), nao exportaveis e sem apagar. Uma para os sistemas
+# proprios e outra so para os servidores de terceiros: girar ou perder a de terceiros nao toca nos proprios.
 montado "$TRANSIT" || bao secrets enable -path="$TRANSIT" transit >/dev/null
-if ! bao read "$TRANSIT/keys/$CHAVE" >/dev/null 2>&1; then
-  bao write -f "$TRANSIT/keys/$CHAVE" type=aes256-gcm96 derived=true exportable=false >/dev/null
-fi
-[ "$(bao read -field=derived "$TRANSIT/keys/$CHAVE")" = "true" ] \
-  || falhar "a chave $TRANSIT/keys/$CHAVE existe sem derived=true; ela nao amarra o contexto."
+for chave in "$CHAVE" "$CHAVE_TERCEIROS"; do
+  if ! bao read "$TRANSIT/keys/$chave" >/dev/null 2>&1; then
+    bao write -f "$TRANSIT/keys/$chave" type=aes256-gcm96 derived=true exportable=false >/dev/null
+  fi
+  [ "$(bao read -field=derived "$TRANSIT/keys/$chave")" = "true" ] \
+    || falhar "a chave $TRANSIT/keys/$chave existe sem derived=true; ela nao amarra o contexto."
+done
 
 # KV v2: chave comum do estado das confirmacoes, num caminho so dela. A primeira escrita espera o KV ficar pronto.
 montado "$KV" || bao secrets enable -path="$KV" -version=2 kv >/dev/null
@@ -155,4 +160,5 @@ for papel in $PAPEIS; do
   fi
 done
 
-echo "iniciar-cofre: cofre pronto (transit/$CHAVE, $KV/$ESTADO, AppRoles: $PAPEIS). Credenciais em $DEST/."
+echo "iniciar-cofre: cofre pronto (transit/$CHAVE, transit/$CHAVE_TERCEIROS, $KV/$ESTADO, AppRoles: $PAPEIS)." \
+  "Credenciais em $DEST/."

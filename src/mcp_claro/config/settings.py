@@ -6,12 +6,16 @@ PostgreSQL (ver ``mcp_claro.config.politica``).
 
 A partida recusa combinacoes invalidas: o gateway nao sobe com versao do MCP
 diferente de 2026-07-28, com ``EDGE_MODE=apigee`` (reservado, decisao 7) nem,
-em piloto ou producao, com banco sem ``verify-full``.
+em piloto ou producao, com banco sem ``verify-full``. Fase 3: fora de
+desenvolvimento e teste, a sala de visitas (``VISITS_INTERNAL_URL``, https) e
+obrigatoria sempre (ajustes, A2), e ``FEATURE_PHASE3_THIRD_PARTY`` ainda nao
+liga (D6), como ``PROGRAM_ACTIONS_ENABLED``.
 """
 
 from __future__ import annotations
 
 import enum
+import re
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated, Any
@@ -21,6 +25,9 @@ from pydantic import BeforeValidator, Field, SecretStr, field_validator, model_v
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from mcp_claro.versao import VERSAO_MCP
+
+# Nome de chave do Transit, como o cliente do cofre aceita (cofre/cliente.py, ``_NOME``).
+_NOME_CHAVE_COFRE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 _VERDADE = {"ligado", "verdadeiro", "sim", "true", "1", "on", "yes"}
 _FALSO = {"desligado", "falso", "nao", "não", "false", "0", "off", "no"}
@@ -165,6 +172,16 @@ class Parametros(BaseSettings):
     INTERNAL_HEALTH_CERT_FILE: str | None = None
     INTERNAL_HEALTH_KEY_FILE: str | None = None
     DISPATCHER_INTERNAL_URL: str = "https://despachante:9443"
+    # Sala de visitas (Fase 3; ajustes, D1): conteiner proprio que fala com os servidores de terceiros, sem banco
+    # nem cofre. VISITS_INTERNAL_URL fica vazio em desenvolvimento e teste (os testes injetam a ligacao) e e
+    # obrigatorio, com https, fora deles, mesmo com a chave da Fase 3 desligada (A2).
+    VISITS_INTERNAL_PORT: int = Field(default=9446, ge=1024, le=65535)
+    VISITS_INTERNAL_URL: str | None = None
+    # mTLS do despachante com a sala (M4): confia so na autoridade da sala (ca_visitas) e leva o certificado de
+    # cliente do despachante emitido pela ca_clientes_visitas. Lidos so pelo despachante.
+    VISITS_CA_FILE: str | None = None
+    VISITS_CLIENT_CERT_FILE: str | None = None
+    VISITS_CLIENT_KEY_FILE: str | None = None
     GATEWAY_WORKERS: int = Field(default=2, ge=1, le=64)
 
     # Banco, login e cofre
@@ -184,6 +201,9 @@ class Parametros(BaseSettings):
     VAULT_SECRET_ID_FILE: str | None = None
     VAULT_TRANSIT_MOUNT: str = "transit"
     VAULT_TRANSIT_KEY: str = "mcp-claro-chaves"
+    # Chave Transit so dos servidores de terceiros (derived, como a outra): o cifrado de um terceiro nunca abre com
+    # a chave dos sistemas proprios, e a chave de terceiros gira ou some sem tocar nos proprios.
+    VAULT_TRANSIT_KEY_THIRD_PARTY: str = "mcp-claro-chaves-terceiros"
     VAULT_KV_MOUNT: str = "kv"
     VAULT_STATE_KEY_PATH: str = "mcp-claro/estado-confirmacoes"
     VAULT_TIMEOUT_SECONDS: int = Field(default=5, ge=1, le=60)
@@ -308,6 +328,13 @@ class Parametros(BaseSettings):
     @classmethod
     def _sem_barra_final(cls, valor: str) -> str:
         return valor.rstrip("/")
+
+    @field_validator("VISITS_INTERNAL_URL")
+    @classmethod
+    def _sala_vazia_e_nenhuma(cls, valor: str | None) -> str | None:
+        if valor is None or not valor.strip():
+            return None
+        return valor.strip().rstrip("/")
 
     @model_validator(mode="after")
     def _derivados(self) -> Parametros:
@@ -448,6 +475,12 @@ class Parametros(BaseSettings):
             erros.append("FEATURE_PHASE2_ACT exige FEATURE_PHASE1_READ.")
         if self.FEATURE_PHASE3_THIRD_PARTY and not self.FEATURE_PHASE2_ACT:
             erros.append("FEATURE_PHASE3_THIRD_PARTY exige FEATURE_PHASE2_ACT (decisao 10).")
+        if self.FEATURE_PHASE3_THIRD_PARTY:
+            erros.append(
+                "FEATURE_PHASE3_THIRD_PARTY ainda nao liga: ate a decisao registrada do dono, depois das provas que"
+                " dependem de gente e de ambiente real, so pessoas de teste usam servidores de terceiros (D6;"
+                " decisoes.md, Mudancas deliberadas da Fase 3)."
+            )
         if self.FEATURE_PHASE4_BADGES and not self.FEATURE_PHASE3_THIRD_PARTY:
             erros.append("FEATURE_PHASE4_BADGES exige FEATURE_PHASE3_THIRD_PARTY (decisao 10).")
         if self.PROGRAM_ACTIONS_ENABLED:
@@ -462,9 +495,57 @@ class Parametros(BaseSettings):
             erros.append("PROGRAM_AUTH_METHODS aceita so private_key_jwt e client_secret.")
         if self.PROGRAM_KEY_EXPIRY_WARN_DAYS >= self.PROGRAM_KEY_MAX_AGE_DAYS:
             erros.append("PROGRAM_KEY_EXPIRY_WARN_DAYS deve ser menor que PROGRAM_KEY_MAX_AGE_DAYS.")
-        portas = [self.GATEWAY_INTERNAL_PORT, self.DISPATCHER_INTERNAL_PORT, self.ROUTINES_INTERNAL_PORT]
+        portas = [
+            self.GATEWAY_INTERNAL_PORT,
+            self.DISPATCHER_INTERNAL_PORT,
+            self.ROUTINES_INTERNAL_PORT,
+            self.VISITS_INTERNAL_PORT,
+        ]
         if len(set(portas)) != len(portas):
-            erros.append("As portas internas da entrada, do despachante e das rotinas devem ser diferentes.")
+            erros.append(
+                "As portas internas da entrada, do despachante, das rotinas e da sala de visitas devem ser diferentes."
+            )
+        erros.extend(self._problemas_da_fase3())
+        return erros
+
+    def _problemas_da_fase3(self) -> list[str]:
+        """Sala de visitas e chave separada dos servidores de terceiros (desenho 4.4; ajustes, A2)."""
+        erros: list[str] = []
+        sala = self.VISITS_INTERNAL_URL
+        if self.em_producao and not (sala or "").startswith("https://"):
+            erros.append(
+                "Fora de desenvolvimento e teste, VISITS_INTERNAL_URL e obrigatorio e usa https (mTLS com a sala de"
+                " visitas), mesmo com FEATURE_PHASE3_THIRD_PARTY desligada: sem a sala, nada vai a servidor de"
+                " terceiros, e o despachante nunca fala direto com eles (A2)."
+            )
+        if sala is not None:
+            try:
+                partes = urlsplit(sala)
+                partes.port  # noqa: B018 - porta invalida levanta ValueError
+            except ValueError:
+                partes = None
+            if (
+                partes is None
+                or partes.scheme not in ("http", "https")
+                or not partes.hostname
+                or "@" in partes.netloc
+                or partes.path not in ("", "/")
+                or partes.query
+                or partes.fragment
+            ):
+                erros.append(
+                    "VISITS_INTERNAL_URL e so o esquema, o nome e a porta da sala (ex.: https://visitas:9446)."
+                )
+        chave = self.VAULT_TRANSIT_KEY_THIRD_PARTY
+        if not _NOME_CHAVE_COFRE.fullmatch(chave) or ".." in chave:
+            erros.append(
+                "VAULT_TRANSIT_KEY_THIRD_PARTY aceita de 1 a 128 letras sem acento, numeros, ponto, hifen e sublinhado."
+            )
+        if chave == self.VAULT_TRANSIT_KEY:
+            erros.append(
+                "VAULT_TRANSIT_KEY_THIRD_PARTY deve ser diferente de VAULT_TRANSIT_KEY: a chave dos servidores de"
+                " terceiros e separada da dos sistemas proprios."
+            )
         return erros
 
     def conferir(self) -> Parametros:

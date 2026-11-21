@@ -3,7 +3,9 @@
 Servidor de terceiros (Fase 3): so aparece na vitrine com ``terceiros`` verdadeiro (a chave da Fase 3 ligada, ou
 pessoa de teste: quem chama decide) e so com as ferramentas publicadas na revisao do servidor vigente. A revisao
 de uma ferramenta de terceiro grava o esquema limpo (sem texto do fornecedor), sem as dicas do fornecedor e com
-"traz texto de fora".
+"traz texto de fora". Para chamar (``ferramenta_na_vitrine``, ``ferramenta_da_ordem``), o esquema de entrada de
+um terceiro vem sem ``pattern`` nem ``uniqueItems`` (``esquema.para_conferir``): quem confere isso e o servidor do
+terceiro. A vitrine (``vitrine``) mostra o esquema revisado inteiro.
 """
 
 from __future__ import annotations
@@ -17,13 +19,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from mcp_claro.cadastro.esquema import (
-    com_descricoes,
-    conferir_custo,
-    conferir_padroes,
-    conferir_referencias,
-    limpar_textos,
-)
+from mcp_claro.cadastro.esquema import com_descricoes, conferir_terceiro, limpar_textos, para_conferir
 from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, ORIGENS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
 from mcp_claro.entrada.argumentos import conferir_esquema
@@ -116,7 +112,12 @@ WHERE o.pessoa_id = :pessoa AND o.aplicativo_id = :aplicativo AND o.situacao = '
 """
 
 
-def _ferramenta(linha: Row[Any]) -> FerramentaVitrine:
+def _ferramenta(linha: Row[Any], *, para_chamar: bool = False) -> FerramentaVitrine:
+    """``para_chamar``: num terceiro, ``esquema_entrada`` e a copia com que a entrada confere os argumentos, sem
+    ``pattern`` nem ``uniqueItems`` (critica B3). Sem ele, o esquema revisado inteiro, que a vitrine mostra."""
+    esquema_entrada = dict(linha.esquema_entrada)
+    if para_chamar and linha.s_origem != "proprio":
+        esquema_entrada = para_conferir(esquema_entrada)
     return FerramentaVitrine(
         id=linha.id,
         sistema=_sistema(linha, "s_"),
@@ -125,7 +126,7 @@ def _ferramenta(linha: Row[Any]) -> FerramentaVitrine:
         nome_vitrine=linha.nome_vitrine,
         titulo=linha.titulo,
         descricao=linha.descricao,
-        esquema_entrada=dict(linha.esquema_entrada),
+        esquema_entrada=esquema_entrada,
         esquema_saida=dict(linha.esquema_saida) if linha.esquema_saida else None,
         etiquetas=dict(linha.etiquetas or {}),
         classe=linha.classe,
@@ -139,8 +140,8 @@ def _ferramenta(linha: Row[Any]) -> FerramentaVitrine:
 async def vitrine(
     c: AsyncConnection, pessoa_id: uuid.UUID, aplicativo_id: uuid.UUID, versao: str, *, terceiros: bool = False
 ) -> list[FerramentaVitrine]:
-    """A vitrine da pessoa no aplicativo. ``terceiros``: mostra servidores de terceiros (chave da Fase 3 ligada
-    ou pessoa de teste). O padrao e o lado que esconde."""
+    """A vitrine da pessoa no aplicativo, como o aplicativo a ve (``como_tool``). ``terceiros``: mostra servidores
+    de terceiros (chave da Fase 3 ligada ou pessoa de teste). O padrao e o lado que esconde."""
     linhas = (
         await c.execute(
             text(_SQL_VITRINE + " ORDER BY f.id, o.fim DESC"),
@@ -159,6 +160,8 @@ async def ferramenta_na_vitrine(
     *,
     terceiros: bool = False,
 ) -> FerramentaVitrine | None:
+    """A ferramenta da vitrine que o aplicativo quer chamar. Num terceiro, ``esquema_entrada`` e a copia para
+    conferir os argumentos (``esquema.para_conferir``)."""
     linha = (
         await c.execute(
             text(_SQL_VITRINE + " AND f.nome_vitrine = :nome ORDER BY f.id, o.fim DESC"),
@@ -171,7 +174,7 @@ async def ferramenta_na_vitrine(
             },
         )
     ).first()
-    return _ferramenta(linha) if linha else None
+    return _ferramenta(linha, para_chamar=True) if linha else None
 
 
 async def ferramenta_da_ordem(
@@ -184,7 +187,8 @@ async def ferramenta_da_ordem(
     versao: str,
     terceiros: bool = False,
 ) -> FerramentaVitrine | None:
-    """Reconferencia do despachante: a mesma regra da vitrine, presa a ordem e a versao revisada vigente."""
+    """Reconferencia do despachante: a mesma regra da vitrine, presa a ordem e a versao revisada vigente. Como em
+    ``ferramenta_na_vitrine``, o esquema de entrada de um terceiro e a copia para conferir."""
     linha = (
         await c.execute(
             text(_SQL_VITRINE + " AND f.id = :f AND o.id = :o ORDER BY f.id, o.fim DESC"),
@@ -198,7 +202,7 @@ async def ferramenta_da_ordem(
             },
         )
     ).first()
-    return _ferramenta(linha) if linha else None
+    return _ferramenta(linha, para_chamar=True) if linha else None
 
 
 async def esquema_declarado(c: AsyncConnection, sistema_id: uuid.UUID, nome: str) -> dict[str, Any] | None:
@@ -315,12 +319,14 @@ async def revisar_ferramenta(
 
     Servidor de terceiros (``sistemas.origem``, lida nesta transacao): o esquema de entrada e o de saida sao
     gravados limpos (``esquema.limpar_textos``, depois as descricoes do ADMIN), sem as dicas do fornecedor e com
-    ``texto_de_fora`` sempre verdadeiro (o banco tambem forca as duas coisas). O que pode travar a conferencia
-    dos argumentos na entrada e recusado com a frase para o ADMIN (``esquema.EsquemaRecusado``, um
-    ``EsquemaInvalido``): regra de formato longa ou cara (``esquema.PadraoRecusado``), referencia que so achava
-    texto do fornecedor, esquema grande demais com as referencias seguidas, em ciclo, com ``$dynamicRef`` ou com
-    referencia para fora dele. A ``impressao`` e sempre a da definicao declarada, e ``definicao_declarada`` fica
-    guardada para o antes e depois.
+    ``texto_de_fora`` sempre verdadeiro (o banco tambem forca as duas coisas). O ``pattern`` fica gravado (a
+    vitrine mostra), mas a entrada nunca o confere (``esquema.para_conferir``). A revisao recusa, com a frase para
+    o ADMIN (``esquema.EsquemaRecusado``, um ``EsquemaInvalido``), ``patternProperties``, ``$id``, ``$anchor``,
+    ``$dynamicAnchor``, ``$dynamicRef``, ``unevaluatedProperties`` e ``unevaluatedItems`` em qualquer lugar,
+    ``$schema`` fora da raiz, referencia que nao seja ``#/$defs/<nome>`` ou ``#/definitions/<nome>``, esquema em
+    ciclo e esquema grande ou fundo demais, contando todas as definicoes e seguindo as referencias
+    (``esquema.conferir_terceiro``). A ``impressao`` e sempre a da definicao declarada, e ``definicao_declarada``
+    fica guardada para o antes e depois.
     """
     declarada_entrada = esquema_entrada or dict(definicao_declarada.get("inputSchema") or {})
     # Antes do banco, como nas Fases 1 e 2: esquema invalido e campo de destinatario fora dele. Limpar e por as
@@ -336,9 +342,7 @@ async def revisar_ferramenta(
     de_terceiro = origem is not None and origem != "proprio"
     saida_declarada = definicao_declarada.get("outputSchema")
     if de_terceiro:
-        limpo = limpar_textos(declarada_entrada)
-        conferir_referencias(declarada_entrada, limpo)
-        esquema = com_descricoes(limpo, descricoes_campos or {})
+        esquema = com_descricoes(limpar_textos(declarada_entrada), descricoes_campos or {})
         esquema_saida: Any = limpar_textos(saida_declarada) if isinstance(saida_declarada, dict) else None
         etiquetas: dict[str, bool] = {}
         texto_de_fora = True
@@ -350,8 +354,8 @@ async def revisar_ferramenta(
         }
     conferir_esquema(esquema)
     if de_terceiro:
-        conferir_padroes(esquema)
-        conferir_custo(esquema)
+        conferir_terceiro(esquema)
+        conferir_esquema(para_conferir(esquema))  # a copia da entrada tambem e um esquema valido
     nome = str(definicao_declarada["name"])
     await c.execute(
         text(

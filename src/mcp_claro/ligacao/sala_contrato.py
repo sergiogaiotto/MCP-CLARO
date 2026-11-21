@@ -19,8 +19,8 @@ ferramenta da listagem um ``Tool``, e o tipo combina com o que vem junto (``resu
 ``erro_rpc`` com erro, ``recusado_http`` com o status da recusa).
 
 Do lado da sala, ``atender`` sempre devolve (status, corpo) do contrato: o que o terceiro mandou e nao cabe no
-contrato (status HTTP fora de 100 a 599, codigo fora de 32 bits, ferramentas demais) vira ``duvida`` (ou sondagem
-sem veredito) com ``RespostaForaDoContrato``, nunca um erro do processo.
+contrato (status HTTP fora de 100 a 599, codigo fora de 32 bits, ferramentas demais, corpo regravado acima de
+``TETO_SALTO``) vira ``duvida`` (ou sondagem sem veredito) com ``RespostaForaDoContrato``, nunca um erro do processo.
 """
 
 from __future__ import annotations
@@ -333,11 +333,18 @@ def ler_resposta_listar(status: int, corpo: bytes) -> list[dict[str, Any]]:
 
 
 def _no_contrato(montar: Callable[[], _Modelo], reserva: _Modelo) -> bytes:
-    """O corpo da resposta da sala; se o que o terceiro mandou nao cabe no contrato, a ``reserva`` (sempre valida)."""
+    """O corpo da resposta da sala; se o que o terceiro mandou nao cabe no contrato, a ``reserva`` (sempre valida).
+
+    Nao caber inclui passar de ``TETO_SALTO`` depois de regravado: o JSON regravado pode crescer (um ``1e15`` do
+    terceiro volta como ``1000000000000000.0``), e o despachante nao le alem do teto. A reserva chega explicada.
+    """
     try:
-        return montar().para_json()
+        corpo = montar().para_json()
     except ValueError:  # ValidationError e erro de serializacao
         return reserva.para_json()
+    if len(corpo) > TETO_SALTO:
+        return reserva.para_json()
+    return corpo
 
 
 async def atender(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: bool = False) -> tuple[int, bytes]:
@@ -345,8 +352,8 @@ async def atender(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: boo
 
     Pensado para rodar no processo filho de cada chamada (ajustes, A1). Pedido fora do contrato nao chama o
     terceiro e volta 200 com ``nao_enviado``; rota desconhecida volta 404. O corpo devolvido sempre segue o
-    contrato: resposta do terceiro que nao cabe nele volta como ``duvida`` (sondagem: ``inalcancavel``, sem
-    veredito) com ``RespostaForaDoContrato``.
+    contrato e cabe em ``TETO_SALTO``: resposta do terceiro que nao cabe volta como ``duvida`` (sondagem:
+    ``inalcancavel``, sem veredito) com ``RespostaForaDoContrato``.
     """
     regras: dict[str, Any] = {"terceiro": True, "ambiente": ambiente, "liberar_locais": liberar_locais}
     if rota == ROTA_CHAMAR:

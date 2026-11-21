@@ -486,3 +486,46 @@ async def test_discover_enorme_de_terceiro_cabe_porque_so_a_lista_do_que_fica_vo
     s = sala_contrato.ler_resposta_sondar(status, corpo)
     assert (status, s.desfecho) == (200, "aceito")
     assert len(s.discover_json or "") < 1024
+
+
+async def test_resposta_que_cresce_ao_ser_regravada_volta_como_duvida_explicada_e_dentro_do_teto() -> None:
+    """Numeros em notacao exponencial: ``1e15`` (4 letras) volta regravado como ``1000000000000000.0`` (18).
+
+    Uma resposta de 6 MB, dentro do teto da resposta do terceiro, passaria de ``TETO_SALTO`` depois de regravada, e o
+    despachante leria so ate o teto (duvida sem explicacao). ``atender`` devolve a reserva do contrato: duvida com
+    ``RespostaForaDoContrato``, dentro do teto.
+    """
+    numeros = ",".join(["1e15"] * ((6 * 1024 * 1024) // 5))
+    resultado = (
+        '{"content":[{"type":"text","text":"ok"}],"structuredContent":{"v":[' + numeros + ']},"resultType":"complete"}'
+    )
+    assert len(resultado) < cliente.TETO_RESPOSTA_PADRAO
+
+    def responder(m: dict[str, Any]) -> bytes:
+        return ('{"jsonrpc":"2.0","id":' + json.dumps(m.get("id")) + ',"result":' + resultado + "}").encode()
+
+    async with _terceiro_cru(200, responder) as url:
+        local = await cliente.chamar_ferramenta(url, _chave, None, "x", {}, prazo=20)
+        status, corpo = await _pela_sala(ROTA_CHAMAR, PedidoChamar(endereco=url, nome="x", argumentos={}, prazo=20))
+    assert local.tipo == "resultado"  # o terceiro respondeu dentro do teto da resposta
+    regravado = RespostaChamar.de_resposta(local).para_json()
+    assert len(regravado) > sala_contrato.TETO_SALTO  # o caso existe: regravada, a resposta passa do teto do salto
+    assert status == 200
+    assert len(corpo) <= sala_contrato.TETO_SALTO
+    r = sala_contrato.ler_resposta_chamar(status, corpo)
+    assert (r.tipo, r.excecao) == ("duvida", sala_contrato.RESPOSTA_FORA_DO_CONTRATO)
+
+
+async def test_resposta_regravada_dentro_do_teto_passa_inteira() -> None:
+    numeros = ",".join(["1e15"] * 1000)
+
+    def responder(m: dict[str, Any]) -> bytes:
+        resultado = '{"content":[],"structuredContent":{"v":[' + numeros + ']},"resultType":"complete"}'
+        return ('{"jsonrpc":"2.0","id":' + json.dumps(m.get("id")) + ',"result":' + resultado + "}").encode()
+
+    async with _terceiro_cru(200, responder) as url:
+        status, corpo = await _pela_sala(ROTA_CHAMAR, PedidoChamar(endereco=url, nome="x", argumentos={}, prazo=5))
+    r = sala_contrato.ler_resposta_chamar(status, corpo)
+    assert r.tipo == "resultado"
+    assert isinstance(r.resultado, types.CallToolResult)
+    assert r.resultado.structured_content == {"v": [1e15] * 1000}

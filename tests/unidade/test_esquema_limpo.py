@@ -1,12 +1,14 @@
-"""cadastro/esquema.py: esquema limpo de terceiro (so o que valida fica), descricoes do ADMIN, referencias
-resolvidas como na entrada, custo do esquema com as referencias seguidas e a revisao das regras de formato pela
-arvore do proprio re (critica B3 e defeitos A a D do verificador)."""
+"""cadastro/esquema.py: esquema limpo de terceiro (so o que valida fica), descricoes do ADMIN, a revisao de
+terceiro (palavras, referencias, ciclo, partes e niveis) e a copia sem ``pattern`` nem ``uniqueItems`` com que a
+entrada confere os argumentos (critica B3, desenho simples do coordenador; contornos do verificador)."""
 
 from __future__ import annotations
 
 import asyncio
 import copy
 import json
+import sys
+import time
 import uuid
 from typing import Any, cast
 
@@ -18,23 +20,20 @@ from mcp_claro.cadastro import esquema as modulo
 from mcp_claro.cadastro.esquema import (
     CUSTO_MAXIMO,
     DESCRICAO_DE_CAMPO_MAXIMA,
-    ESCOLHAS_MAXIMAS,
-    GRAU_MAXIMO,
-    PADRAO_MAXIMO,
+    PALAVRAS_RECUSADAS,
     PROFUNDIDADE_MAXIMA,
+    SO_NA_RAIZ,
+    SO_O_TERCEIRO_CONFERE,
     CampoDesconhecido,
     EsquemaRecusado,
-    PadraoRecusado,
     com_descricoes,
-    conferir_custo,
-    conferir_padroes,
-    conferir_referencias,
-    custo_da_regra,
+    conferir_palavras,
+    conferir_terceiro,
     custo_do_esquema,
     limpar_textos,
-    padroes,
-    quantificador_aninhado,
+    para_conferir,
 )
+from mcp_claro.entrada import argumentos as modulo_argumentos
 from mcp_claro.entrada.argumentos import ArgumentosInvalidos, EsquemaInvalido, conferir_argumentos, conferir_esquema
 
 MARCA = "MARCA_FORNECEDOR"
@@ -454,137 +453,304 @@ def test_descricao_longa_demais_e_recusada() -> None:
         com_descricoes(BASE, {"conta": "a" * (DESCRICAO_DE_CAMPO_MAXIMA + 1)})
 
 
-# --- Referencias -------------------------------------------------------------------------------------------------
+# --- Revisao de terceiro: palavras recusadas -----------------------------------------------------------------------
 
 
-def test_referencia_para_parte_que_so_tinha_texto_e_recusada() -> None:
-    original = {
-        "type": "object",
-        "x-comum": {"type": "string", "maxLength": 3},
-        "properties": {"a": {"$ref": "#/x-comum"}, "b": {"$ref": "#/$defs/b"}},
-        "$defs": {"b": {"type": "integer"}},
-    }
-    with pytest.raises(EsquemaInvalido, match="properties/a") as erro:
-        conferir_referencias(original, limpar_textos(original))
-    assert isinstance(erro.value, EsquemaRecusado)
-    assert (erro.value.motivo, erro.value.onde) == ("referencia", "properties/a")
-    sem_x = {k: v for k, v in original.items() if k != "x-comum"}
-    sem_x["properties"] = {"b": {"$ref": "#/$defs/b"}, "c": {"$ref": "#/naoexiste"}}
-    conferir_referencias(sem_x, limpar_textos(sem_x))  # referencia que ja nao achava nada nao e problema daqui
+def _em(lugar: str, parte: dict[str, Any]) -> dict[str, Any]:
+    """Um esquema de objeto com ``parte`` no lugar dado (raiz, campo, definicao nao citada, item, ramo)."""
+    if lugar == "(raiz)":
+        return {"type": "object", **parte}
+    if lugar == "properties/a":
+        return {"type": "object", "properties": {"a": parte}}
+    if lugar == "$defs/nao_citada":
+        return {"type": "object", "$defs": {"nao_citada": parte}}
+    if lugar == "properties/l/items":
+        return {"type": "object", "properties": {"l": {"type": "array", "items": parte}}}
+    assert lugar == "properties/e/anyOf/1"
+    return {"type": "object", "properties": {"e": {"anyOf": [{"type": "integer"}, parte]}}}
 
 
-def _aceita_antes_e_recusa_depois(original: dict[str, Any], argumentos: dict[str, Any]) -> None:
-    """O original aceita o argumento; o limpo recusaria toda chamada; a revisao recusa antes."""
-    conferir_esquema(original)
-    conferir_argumentos(original, argumentos)  # o original acha a parte citada e aceita
-    with pytest.raises(ArgumentosInvalidos, match="referencia externa"):
-        conferir_argumentos(limpar_textos(original), argumentos)  # o limpo nao acha e recusaria toda chamada
-    with pytest.raises(EsquemaRecusado) as erro:
-        conferir_referencias(original, limpar_textos(original))
-    assert erro.value.motivo == "referencia"
+_VALOR_DA_PALAVRA: dict[str, Any] = {
+    "patternProperties": {"^n_": {"type": "string"}},
+    "$id": "https://fornecedor.teste/parte",
+    "$anchor": "ancora",
+    "$dynamicAnchor": "dinamica",
+    "$dynamicRef": "#dinamica",
+    "unevaluatedProperties": False,
+    "unevaluatedItems": False,
+    "$schema": "http://json-schema.org/draft-06/schema#",
+}
 
-
-@pytest.mark.parametrize(
-    ("chave", "referencia"),
-    [
-        ("x-a b", "#/x-a%20b"),  # espaco codificado no fragmento
-        ("x~a/b", "#/x~0a~1b"),  # ~ e / do ponteiro JSON
-        ("x-a~b", "#/x-a%7E0b"),  # o ~0 ja codificado como %7E
-        ("x-ç", "#/x-%C3%A7"),  # letra fora do ASCII codificada
-    ],
+# Escritas aqui, e nao lidas do modulo: tirar uma palavra da lista do modulo tem de quebrar um teste (verificador).
+RECUSADAS_EM_TODO_LUGAR = (
+    "patternProperties",
+    "$id",
+    "$anchor",
+    "$dynamicAnchor",
+    "$dynamicRef",
+    "unevaluatedProperties",
+    "unevaluatedItems",
 )
-def test_referencia_com_ponteiro_codificado_e_lida_como_na_entrada(chave: str, referencia: str) -> None:
-    # Defeito D do verificador: o ponteiro nao era decodificado, a revisao aceitava e o limpo quebrava.
-    original = {"type": "object", chave: {"type": "string", "maxLength": 3}, "properties": {"p": {"$ref": referencia}}}
-    _aceita_antes_e_recusa_depois(original, {"p": "ab"})
+RECUSADAS_FORA_DA_RAIZ = ("$schema",)
+LUGARES = ["(raiz)", "properties/a", "$defs/nao_citada", "properties/l/items", "properties/e/anyOf/1"]
 
 
-def test_referencia_para_indice_de_lista_que_so_tinha_texto_e_recusada() -> None:
-    original = {"type": "object", "x-l": [{"type": "string"}], "properties": {"p": {"$ref": "#/x-l/0"}}}
-    _aceita_antes_e_recusa_depois(original, {"p": "ab"})
-    # Indice de lista que o limpo guarda (allOf) continua valendo.
-    bom = {"type": "object", "allOf": [{"type": "object"}], "properties": {"p": {"$ref": "#/allOf/0"}}}
-    conferir_referencias(bom, limpar_textos(bom))
+def test_as_listas_de_palavras_recusadas_sao_estas() -> None:
+    assert PALAVRAS_RECUSADAS == RECUSADAS_EM_TODO_LUGAR
+    assert SO_NA_RAIZ == RECUSADAS_FORA_DA_RAIZ
 
 
-def test_referencia_absoluta_pelo_id_e_conferida() -> None:
-    original = {
-        "$id": "https://fornecedor.teste/esquema",
-        "type": "object",
-        "x-c": {"type": "string"},
-        "properties": {"p": {"$ref": "https://fornecedor.teste/esquema#/x-c"}},
-    }
-    _aceita_antes_e_recusa_depois(original, {"p": "ab"})
-    # A mesma forma, para uma parte que o limpo guarda, passa; e a base muda com o $id de dentro.
-    bom = {
-        "$id": "https://fornecedor.teste/esquema",
-        "type": "object",
-        "$defs": {"d": {"$id": "d.json", "type": "string"}},
-        "properties": {"p": {"$ref": "https://fornecedor.teste/esquema#/$defs/d"}, "q": {"$ref": "d.json"}},
-    }
-    conferir_referencias(bom, limpar_textos(bom))
+@pytest.mark.parametrize("palavra", RECUSADAS_EM_TODO_LUGAR)
+@pytest.mark.parametrize("lugar", LUGARES)
+def test_palavras_recusadas_em_qualquer_lugar(palavra: str, lugar: str) -> None:
+    esquema = _em(lugar, {palavra: _VALOR_DA_PALAVRA[palavra]})
+    conferir_esquema(esquema)  # o esquema e valido: so a revisao de terceiro recusa
+    assert limpar_textos(esquema) == esquema  # o limpador deixa (muda o veredito); a revisao recusa
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("palavra", palavra, lugar)
+    assert isinstance(erro.value, EsquemaInvalido)  # a tela do ADMIN ja mostra a frase deste erro
+    assert palavra in str(erro.value)
+    assert "fornecedor" in str(erro.value)
 
 
-def test_referencia_dentro_de_outro_id_vale_contra_ele() -> None:
-    # Dentro de um $id novo, "#/..." aponta para o proprio subesquema, nao para a raiz (como a entrada resolve).
-    sub: dict[str, Any] = {
-        "$id": "https://fornecedor.teste/outra/sub",
-        "type": "object",
-        "x-c": {"type": "string", "maxLength": 3},
-        "$defs": {"d": {"type": "string"}},
-        "properties": {"p": {"$ref": "#/x-c"}, "q": {"$ref": "#/$defs/d"}},
-    }
-    original = {"$id": "https://fornecedor.teste/raiz", "type": "object", "properties": {"s": sub}}
-    _aceita_antes_e_recusa_depois(original, {"s": {"p": "ab"}})
-    bom = copy.deepcopy(original)
-    del bom["properties"]["s"]["properties"]["p"]
-    conferir_referencias(bom, limpar_textos(bom))
-    assert custo_do_esquema(limpar_textos(bom)) == 4  # raiz, s, q e o $defs/d de s, achado pelo $ref de q
+@pytest.mark.parametrize("lugar", LUGARES[1:])
+def test_schema_so_na_raiz(lugar: str) -> None:
+    # Fora da raiz, $schema troca a versao do JSON Schema daquela parte na entrada (a biblioteca le o $schema de
+    # cada parte): num draft-06, if/then/else nao valem, e a copia (que troca o if por outra coisa) passaria a
+    # recusar pedido que o esquema aceita. Na raiz, a entrada sempre confere como 2020-12, e os kits poem ali.
+    esquema = _em(lugar, {"$schema": _VALOR_DA_PALAVRA["$schema"]})
+    conferir_esquema(esquema)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("palavra", "$schema", lugar)
+    assert "$schema" in str(erro.value)
+    conferir_terceiro(_em("(raiz)", {"$schema": _VALOR_DA_PALAVRA["$schema"]}))
 
 
-def test_id_relativo_com_pasta_e_resolvido_como_na_entrada() -> None:
-    # A parte achada por um $ref ja vem com a base dela; somar o $id de novo dobraria a pasta (sub/sub/d.json).
+def test_schema_numa_parte_que_trocaria_o_dialeto_e_recusado() -> None:
+    # Prova dialeto.py do verificador: o esquema aceita {"c": "b"} (else), mas a parte vale como draft-06 na entrada.
     esquema = {
-        "$id": "https://fornecedor.teste/a/raiz.json",
         "type": "object",
-        "$defs": {
-            "d": {
-                "$id": "sub/d.json",
-                "type": "object",
-                "$defs": {"e": {"type": "string", "maxLength": 2}},
-                "properties": {"q": {"$ref": "#/$defs/e"}},
+        "properties": {
+            "c": {
+                "$schema": "http://json-schema.org/draft-06/schema#",
+                "if": {"pattern": "^a"},
+                "then": {"type": "integer"},
+                "else": {"type": "integer"},
             }
         },
-        "properties": {"p": {"$ref": "sub/d.json"}},
     }
     conferir_esquema(esquema)
-    conferir_argumentos(esquema, {"p": {"q": "ab"}})
-    with pytest.raises(ArgumentosInvalidos, match="maxLength"):
-        conferir_argumentos(esquema, {"p": {"q": "abc"}})  # a entrada acha o $defs/e de d
-    conferir_referencias(esquema, limpar_textos(esquema))
-    assert custo_do_esquema(esquema) == 5  # raiz, p, d, q e e
-    # A raiz com $id relativo e pasta: a base e o proprio $id, uma vez so.
-    relativa = {
-        "$id": "a/raiz.json",
-        "type": "object",
-        "$defs": {"e": True},
-        "properties": {"q": {"$ref": "#/$defs/e"}},
-    }
-    conferir_referencias(relativa, limpar_textos(relativa))
-    assert custo_do_esquema(relativa) == 3
-    _aceita_antes_e_recusa_depois(
-        {**relativa, "x-c": {"type": "string"}, "properties": {"q": {"$ref": "#/x-c"}}}, {"q": "a"}
-    )
-
-
-def test_referencia_dinamica_para_texto_do_fornecedor_e_recusada() -> None:
-    original = {"type": "object", "x-c": {"type": "string"}, "properties": {"p": {"$dynamicRef": "#/x-c"}}}
     with pytest.raises(EsquemaRecusado) as erro:
-        conferir_referencias(original, limpar_textos(original))
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("palavra", "$schema", "properties/c")
+
+
+def test_referencia_dinamica_sozinha_para_dentro_de_um_enum_e_recusada() -> None:
+    # Prova dynamicref_sozinho.py do verificador: sem $dynamicAnchor junto, so a palavra $dynamicRef segura a regra
+    # do fornecedor (^(a|aa)+$, de dentro do enum) fora da entrada.
+    esquema = {
+        "type": "object",
+        "properties": {
+            "isca": {"enum": [{"type": "string", "pattern": "^(a|aa)+$"}]},
+            "x": {"$dynamicRef": "#/properties/isca/enum/0"},
+        },
+    }
+    conferir_esquema(esquema)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("palavra", "$dynamicRef", "properties/x")
+    sozinha = {"type": "object", "$defs": {"d": {"$dynamicAnchor": "m", "type": "string"}}}
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(sozinha)
+    assert (erro.value.motivo, erro.value.palavra, erro.value.onde) == ("palavra", "$dynamicAnchor", "$defs/d")
+
+
+def _unevaluated(niveis: int, palavra: str) -> dict[str, Any]:
+    """S_k = {"allOf": [S_k-1], palavra: true} (prova unevaluated.py do verificador)."""
+    no: dict[str, Any] = {"type": "object"} if palavra == "unevaluatedProperties" else {"type": "array"}
+    for _ in range(niveis):
+        no = {"allOf": [no], palavra: True}
+    return {"type": "object", "properties": {"p": no}}
+
+
+@pytest.mark.parametrize("palavra", ["unevaluatedProperties", "unevaluatedItems"])
+@pytest.mark.parametrize("niveis", [1, 15])
+def test_unevaluated_e_recusado_em_qualquer_nivel(palavra: str, niveis: int) -> None:
+    # A biblioteca reconfere cada parte abaixo de um unevaluated* para saber o que ja foi visto: com 15 niveis e um
+    # pedido minusculo, a entrada levava 12 s. Um nivel so tambem e recusado: a regra e a palavra, nao a conta.
+    esquema = _unevaluated(niveis, palavra)
+    conferir_esquema(esquema)
+    inicio = time.perf_counter()
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert time.perf_counter() - inicio < 1  # a revisao nao confere pedido nenhum: nao paga o custo
+    assert (erro.value.motivo, erro.value.palavra) == ("palavra", palavra)
     assert erro.value.onde == "properties/p"
 
 
-# --- Custo do esquema com as referencias seguidas ------------------------------------------------------------------
+def test_palavra_recusada_marca_os_escondidos_no_lugar() -> None:
+    esquema = {"type": "object", "properties": {"co‮nta": {"type": "string", "$anchor": "c"}}}
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert erro.value.onde == "properties/co[U+202E]nta"
+    assert "‮" not in str(erro.value)
+
+
+def test_campo_com_nome_de_palavra_recusada_e_dado_com_cara_de_esquema_passam() -> None:
+    # Nome de campo e dado de enum/const nao sao lugar de esquema: nao sao recusados.
+    esquema = {
+        "type": "object",
+        "properties": {
+            "$id": {"type": "string"},
+            "patternProperties": {"enum": [{"$anchor": "x", "$ref": "#/nada"}]},
+            "c": {"const": {"$dynamicRef": "#x", "patternProperties": {"(a+)+": {}}}},
+        },
+    }
+    conferir_esquema(esquema)
+    conferir_terceiro(esquema)
+
+
+# --- Revisao de terceiro: referencias ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("referencia", "extra"),
+    [
+        ("#", {}),  # a raiz: seria um ciclo
+        ("#/properties/b", {}),
+        ("#/$defs/nao_existe", {}),
+        ("#/$defs", {}),
+        ("#/$defs/d/properties/x", {}),  # dentro de uma definicao: so a definicao inteira
+        ("#/$defs/d/const", {}),  # contorno do verificador: regra escondida num const
+        ("#/properties/isca/enum/0", {}),  # contorno do verificador: regra escondida num enum
+        ("#/$defs/a%2Fb", {"a/b": {"type": "string"}}),  # a entrada le tres pedacos ($defs, a, b), nao "a/b"
+        ("#ancora", {}),
+        ("outro.json", {}),
+        ("https://json-schema.org/draft/2020-12/schema", {}),
+        ("#/definitions/d", {}),  # nao ha definitions neste esquema
+    ],
+)
+def test_referencia_so_para_definicao_que_existe(referencia: str, extra: dict[str, Any]) -> None:
+    esquema = {
+        "type": "object",
+        "$defs": {"d": {"type": "object", "properties": {"x": {"type": "string"}}, "const": {"pattern": "^(a|aa)+$"}}}
+        | extra,
+        "properties": {
+            "isca": {"enum": [{"type": "string", "pattern": "^(a+)+$"}]},
+            "b": {"type": "string"},
+            "p": {"$ref": referencia},
+        },
+    }
+    conferir_esquema(esquema)  # o esquema e valido: so a revisao de terceiro recusa
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.onde) == ("referencia", "properties/p")
+    assert "#/$defs/<nome>" in str(erro.value)
+
+
+def test_referencia_em_definicao_nao_citada_tambem_e_conferida() -> None:
+    esquema = {"type": "object", "$defs": {"solta": {"$ref": "#/properties/a"}}, "properties": {"a": True}}
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.onde) == ("referencia", "$defs/solta")
+
+
+@pytest.mark.parametrize(
+    ("nome", "referencia"),
+    [
+        ("d", "#/$defs/d"),
+        ("a b", "#/$defs/a%20b"),  # espaco codificado no fragmento
+        ("a/b", "#/$defs/a~1b"),  # / do ponteiro JSON
+        ("x~y", "#/$defs/x~0y"),  # ~ do ponteiro JSON
+        ("ç", "#/$defs/%C3%A7"),  # letra fora do ASCII codificada
+        ("d", "#/%24defs/d"),  # o proprio $ codificado
+    ],
+)
+def test_referencia_para_definicao_vale_como_na_entrada(nome: str, referencia: str) -> None:
+    # A revisao le o ponteiro como a entrada le (defeito D do verificador): aceita e acha a mesma definicao.
+    esquema = {
+        "type": "object",
+        "$defs": {nome: {"type": "string", "maxLength": 2}, "outra": {"type": "integer"}},
+        "properties": {"p": {"$ref": referencia}},
+    }
+    conferir_terceiro(esquema)
+    assert custo_do_esquema(esquema) == 3  # raiz, p e a definicao achada
+    conferir_argumentos(para_conferir(esquema), {"p": "ab"})
+    with pytest.raises(ArgumentosInvalidos, match="maxLength"):
+        conferir_argumentos(para_conferir(esquema), {"p": "abc"})
+
+
+def test_definitions_e_referencia_na_raiz_e_entre_definicoes_passam() -> None:
+    # Como os kits de servidor MCP costumam escrever (pydantic: $defs; zod-to-json-schema: definitions).
+    pydantic = {
+        "type": "object",
+        "$ref": "#/$defs/Pedido",
+        "$defs": {
+            "Endereco": {"type": "object", "properties": {"rua": {"type": "string"}, "cep": {"$ref": "#/$defs/Cep"}}},
+            "Cep": {"type": "string", "pattern": "^[0-9]{5}-[0-9]{3}$"},
+            "Pedido": {
+                "type": "object",
+                "properties": {
+                    "casa": {"$ref": "#/$defs/Endereco"},
+                    "trabalho": {"$ref": "#/$defs/Endereco"},
+                    "itens": {"type": "array", "items": {"$ref": "#/$defs/Endereco"}, "uniqueItems": True},
+                },
+                "required": ["casa"],
+            },
+        },
+    }
+    zod = {
+        "type": "object",
+        "properties": {
+            "a": {"$ref": "#/definitions/x"},
+            "b": {"anyOf": [{"$ref": "#/definitions/x"}, {"type": "null"}]},
+        },
+        "definitions": {"x": {"type": "string", "enum": ["um", "dois"]}},
+        "$schema": "http://json-schema.org/draft-07/schema#",
+    }
+    for esquema in (pydantic, zod, limpar_textos(_cheio_sem_recusadas()), {"type": "object"}):
+        conferir_esquema(esquema)
+        conferir_terceiro(esquema)
+        conferir_esquema(para_conferir(esquema))
+
+
+def _cheio_sem_recusadas() -> dict[str, Any]:
+    cheio = _cheio()
+    del cheio["properties"]["mapa"]["patternProperties"]
+    del cheio["properties"]["mapa"]["unevaluatedProperties"]
+    return cheio
+
+
+def test_referencia_que_a_entrada_acharia_em_outro_lugar_e_recusada(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A revisao confere o alvo com a mesma biblioteca da entrada. Se a leitura do ponteiro das duas se separar (aqui,
+    # a revisao deixa de decodificar o %20), a revisao recusa em vez de aceitar uma referencia para outra parte.
+    esquema = {
+        "type": "object",
+        "$defs": {"a%20b": {"type": "string"}, "a b": {"type": "integer"}},
+        "properties": {"p": {"$ref": "#/$defs/a%20b"}},
+    }
+    conferir_terceiro(esquema)  # as duas acham "a b"
+    monkeypatch.setattr(modulo, "unquote", lambda texto: texto)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert erro.value.motivo == "referencia"
+
+
+def test_ancora_repetida_e_recusada() -> None:
+    # Contorno do verificador: com duas ancoras iguais, o limpo achava a outra e o veredito mudava.
+    for partes in (
+        {"$defs": {"a": {"$anchor": "x", "type": "string"}}, "contentSchema": {"$anchor": "x", "type": "integer"}},
+        {"$defs": {"a": {"$anchor": "x", "type": "string"}, "b": {"$anchor": "x", "type": "integer"}}},
+    ):
+        original = {"type": "object", **partes, "properties": {"p": {"$ref": "#x"}}}
+        with pytest.raises(EsquemaRecusado) as erro:
+            conferir_terceiro(limpar_textos(original))
+        assert (erro.value.motivo, erro.value.palavra) == ("palavra", "$anchor")
+
+
+# --- Revisao de terceiro: ciclo, partes e niveis com as referencias seguidas ---------------------------------------
 
 
 def _dobrada(niveis: int) -> dict[str, Any]:
@@ -597,14 +763,12 @@ def _dobrada(niveis: int) -> dict[str, Any]:
 
 
 def test_referencia_em_cadeia_dobrada_e_recusada() -> None:
-    # Com 20 niveis, o esquema passa em limpar_textos, conferir_esquema, referencias e padroes, e cada chamada
-    # levava quase 30 s. Agora a revisao recusa antes de gravar.
+    # Com 20 niveis, o esquema passa nas palavras e nas referencias, e cada chamada levava quase 30 s.
     esquema = _dobrada(20)
     conferir_esquema(esquema)
-    conferir_referencias(esquema, limpar_textos(esquema))
-    conferir_padroes(esquema)
+    conferir_palavras(esquema)
     with pytest.raises(EsquemaRecusado, match=f"mais de {CUSTO_MAXIMO} partes") as erro:
-        conferir_custo(esquema)
+        conferir_terceiro(esquema)
     assert erro.value.motivo == "grande"
     assert isinstance(erro.value, EsquemaInvalido)
     assert "fornecedor" in str(erro.value)
@@ -620,66 +784,33 @@ def test_custo_conta_cada_referencia_de_novo_e_para_no_limite() -> None:
         custo_do_esquema(_dobrada(400))  # a memoria faz a conta parar cedo, sem percorrer 2**400
 
 
-def test_esquema_comum_com_defs_ancora_e_id_passa() -> None:
-    esquema = {
-        "$id": "https://fornecedor.teste/s",
-        "type": "object",
-        "$defs": {
-            "endereco": {"type": "object", "properties": {"rua": {"type": "string"}, "cep": {"$ref": "#cep"}}},
-            "cep": {"$anchor": "cep", "type": "string", "pattern": "^[0-9]{5}-[0-9]{3}$"},
-            "nao_usado": {"type": "array", "items": {"$ref": "#/$defs/nao_existe"}},
-            "outro": {"$id": "outro.json", "type": "integer"},
-        },
-        "properties": {
-            "casa": {"$ref": "#/$defs/endereco"},
-            "trabalho": {"$ref": "#/$defs/endereco"},
-            "andar": {"$ref": "outro.json"},
-            "lista": {"type": "array", "items": {"$ref": "https://fornecedor.teste/s#/$defs/endereco"}},
-        },
-    }
-    conferir_custo(esquema)
-    conferir_custo(limpar_textos(_cheio()))
-    conferir_custo({"type": "object"})
-
-
 @pytest.mark.parametrize(
-    ("esquema", "motivo", "onde"),
+    ("esquema", "onde"),
     [
-        ({"type": "object", "properties": {"filho": {"$ref": "#"}}}, "ciclo", "properties/filho/$ref"),
+        (
+            {"type": "object", "$defs": {"a": {"$ref": "#/$defs/a"}}, "properties": {"p": {"$ref": "#/$defs/a"}}},
+            "properties/p/$ref/$ref",
+        ),
         (
             {"type": "object", "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}, "$ref": "#/$defs/a"},
-            "ciclo",
             "$ref/$ref/$ref",
         ),
         (
             {
                 "type": "object",
-                "$defs": {"d": {"$dynamicAnchor": "m", "type": "string"}},
-                "properties": {"a": {"$dynamicRef": "#m"}},
+                "$defs": {"no": {"type": "object", "properties": {"filho": {"$ref": "#/$defs/no"}}}},
+                "properties": {"arvore": {"$ref": "#/$defs/no"}},
             },
-            "dinamica",
-            "properties/a",
-        ),
-        (
-            {"type": "object", "properties": {"a": {"$ref": "https://json-schema.org/draft/2020-12/schema"}}},
-            "fora",
-            "properties/a/$ref",
-        ),
-        ({"type": "object", "properties": {"a": {"$ref": "#/naoexiste"}}}, "fora", "properties/a/$ref"),
-        (
-            {"type": "object", "properties": {"a": {"$ref": "#/properties/b/type"}, "b": {"type": "string"}}},
-            "fora",
-            "properties/a/$ref",
+            "properties/arvore/$ref/properties/filho/$ref",
         ),
     ],
 )
-def test_ciclo_referencia_dinamica_e_referencia_para_fora_sao_recusados(
-    esquema: dict[str, Any], motivo: str, onde: str
-) -> None:
+def test_esquema_em_ciclo_e_recusado(esquema: dict[str, Any], onde: str) -> None:
     conferir_esquema(esquema)  # o esquema e valido: so a revisao de terceiro recusa
+    conferir_palavras(esquema)
     with pytest.raises(EsquemaRecusado) as erro:
-        conferir_custo(esquema)
-    assert (erro.value.motivo, erro.value.onde) == (motivo, onde)
+        conferir_terceiro(esquema)
+    assert (erro.value.motivo, erro.value.onde) == ("ciclo", onde)
     assert "fornecedor" in str(erro.value)
 
 
@@ -688,261 +819,508 @@ def test_esquema_fundo_demais_e_recusado() -> None:
     for _ in range(PROFUNDIDADE_MAXIMA + 1):
         fundo = {"type": "object", "properties": {"a": fundo}}
     with pytest.raises(EsquemaRecusado) as erro:
-        conferir_custo(fundo)
+        conferir_terceiro(fundo)
     assert erro.value.motivo == "fundo"
     raso: dict[str, Any] = {"type": "string"}
     for _ in range(PROFUNDIDADE_MAXIMA - 2):
         raso = {"type": "object", "properties": {"a": raso}}
-    conferir_custo(raso)
+    conferir_terceiro(raso)
 
 
-# --- Regras de formato (critica B3) ------------------------------------------------------------------------------
+def _aninhar(no: Any, niveis: int, palavra: str = "not") -> Any:
+    for _ in range(niveis):
+        no = {"not": no} if palavra == "not" else {palavra: [no]}
+    return no
+
+
+def _fundo_escondido(k: int, m: int) -> dict[str, Any]:
+    """Prova fundo_memo.py do verificador: d0 tem m niveis de not; d_i, m niveis de not em volta de $ref d_i-1. A
+    raiz cita cada definicao de um lugar raso, em ordem: cada uma e contada (e guardada) antes da seguinte."""
+    defs: dict[str, Any] = {"d0": _aninhar({"type": "string"}, m)}
+    for i in range(1, k):
+        defs[f"d{i}"] = _aninhar({"$ref": f"#/$defs/d{i - 1}"}, m)
+    return {"type": "object", "$defs": defs, "properties": {f"p{i}": {"$ref": f"#/$defs/d{i}"} for i in range(k)}}
+
+
+def test_definicao_ja_contada_e_chamada_mais_funda_conta_os_niveis_dela() -> None:
+    # A memoria da conta guardava so as partes: uma definicao contada num lugar raso, chamada de novo de um lugar
+    # fundo, passava sem somar os niveis dela. Com 1716 partes e cerca de 427 niveis, a revisao aceitava e cada
+    # chamada na entrada dava RecursionError.
+    esquema = _fundo_escondido(7, 60)
+    conferir_esquema(esquema)
+    conferir_palavras(esquema)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro(esquema)
+    assert erro.value.motivo == "fundo"
+    assert erro.value.onde.startswith("properties/p1/$ref")
+    # O mesmo com uma definicao so, nas duas ordens (rasa e depois funda, funda e depois rasa), bem no teto. A
+    # referencia funda fica no nivel 11 (a raiz e o 0) e a definicao no 12: com n nots, ela vai ate o nivel 12 + n.
+    fundo = _aninhar({"$ref": "#/$defs/d"}, 10, "allOf")
+    for nots, aceito in ((PROFUNDIDADE_MAXIMA - 13, True), (PROFUNDIDADE_MAXIMA - 12, False)):
+        d = _aninhar({"type": "string"}, nots)
+        for propriedades in (
+            {"raso": {"$ref": "#/$defs/d"}, "fundo": fundo},
+            {"fundo": fundo, "raso": {"$ref": "#/$defs/d"}},
+        ):
+            esquema = {"type": "object", "$defs": {"d": d}, "properties": propriedades}
+            if aceito:
+                conferir_terceiro(esquema)
+                continue
+            with pytest.raises(EsquemaRecusado) as erro:
+                conferir_terceiro(esquema)
+            assert erro.value.motivo == "fundo"
+            assert erro.value.onde.startswith("properties/fundo/allOf/0/")
+
+
+def test_definicoes_nao_citadas_contam_nas_partes_e_nos_niveis() -> None:
+    # Prova defs_soltas.py do verificador: 50 mil definicoes nao citadas passavam (a conta so seguia as citadas), e
+    # a copia da entrada anda por todas a cada chamada. Agora toda parte conta, citada ou nao.
+    soltas = {f"d{i}": {"type": "string"} for i in range(CUSTO_MAXIMO - 1)}
+    conferir_terceiro({"type": "object", "$defs": soltas})  # a raiz e as definicoes: o teto exato
+    soltas["mais_uma"] = {"type": "string"}
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro({"type": "object", "$defs": soltas})
+    assert (erro.value.motivo, erro.value.onde) == ("grande", "$defs/mais_uma")  # a parte que passou do teto
+    assert f"mais de {CUSTO_MAXIMO} partes" in str(erro.value)
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro({"type": "object", "$defs": {f"d{i}": {"type": "string"} for i in range(50_000)}})
+    assert erro.value.motivo == "grande"
+    # Booleanos e definicoes dentro de partes tambem contam.
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro({"type": "object", "$defs": {"d": {"anyOf": [True] * CUSTO_MAXIMO}}})
+    assert erro.value.motivo == "grande"
+    # Uma definicao nao citada funda demais.
+    with pytest.raises(EsquemaRecusado) as erro:
+        conferir_terceiro({"type": "object", "$defs": {"d": _aninhar({"type": "string"}, PROFUNDIDADE_MAXIMA)}})
+    assert (erro.value.motivo, erro.value.onde[:6]) == ("fundo", "$defs/")
+    conferir_terceiro({"type": "object", "$defs": {"d": _aninhar({"type": "string"}, PROFUNDIDADE_MAXIMA - 2)}})
+
+
+def _na_pilha(quadros: int, funcao: Any) -> Any:
+    """Roda ``funcao`` com a pilha de Python em ``quadros`` quadros (contando os de baixo)."""
+    atual, quadro = 0, sys._getframe()
+    while quadro.f_back is not None:
+        atual, quadro = atual + 1, quadro.f_back
+
+    def descer(falta: int) -> Any:
+        return funcao() if falta <= 0 else descer(falta - 1)
+
+    return descer(quadros - atual)
+
+
+@pytest.mark.parametrize("palavra", ["allOf", "anyOf", "oneOf", "prefixItems", "not", "properties", "$ref"])
+def test_esquema_no_teto_de_niveis_cabe_na_pilha_da_entrada(palavra: str) -> None:
+    # A entrada de verdade (uvicorn) confere os argumentos com cerca de 60 quadros na pilha. No teto de niveis, a
+    # conferencia de um esquema novo (check_schema e depois o pedido) tem de caber com folga: aqui, com 160.
+    folha: dict[str, Any] = {"type": "string", "minLength": 2}
+    pedido: Any = "x"
+    defs: dict[str, Any] = {}
+    no: Any = folha
+    for i in range(PROFUNDIDADE_MAXIMA - 2):
+        if palavra == "properties":
+            no, pedido = {"type": "object", "properties": {"a": no}}, {"a": pedido}
+        elif palavra == "prefixItems":
+            no, pedido = {"type": "array", "prefixItems": [no]}, [pedido]
+        elif palavra == "$ref":
+            defs[f"d{i}"] = no
+            no = {"$ref": f"#/$defs/d{i}"}
+        else:
+            no = _aninhar(no, 1, palavra)
+    esquema: dict[str, Any] = {"type": "object", "properties": {"p": no}} | ({"$defs": defs} if defs else {})
+    conferir_terceiro(esquema)  # bem no teto
+    copia = para_conferir(esquema)
+
+    def conferir() -> bool:
+        modulo_argumentos._validador.cache_clear()  # um esquema novo: check_schema roda de novo
+        try:
+            conferir_argumentos(copia, {"p": pedido})
+        except ArgumentosInvalidos:
+            return False  # recusar e normal ("x" e curto); o que nao pode e RecursionError
+        return True
+
+    _na_pilha(160, conferir)
+
+
+# --- A copia com que a entrada confere os argumentos de um terceiro ----------------------------------------------
+
+
+def _palavras_em_lugar_de_esquema(esquema: Any) -> set[str]:
+    return {chave for _, no in modulo._esquemas(esquema) for chave in no}
+
+
+def test_copia_sem_pattern_nem_uniqueItems_e_o_resto_igual() -> None:
+    limpo = limpar_textos(_cheio())
+    limpo["properties"]["lista"]["uniqueItems"] = True
+    antes = copy.deepcopy(limpo)
+    copia = para_conferir(limpo)
+    assert limpo == antes  # o original nao muda
+    assert "pattern" in json.dumps(limpo)
+    assert not _palavras_em_lugar_de_esquema(copia) & SO_O_TERCEIRO_CONFERE
+    # So as duas palavras saem; o oneOf de "escolha" tem um ramo com regra, e o lugar ja tem anyOf: o oneOf sai.
+    esperado = _naive(limpo)
+    del esperado["properties"]["escolha"]["oneOf"]
+    assert copia == esperado
+    assert para_conferir(copia) == copia
+    conferir_esquema(copia)
+
+
+def test_copia_guarda_nomes_de_campo_e_dados() -> None:
+    # Um campo pode se chamar "pattern", e um enum ou const pode ter "pattern" ou "uniqueItems" dentro: nao sao
+    # lugar de esquema e ficam como estao.
+    esquema = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "pattern": "^a", "enum": [{"pattern": "dado"}, "a"]},
+            "uniqueItems": {"const": {"uniqueItems": True}},
+        },
+    }
+    assert para_conferir(esquema) == {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "enum": [{"pattern": "dado"}, "a"]},
+            "uniqueItems": {"const": {"uniqueItems": True}},
+        },
+    }
+
+
+def test_copia_igual_sem_as_duas_palavras() -> None:
+    esquema = {
+        "type": "object",
+        "properties": {
+            "o": {"oneOf": [{"type": "string"}, {"type": "integer"}]},
+            "n": {"not": {"type": "null"}},
+            "c": {"if": {"type": "string"}, "then": {"minLength": 1}, "else": {"type": "integer"}},
+            "l": {"type": "array", "contains": {"type": "integer"}, "maxContains": 2},
+        },
+        "$defs": {"d": {"type": "string", "maxLength": 3}},
+    }
+    assert para_conferir(esquema) == esquema
+
+
+def _naive(no: Any) -> Any:
+    """Tirar as duas palavras sem cuidado (o que a copia NAO faz)."""
+    if isinstance(no, dict):
+        return {k: _naive(v) for k, v in no.items() if k not in SO_O_TERCEIRO_CONFERE}
+    return [_naive(v) for v in no] if isinstance(no, list) else no
 
 
 @pytest.mark.parametrize(
-    "regra",
+    ("campo", "valido", "invalido"),
     [
-        "(a+)+",
-        "^(a+)+$",
-        "(a*)*",
-        "([a-z]+)*",
-        "(.*a){20}",
-        "(a{1,2})+",
-        "(?:\\w+\\s?)+$",
-        "(?P<n>a+)+",
-        "((a+))+",
-        "(a{2,}){2}",
-        "(x+x+)+y",
-        "([)]?a+)+",  # o ")" dentro da classe nao fecha o grupo; a classe opcional deixa a volta ambigua
-        # Defeito A do verificador: as formas que passavam pelo analisador antigo.
-        "(?x)^( a + ) + $",  # modo verboso: o + depois do espaco repete o grupo
-        "(?x) ( a + ) + # comentario",
-        "(?<=x)(a+)+",
-        "(?i)(a+)+",
-        "(?=(a+)+b)",
-        "(?>(a+)+)b",
-        "(a+)++",
-        # Alternativas que casam o mesmo texto de mais de um jeito.
-        "^(a|aa)+$",
-        "(a|a)*",
-        "(a|aa){1,40}$",
-        "(\\d+|\\d+-)+x",
-        "(?i)(ab|AC)+",
-        "(.*){1,30}x",
-        "(a?){0,30}$",
-        "^(a+)\\1+$",  # a volta e uma referencia ao que ja foi lido: pode casar vazia
-        "(a)(?:\\1)+",
+        # CPF ou CNPJ: so com a regra os dois ramos se excluem; sem ela, os dois aceitam todo texto.
+        (
+            {"oneOf": [{"type": "string", "pattern": "^\\d{11}$"}, {"type": "string", "pattern": "^\\d{14}$"}]},
+            "12345678901",
+            5,
+        ),
+        # O mesmo com anyOf no lugar: o oneOf sai, e o anyOf do lugar continua valendo (15 letras e recusado).
+        (
+            {
+                "anyOf": [{"type": "string", "maxLength": 14}],
+                "oneOf": [{"type": "string", "pattern": "^\\d{11}$"}, {"type": "string", "pattern": "^\\d{14}$"}],
+            },
+            "12345678901",
+            "123456789012345",
+        ),
+        ({"type": "string", "not": {"pattern": "^admin"}}, "pessoa", 5),
+        ({"type": "array", "not": {"uniqueItems": True}}, [1, 1], "x"),
+        (
+            {
+                "type": "string",
+                "if": {"type": "string", "pattern": "^\\d+$"},
+                "then": {"maxLength": 3},
+                "else": {"minLength": 4},
+            },
+            "abcdef",
+            5,
+        ),
+        ({"type": "array", "contains": {"type": "string", "pattern": "^a"}, "maxContains": 1}, ["a", "b"], [1]),
+        # A regra chega ao not por uma referencia.
+        ({"type": "array", "not": {"items": {"$ref": "#/$defs/codigo"}}}, ["ABC"], "x"),
     ],
 )
-def test_repeticao_dentro_de_repeticao(regra: str) -> None:
-    assert quantificador_aninhado(regra)
-    with pytest.raises(PadraoRecusado) as erro:
-        conferir_padroes(_com_regra(regra))
-    assert erro.value.motivo == "aninhada"
+def test_copia_nunca_recusa_o_que_o_esquema_aceita(campo: dict[str, Any], valido: Any, invalido: Any) -> None:
+    esquema = {
+        "type": "object",
+        "$defs": {"codigo": {"type": "string", "pattern": "^[a-z]{2}$"}},
+        "properties": {"c": campo},
+    }
+    conferir_esquema(esquema)
+    conferir_terceiro(esquema)
+    copia = para_conferir(esquema)
+    conferir_esquema(copia)
+    assert not _palavras_em_lugar_de_esquema(copia) & SO_O_TERCEIRO_CONFERE
+    conferir_argumentos(esquema, {"c": valido})
+    conferir_argumentos(copia, {"c": valido})
+    with pytest.raises(ArgumentosInvalidos):
+        conferir_argumentos(_naive(esquema), {"c": valido})  # tirar sem cuidado recusaria um pedido valido
+    with pytest.raises(ArgumentosInvalidos):
+        conferir_argumentos(copia, {"c": invalido})  # o que nao depende da regra tirada continua recusado
+    assert _nao_cresce(copia, esquema)
 
 
-REGRAS_COMUNS = [
-    "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
-    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    "^\\d{4}-\\d{2}-\\d{2}$",
-    "^(\\d{1,3}\\.){3}\\d{1,3}$",
-    "^(\\d{3}-)+\\d{4}$",
-    "^\\(\\d{2}\\) \\d{4,5}-\\d{4}$",
-    "^\\+?[1-9]\\d{1,14}$",
-    "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?(Z|[+-]\\d{2}:\\d{2})$",
-    "^(?=.*[A-Z])(?=.*\\d).{8,}$",
-    "^https?://\\S+$",
-    "^\\d+\\.\\d+$",
-    "^[^@]+@[^@]+$",
-    "^[A-Z][a-z]+(?: [A-Z][a-z]+)*$",
-    "^[a-z]+(-[a-z]+)*$",  # cada volta comeca com "-", que a anterior nao aceita: uma volta so por vez
-    "^[a-z0-9]+(?:-[a-z0-9]+)*$",
-    "[(a+)]+",
-    "\\(a+\\)+",
-    "([)]a+)+",
-    "(ab|cd)+",
-    "(ab|Ac)+",
-    "(?i)(A|a)+$",  # o re junta as duas numa classe so
-    "(?i)^abc+$",
-    "(?#comentario+)a",
-    "a{}+",
-    "^n_",
-    "[0-9]",
+def _partes_e_niveis(no: Any) -> tuple[int, int]:
+    """Partes e niveis do documento, sem seguir as referencias (definicoes tambem)."""
+    if not isinstance(no, dict):
+        return 1, 0
+    partes, niveis = 1, 1
+    for _, sub in modulo._filhos(no):
+        p, n = _partes_e_niveis(sub)
+        partes, niveis = partes + p, max(niveis, n + 1)
+    return partes, niveis
+
+
+def _nao_cresce(copia: Any, esquema: Any) -> bool:
+    """A copia tem no maximo as partes e os niveis do esquema (cada um, nao a dupla em ordem)."""
+    (partes_copia, niveis_copia), (partes, niveis) = _partes_e_niveis(copia), _partes_e_niveis(esquema)
+    return partes_copia <= partes and niveis_copia <= niveis
+
+
+def test_copia_troca_no_mesmo_lugar_ou_tira() -> None:
+    # Cada parte da copia fica no lugar dela ou sai: a copia nunca e maior nem mais funda que o esquema revisado.
+    casos: list[tuple[dict[str, Any], dict[str, Any]]] = [
+        ({"oneOf": [{"pattern": "^a"}, {"type": "integer"}]}, {"anyOf": [{}, {"type": "integer"}]}),
+        (
+            {"anyOf": [{"type": "string"}], "oneOf": [{"pattern": "^a"}, {"type": "integer"}]},
+            {"anyOf": [{"type": "string"}]},
+        ),
+        (
+            {"type": "string", "if": {"pattern": "^a"}, "then": {"maxLength": 1}, "else": {"minLength": 3}},
+            {"type": "string"},
+        ),
+        (
+            {"if": {"type": "string"}, "then": {"pattern": "^a", "maxLength": 1}},
+            {"if": {"type": "string"}, "then": {"maxLength": 1}},
+        ),
+        ({"not": {"pattern": "^a"}, "minLength": 1}, {"minLength": 1}),
+        ({"contains": {"pattern": "^a"}, "maxContains": 1, "minContains": 1}, {"contains": {}, "minContains": 1}),
+        (
+            {"contains": {"type": "string"}, "maxContains": 1, "uniqueItems": True},
+            {"contains": {"type": "string"}, "maxContains": 1},
+        ),
+    ]
+    for campo, esperado in casos:
+        esquema = {"type": "object", "properties": {"c": campo}}
+        assert para_conferir(esquema) == {"type": "object", "properties": {"c": esperado}}, campo
+
+
+def test_copia_nunca_e_maior_nem_mais_funda_que_o_esquema() -> None:
+    # Antes, cada if com regra na condicao virava allOf/anyOf/allOf, e cada oneOf com regra num lugar que ja tinha
+    # anyOf virava allOf/anyOf: niveis a mais por parte. Com 30 ifs encadeados (32 niveis), a copia tinha 92, e a
+    # revisao (check_schema da copia) dava RecursionError; um pouco abaixo disso, passava na revisao e a entrada,
+    # com a pilha mais cheia, podia estourar.
+    cadeia_if: dict[str, Any] = {"type": "string"}
+    cadeia_oneof: dict[str, Any] = {"type": "string"}
+    for _ in range(30):
+        cadeia_if = {"if": {"pattern": "^a"}, "then": cadeia_if, "else": {"type": "string"}}
+        cadeia_oneof = {"anyOf": [{"type": "string"}, {"type": "null"}], "oneOf": [{"pattern": "^a"}, cadeia_oneof]}
+    for cadeia in (cadeia_if, cadeia_oneof):
+        esquema = {"type": "object", "properties": {"p": cadeia}}
+        gravado = json.loads(_revisar_entrada("terceiro", esquema)["ee"])  # a revisao passa, sem RecursionError
+        assert gravado == esquema
+        copia = para_conferir(esquema)
+        assert _nao_cresce(copia, esquema)
+        conferir_argumentos(copia, {"p": "b"})
+
+
+def test_format_nao_e_conferido_pela_entrada() -> None:
+    # Num terceiro, ``format`` so pode ter os nomes do JSON Schema (limpar_textos), e a entrada nao o confere: o
+    # validador nao tem conferidor de formato, entao nenhuma regra (do fornecedor ou da biblioteca) roda por ele.
+    esquema = limpar_textos(
+        {
+            "type": "object",
+            "properties": {
+                "e": {"type": "string", "format": "email"},
+                "r": {"type": "string", "format": "regex"},
+                "d": {"type": "string", "format": "date-time"},
+                "x": {"type": "string", "format": "^(a+)+$"},
+            },
+        }
+    )
+    copia = para_conferir(esquema)
+    assert "format" not in copia["properties"]["x"]
+    conferir_argumentos(copia, {"e": "nao e e-mail", "r": "(a", "d": "ontem", "x": "a" * 20_000 + "!"})
+    assert modulo_argumentos._validador(json.dumps(copia, sort_keys=True)).format_checker is None
+
+
+# Valores dos pedidos para a prova da copia: textos que as regras abaixo aceitam ou recusam, listas com repetidos.
+VALORES_COPIA = st.recursive(
+    st.sampled_from(["", "a", "ab", "abc", "b", "ca", "n_1", "1", "12"]) | st.integers(-1, 3) | st.none(),
+    lambda filhos: st.lists(filhos, max_size=3) | st.dictionaries(NOMES, filhos, max_size=3),
+    max_leaves=6,
+)
+REGRAS = st.sampled_from(["^a", "c$", "^[a-z]*$", "b", "^$", "[0-9]"])
+FOLHAS_COPIA = st.one_of(
+    st.fixed_dictionaries(
+        {"type": st.just("string")},
+        optional={"pattern": REGRAS, "minLength": st.integers(0, 2), "maxLength": st.integers(0, 3)},
+    ),
+    st.fixed_dictionaries({"pattern": REGRAS}),  # sem type: vale so para texto
+    st.fixed_dictionaries({"type": st.sampled_from(["integer", "null", "string"])}),
+    st.fixed_dictionaries({"enum": st.lists(VALORES_COPIA, min_size=1, max_size=3)}),
+    st.fixed_dictionaries(
+        {"type": st.just("array")}, optional={"uniqueItems": st.booleans(), "maxItems": st.integers(0, 3)}
+    ),
+    st.booleans(),
+)
+
+
+def _compostos_copia(filhos: st.SearchStrategy[Any]) -> st.SearchStrategy[Any]:
+    listas = st.lists(filhos, min_size=1, max_size=3)
+    return st.one_of(
+        st.fixed_dictionaries(
+            {"type": st.just("object")},
+            optional={
+                "properties": st.dictionaries(NOMES, filhos, max_size=3),
+                "required": st.lists(NOMES, max_size=2, unique=True),
+                "additionalProperties": filhos,
+                "propertyNames": filhos,
+                "dependentSchemas": st.dictionaries(NOMES, filhos, max_size=1),
+            },
+        ),
+        st.fixed_dictionaries(
+            {"type": st.just("array")},
+            optional={
+                "items": filhos,
+                "prefixItems": st.lists(filhos, max_size=2),
+                "contains": filhos,
+                "minContains": st.integers(0, 2),
+                "maxContains": st.integers(0, 2),
+                "uniqueItems": st.booleans(),
+            },
+        ),
+        st.fixed_dictionaries({"anyOf": listas}, optional={"allOf": listas, "oneOf": listas}),
+        st.fixed_dictionaries({"oneOf": listas}, optional={"allOf": listas, "not": filhos}),
+        st.fixed_dictionaries({"allOf": listas}),
+        st.fixed_dictionaries({"not": filhos}, optional={"pattern": REGRAS}),
+        st.fixed_dictionaries({"if": filhos}, optional={"then": filhos, "else": filhos, "allOf": listas}),
+        st.fixed_dictionaries({"then": filhos, "else": filhos}),  # sem if: then e else nao valem
+        # Os lugares onde tirar a regra apertaria, com a regra bem na condicao (mais pedidos batem neles).
+        st.fixed_dictionaries(
+            {"if": st.fixed_dictionaries({"pattern": REGRAS}), "then": filhos | st.just({"type": "integer"})},
+            optional={"else": filhos},
+        ),
+        st.fixed_dictionaries(
+            {
+                "type": st.just("array"),
+                "contains": st.fixed_dictionaries({"pattern": REGRAS}),
+                "maxContains": st.integers(0, 2),
+            },
+            optional={"minContains": st.integers(0, 1)},
+        ),
+        st.fixed_dictionaries({"not": st.fixed_dictionaries({"type": st.just("array"), "uniqueItems": st.just(True)})}),
+    )
+
+
+DEFINICOES_COPIA = st.recursive(FOLHAS_COPIA, _compostos_copia, max_leaves=5)
+# A definicao chamada de um lugar onde tirar a regra apertaria (a regra chega por referencia).
+REFERENCIAS_COPIA = st.sampled_from(
+    [
+        {"$ref": "#/$defs/d"},
+        {"not": {"$ref": "#/$defs/d"}},
+        {"oneOf": [{"$ref": "#/$defs/d"}, {"type": "string"}]},
+        {"if": {"$ref": "#/$defs/d"}, "then": {"type": "integer"}},
+    ]
+)
+SUBESQUEMAS_COPIA = st.recursive(FOLHAS_COPIA | REFERENCIAS_COPIA, _compostos_copia, max_leaves=6)
+RAIZES_COPIA = st.fixed_dictionaries(
+    {
+        "type": st.just("object"),
+        "properties": st.dictionaries(NOMES, SUBESQUEMAS_COPIA, max_size=4),
+        "$defs": st.fixed_dictionaries({"d": DEFINICOES_COPIA}),
+    },
+    optional={
+        "required": st.lists(NOMES, max_size=2, unique=True),
+        "additionalProperties": SUBESQUEMAS_COPIA,
+        "not": SUBESQUEMAS_COPIA,
+        "oneOf": st.lists(SUBESQUEMAS_COPIA, min_size=1, max_size=2),
+        "if": SUBESQUEMAS_COPIA,
+        "then": SUBESQUEMAS_COPIA,
+    },
+)
+
+
+@settings(max_examples=1000, deadline=None, database=None, suppress_health_check=[HealthCheck.too_slow])
+@given(RAIZES_COPIA, st.data())
+def test_a_copia_aceita_tudo_o_que_o_esquema_aceita(esquema: dict[str, Any], dados: Any) -> None:
+    try:
+        conferir_esquema(esquema)
+    except EsquemaInvalido:
+        assume(False)
+    conferir_terceiro(esquema)
+    copia = para_conferir(esquema)
+    conferir_esquema(copia)
+    assert not _palavras_em_lugar_de_esquema(copia) & SO_O_TERCEIRO_CONFERE
+    # Nunca maior nem mais funda: os tetos da revisao valem para o que a entrada confere.
+    assert _nao_cresce(copia, esquema)
+    assert custo_do_esquema(copia) <= custo_do_esquema(esquema)
+    campos = st.sampled_from([*esquema["properties"], "outro"])
+    pedidos = dados.draw(st.lists(st.dictionaries(campos, VALORES_COPIA, max_size=4), min_size=1, max_size=6))
+    for pedido in [*pedidos, {}]:
+        if _veredito(esquema, pedido) is None:
+            assert _veredito(copia, pedido) is None, pedido
+
+
+# Regras e listas que travavam a conferencia (contornos do verificador): exponenciais, compostas, olhar adiante
+# dentro de repeticao, grau 3, e uniqueItems com milhares de objetos diferentes (13 s com 4 mil).
+ATAQUES = [
+    "^(a+)+$",
+    "^(?:a?){10}a+a+$",
+    "^(?:a|b|c|d){0,5}(?:a?){5}a+a+$",
+    "(?:(?=[a-z]*)[a-z])+X",
+    "^a+a+a+$",
+    "^(a|aa)+$",
+    "(?:(?=(?:(?=.*).)*)a)+X",
 ]
 
 
-@pytest.mark.parametrize("regra", REGRAS_COMUNS)
-def test_regras_comuns_passam(regra: str) -> None:
-    assert not quantificador_aninhado(regra)
-    conferir_padroes(_com_regra(regra))
+def _esquema_de_ataque() -> dict[str, Any]:
+    def texto(i: int) -> dict[str, Any]:
+        return {"type": "string", "pattern": ATAQUES[i % len(ATAQUES)]}
 
-
-def _com_regra(regra: str) -> dict[str, Any]:
-    return {"type": "object", "properties": {"conta": {"type": "string", "pattern": regra}}}
-
-
-@pytest.mark.parametrize(
-    "regra",
-    [
-        "^(a?){28}a{28}$",  # defeito A do verificador: repeticao com teto alto de algo que varia
-        "a?" * 30 + "a" * 30,  # o mesmo, sem grupo
-        "(a?){11}",
-        "^(\\d{1,3}\\.){1,8}$",
-    ],
-)
-def test_combinacoes_demais_sao_recusadas(regra: str) -> None:
-    assert custo_da_regra(regra).escolhas > ESCOLHAS_MAXIMAS
-    with pytest.raises(PadraoRecusado, match="combinacoes demais") as erro:
-        conferir_padroes(_com_regra(regra))
-    assert erro.value.motivo == "escolhas"
-
-
-def test_combinacoes_no_limite_passam() -> None:
-    assert custo_da_regra("(a?){10}").escolhas == ESCOLHAS_MAXIMAS
-    conferir_padroes(_com_regra("(a?){10}"))
-    assert custo_da_regra("^(\\d{1,3}\\.){3}\\d{1,3}$").escolhas == 81
-
-
-@pytest.mark.parametrize(
-    ("regra", "grau"),
-    [
-        ("^a+a+a+$", 3),
-        ("^\\w+\\d+\\w+$", 3),  # \w e \d disputam os digitos
-        ("^[一-鿿]+[一-鿿]+[一-鿿]+$", 3),
-        ("^[㐀-䶿]+[㐀-䶿]+[㐀-䶿]+$", 3),  # faixa grande sem ponto de prova fixo: as provas saem da faixa
-        ("^[^@]+[^.]+[^,]+$", 3),
-        (".+@.+", 3),  # sem ^, a busca conta mais uma
-        ("\\d+\\d+x", 3),
-        ("^a+(?=a+a+b)", 3),  # o olhar adiante roda a cada volta da repeticao de antes
-        ("^[^@#]+[^.,]+[^;:]+$", 3),  # classes negadas: as tres aceitam "a"
-    ],
-)
-def test_repeticoes_longas_que_disputam_as_mesmas_letras_sao_recusadas(regra: str, grau: int) -> None:
-    custo = custo_da_regra(regra)
-    assert (custo.aninhada, custo.grau) == (False, grau)
-    with pytest.raises(PadraoRecusado, match="disputam as mesmas letras") as erro:
-        conferir_padroes(_com_regra(regra))
-    assert erro.value.motivo == "seguidas"
-
-
-@pytest.mark.parametrize(
-    ("regra", "grau"),
-    [
-        ("^a+$", 1),
-        ("^\\d+\\.\\d+$", 1),  # \d nao aceita o ponto: o primeiro \d+ nao disputa com o resto
-        ("^\\d+\\s\\d+$", 1),
-        ("^[a-z]+@[a-z]+\\.[a-z]{2,}$", 1),
-        ("^\\w+\\d+$", 2),
-        ("^a+a+$", 2),
-        ("\\d+x", 2),  # sem ^: a busca tenta a partir de cada letra
-        ("[0-9]", 1),
-        ("^[0-9]{5}$", 0),
-        ("(?m)^a+$", 2),  # com (?m), ^ casa depois de cada quebra de linha: nao ancora a busca
-        ("^(?i:a)+A+$", 2),  # so o grupo ignora a caixa, e isso basta para disputar o "A"
-        ("^a+(?=a+b)", 2),
-        ("^[^@#]+@[a-z]+$", 1),  # a classe negada nao aceita o "@"
-    ],
-)
-def test_grau_das_regras(regra: str, grau: int) -> None:
-    assert custo_da_regra(regra).grau == grau
-    assert GRAU_MAXIMO == 2
-    conferir_padroes(_com_regra(regra))
-
-
-def test_revisao_recusa_regra_com_repeticao_aninhada_em_qualquer_lugar() -> None:
-    fundo = {
+    return {
         "type": "object",
-        "properties": {"lista": {"type": "array", "items": {"anyOf": [{"type": "string", "pattern": "(a+)+$"}]}}},
+        "$defs": {"t": texto(0)},
+        "properties": {
+            "a": texto(1),
+            "b": {"$ref": "#/$defs/t"},
+            "c": {"oneOf": [texto(2), texto(3)]},
+            "d": {"not": texto(4)},
+            "e": {"if": texto(5), "then": texto(6), "else": texto(0)},
+            "f": {"type": "array", "items": texto(1), "contains": texto(2), "maxContains": 5},
+            "g": {"type": "object", "propertyNames": texto(3), "additionalProperties": texto(4)},
+            "h": {"type": "array", "uniqueItems": True},
+            "i": {"anyOf": [texto(5), {"type": "array", "uniqueItems": True, "items": texto(6)}]},
+        },
     }
-    chave = {"type": "object", "patternProperties": {"^(a|b+)+$": {"type": "string"}}}
-    nomes = {"type": "object", "propertyNames": {"pattern": "^(\\w+)*$"}}
-    for esquema, lugar in (
-        (_com_regra("^(\\d+)+$"), "properties/conta"),
-        (fundo, "properties/lista/items/anyOf/0"),
-        (chave, "patternProperties"),
-        (nomes, "propertyNames"),
-    ):
-        conferir_esquema(esquema)  # o esquema e valido: so a revisao de terceiro recusa
-        with pytest.raises(PadraoRecusado) as erro:
-            conferir_padroes(esquema)
-        assert lugar in str(erro.value)
-        assert "fornecedor" in str(erro.value)
-        assert isinstance(erro.value, EsquemaInvalido)  # a tela do ADMIN ja mostra a frase deste erro
-        assert isinstance(erro.value, EsquemaRecusado)
-        assert erro.value.motivo == "aninhada"
-        assert lugar in erro.value.onde
 
 
-def test_revisao_recusa_regra_longa_e_aceita_no_limite() -> None:
-    conferir_padroes(_com_regra("a" * PADRAO_MAXIMO))
-    with pytest.raises(PadraoRecusado, match=f"{PADRAO_MAXIMO + 1} letras") as erro:
-        conferir_padroes(_com_regra("a" * (PADRAO_MAXIMO + 1)))
-    assert (erro.value.motivo, erro.value.onde) == ("longa", "properties/conta")
-    with pytest.raises(PadraoRecusado):
-        conferir_padroes({"type": "object", "patternProperties": {"b" * (PADRAO_MAXIMO + 1): True}})
-
-
-def test_revisao_recusa_regra_invalida_e_marca_escondidos_no_lugar() -> None:
-    with pytest.raises(PadraoRecusado, match="nao e uma expressao valida") as invalida:
-        conferir_padroes(_com_regra("(a"))
-    assert invalida.value.motivo == "invalida"
-    # A arvore le esta regra, mas o re nao a compila (olhar para tras de tamanho variavel): tambem e invalida.
-    with pytest.raises(PadraoRecusado, match="nao e uma expressao valida") as so_na_compilacao:
-        conferir_padroes({"type": "object", "patternProperties": {"(?<=a+)b": True}})
-    assert so_na_compilacao.value.motivo == "invalida"
-    esquema = {"type": "object", "properties": {"co\u202enta": {"type": "string", "pattern": "(a+)+"}}}
-    with pytest.raises(PadraoRecusado) as erro:
-        conferir_padroes(esquema)
-    assert "co[U+202E]nta" in str(erro.value)
-    assert "\u202e" not in str(erro.value)
-    assert erro.value.onde == "properties/co[U+202E]nta"
-
-
-def test_o_analisador_do_re_tem_o_formato_que_a_conta_usa() -> None:
-    # re._parser e interno do Python: se mudar numa versao nova, este teste aponta antes da revisao errar.
-    arvore = list(modulo._sre.parse("(?x) ( a + ) + $"))
-    op, (minimo, maximo, corpo) = arvore[0]
-    assert op is modulo._op.MAX_REPEAT
-    assert (minimo, maximo) == (1, modulo._op.MAXREPEAT)
-    assert next(iter(corpo))[0] is modulo._op.SUBPATTERN
-    minima, maxima = corpo.getwidth()
-    assert minima == 1
-    assert maxima > 10**9
-    assert modulo._op.CATEGORY_DIGIT.name == "CATEGORY_DIGIT"
-    assert set(modulo._CATEGORIAS) <= {c.name for c in modulo._op.CHCODES}
-
-
-def test_no_que_a_conta_nao_conhece_recusa_a_regra(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Estado:
-        flags = 0
-
-    class _Arvore(list[Any]):
-        state = _Estado()
-
-    class _Analisador:
-        @staticmethod
-        def parse(regra: str) -> _Arvore:
-            return _Arvore([("NO_NOVO", None)])
-
-    monkeypatch.setattr(modulo, "_sre", _Analisador())
-    with pytest.raises(PadraoRecusado, match="nao sabe medir") as erro:
-        conferir_padroes(_com_regra("^a$"))
-    assert erro.value.motivo == "invalida"
-
-
-def test_esquema_sem_regra_ou_com_regras_comuns_passa() -> None:
-    conferir_padroes(limpar_textos(_cheio()))
-    conferir_padroes({"type": "object"})
-    assert padroes(limpar_textos(_cheio())) == [
-        ("properties/title", "^[a-z]+$"),
-        ("properties/lista/items", "^[a-z]+$"),
-        ("properties/lista/prefixItems/1", "^[a-z]+$"),
-        ("properties/escolha/anyOf/0", "^[a-z]+$"),
-        ("properties/escolha/oneOf/0", "^[a-z]+$"),
-        ("properties/condicao/then", "^[a-z]+$"),
-        ("properties/mapa/patternProperties", "^n_"),
-        ("properties/mapa/additionalProperties", "^[a-z]+$"),
-    ]
+def test_conferir_argumentos_de_terceiro_com_texto_de_ataque_leva_menos_de_50_ms() -> None:
+    # A revisao aceita as regras (a vitrine as mostra); a copia da entrada nao tem nenhuma.
+    esquema = _esquema_de_ataque()
+    conferir_esquema(esquema)
+    conferir_terceiro(esquema)
+    copia = para_conferir(esquema)
+    assert "pattern" not in json.dumps(copia)
+    assert "uniqueItems" not in json.dumps(copia)
+    ataque = "a" * 20_000 + "!"
+    lista = [{"n": i} for i in range(4000)]
+    pedido = {
+        "a": ataque,
+        "b": ataque,
+        "c": ataque,
+        "d": ataque,
+        "e": ataque,
+        "f": [ataque],
+        "g": {"a" * 50: ataque},
+        "h": lista,
+        "i": ataque,
+    }
+    conferir_argumentos(copia, {"a": "x"})  # o validador da copia fica pronto (como depois da primeira chamada)
+    inicio = time.perf_counter()
+    conferir_argumentos(copia, pedido)
+    gasto = time.perf_counter() - inicio
+    assert gasto < 0.05, f"{gasto:.3f} s"
 
 
 # --- revisar_ferramenta de terceiro sem banco: o que vai ao INSERT nao depende do gatilho da 0006 -----------------
@@ -984,7 +1362,7 @@ def _revisar_sem_banco(origem: str, **extra: Any) -> dict[str, Any]:
     declarada = {
         "name": "consultar",
         "description": f"{MARCA} descricao",
-        "inputSchema": _cheio(),
+        "inputSchema": _cheio_sem_recusadas(),
         "outputSchema": _anotado({"type": "object"}, "saida"),
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True},
     }
@@ -1019,36 +1397,113 @@ def test_revisao_de_proprio_manda_ao_banco_como_nas_fases_1_e_2() -> None:
     inserido = _revisar_sem_banco("proprio")
     assert json.loads(inserido["et"]) == {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True}
     assert inserido["tf"] is False
-    assert json.loads(inserido["ee"]) == _cheio()
+    assert json.loads(inserido["ee"]) == _cheio_sem_recusadas()
     assert _revisar_sem_banco("proprio", texto_de_fora=True)["tf"] is True
 
 
-def test_revisao_de_terceiro_recusa_esquema_caro_antes_do_banco_e_proprio_segue_aceito() -> None:
+def _revisar_entrada(origem: str, entrada: dict[str, Any]) -> dict[str, Any]:
     from mcp_claro.cadastro import repositorio
 
-    def revisar(origem: str, entrada: dict[str, Any]) -> dict[str, Any]:
-        c = _ConexaoFalsa(origem)
-        asyncio.run(
-            repositorio.revisar_ferramenta(
-                cast(Any, c),
-                sistema_id=uuid.uuid4(),
-                definicao_declarada={"name": "consultar", "inputSchema": entrada},
-                nome_vitrine="consultar_x",
-                descricao="Consulta, escrito pelo ADMIN.",
-                classe="le",
-                revisado_por="admin",
-            )
+    c = _ConexaoFalsa(origem)
+    asyncio.run(
+        repositorio.revisar_ferramenta(
+            cast(Any, c),
+            sistema_id=uuid.uuid4(),
+            definicao_declarada={"name": "consultar", "inputSchema": entrada},
+            nome_vitrine="consultar_x",
+            descricao="Consulta, escrito pelo ADMIN.",
+            classe="le",
+            revisado_por="admin",
         )
-        return c.inserido
+    )
+    return c.inserido
 
-    for caro, motivo in (
-        (_dobrada(20), "grande"),
-        ({"type": "object", "properties": {"filho": {"$ref": "#"}}}, "ciclo"),
-        (_com_regra("^(a?){28}a{28}$"), "escolhas"),
-        (_com_regra("^a+a+a+$"), "seguidas"),
-    ):
+
+def _recusados() -> list[tuple[dict[str, Any], str, str | None]]:
+    """Os contornos do verificador e os casos da revisao de terceiro, com o motivo e a palavra da recusa."""
+    return [
+        (_dobrada(20), "grande", None),
+        ({"type": "object", "properties": {"filho": {"$ref": "#"}}}, "referencia", None),
+        (
+            {"type": "object", "$defs": {"a": {"$ref": "#/$defs/a"}}, "properties": {"p": {"$ref": "#/$defs/a"}}},
+            "ciclo",
+            None,
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {
+                    "isca": {"enum": [{"type": "string", "pattern": "^(a+)+$"}]},
+                    "x": {"$ref": "#/properties/isca/enum/0"},
+                },
+            },
+            "referencia",
+            None,
+        ),
+        (
+            {
+                "type": "object",
+                "$defs": {"d": {"const": {"pattern": "^(a|aa)+$"}}},
+                "properties": {"x": {"$ref": "#/$defs/d/const"}},
+            },
+            "referencia",
+            None,
+        ),
+        (
+            {
+                "type": "object",
+                "$defs": {"a": {"$anchor": "x", "type": "string"}},
+                "contentSchema": {"$anchor": "x", "type": "integer"},
+                "properties": {"p": {"$ref": "#x"}},
+            },
+            "palavra",
+            "$anchor",
+        ),
+        (
+            {"type": "object", "patternProperties": {"^(a|b+)+$": {"type": "string"}}},
+            "palavra",
+            "patternProperties",
+        ),
+        ({"type": "object", "x-c": {"type": "string"}, "properties": {"p": {"$ref": "#/x-c"}}}, "referencia", None),
+        ({"$id": "https://fornecedor.teste/s", "type": "object"}, "palavra", "$id"),
+        (  # $dynamicRef sozinho, para dentro de um enum (prova dynamicref_sozinho.py do verificador)
+            {
+                "type": "object",
+                "properties": {
+                    "isca": {"enum": [{"type": "string", "pattern": "^(a|aa)+$"}]},
+                    "x": {"$dynamicRef": "#/properties/isca/enum/0"},
+                },
+            },
+            "palavra",
+            "$dynamicRef",
+        ),
+        ({"type": "object", "$defs": {"d": {"$dynamicAnchor": "m", "type": "string"}}}, "palavra", "$dynamicAnchor"),
+        (_unevaluated(15, "unevaluatedProperties"), "palavra", "unevaluatedProperties"),
+        (_unevaluated(14, "unevaluatedItems"), "palavra", "unevaluatedItems"),
+        (_fundo_escondido(7, 60), "fundo", None),
+        (
+            {"type": "object", "properties": {"c": {"$schema": "http://json-schema.org/draft-06/schema#"}}},
+            "palavra",
+            "$schema",
+        ),
+        ({"type": "object", "$defs": {f"d{i}": {"type": "string"} for i in range(CUSTO_MAXIMO)}}, "grande", None),
+    ]
+
+
+def test_revisao_de_terceiro_recusa_antes_do_banco_e_proprio_segue_aceito() -> None:
+    for recusado, motivo, palavra in _recusados():
         with pytest.raises(EsquemaRecusado) as erro:
-            revisar("terceiro", caro)
-        assert erro.value.motivo == motivo
-        # Sistema proprio: como nas Fases 1 e 2, a revisao nao mede o esquema.
-        assert json.loads(revisar("proprio", caro)["ee"]) == caro
+            _revisar_entrada("terceiro", recusado)
+        assert (erro.value.motivo, erro.value.palavra) == (motivo, palavra), recusado
+        # Sistema proprio: como nas Fases 1 e 2, a revisao nao olha nada disso.
+        assert json.loads(_revisar_entrada("proprio", recusado)["ee"]) == recusado
+
+
+def test_revisao_de_terceiro_aceita_regras_e_listas_caras_sem_efeito_na_entrada() -> None:
+    # Regras de formato e uniqueItems do fornecedor sao gravados (a vitrine mostra), mas a copia da entrada nao os
+    # tem: as regras caras dos contornos do verificador nao rodam no MCP-CLARO.
+    gravado = json.loads(_revisar_entrada("terceiro", _esquema_de_ataque())["ee"])
+    assert gravado == _esquema_de_ataque()
+    copia = para_conferir(gravado)
+    assert "pattern" not in json.dumps(copia)
+    assert "uniqueItems" not in json.dumps(copia)

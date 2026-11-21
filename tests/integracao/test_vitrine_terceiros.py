@@ -1,9 +1,13 @@
 """Vitrine e revisao de ferramenta com servidores de terceiros, contra PostgreSQL 18.7 real (grupo G2).
 
 - Um terceiro so aparece com ``terceiros`` verdadeiro e so com as ferramentas publicadas na revisao do servidor
-  vigente; rever uma ferramenta tira so ela; quarentena tira o servidor inteiro.
+  vigente (nem de uma revisao antiga, nem de uma gravada que nao ficou vigente); rever uma ferramenta tira so ela;
+  quarentena tira o servidor inteiro; ativo sem revisao vigente, nada dele aparece.
 - A revisao de ferramenta de terceiro grava o esquema limpo, as descricoes do ADMIN, nenhuma dica do fornecedor,
-  ``texto_de_fora`` e a definicao declarada; recusa regra de formato perigosa (critica B3).
+  ``texto_de_fora`` e a definicao declarada; recusa palavras e referencias que a revisao de terceiro nao aceita
+  (critica B3, grupo G2b), sem gravar nada.
+- Para chamar, o esquema de entrada de um terceiro vem sem ``pattern`` nem ``uniqueItems``; a vitrine mostra o
+  ``pattern``.
 - Sistema proprio sem a marca: como nas Fases 1 e 2, com ``terceiros`` ligado ou nao.
 
 A revisao do servidor e gravada pelo dono (``tests/apoio_terceiros.py``), como a conclusao do despachante faria.
@@ -12,6 +16,7 @@ A revisao do servidor e gravada pelo dono (``tests/apoio_terceiros.py``), como a
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -22,12 +27,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
-from mcp_claro.cadastro.esquema import CampoDesconhecido, EsquemaRecusado, PadraoRecusado
+from mcp_claro.cadastro.esquema import CampoDesconhecido, EsquemaRecusado
 from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import FIM_DA_DESCRICAO_TERCEIRO, FerramentaVitrine
 from mcp_claro.config.settings import Parametros
 from mcp_claro.db.engine import criar_engine
-from mcp_claro.entrada.argumentos import EsquemaInvalido
+from mcp_claro.entrada.argumentos import EsquemaInvalido, conferir_argumentos
 from mcp_claro.versao import VERSAO_MCP
 from tests.apoio_terceiros import cadastrar_terceiro, definicao, gravar_revisao_do_servidor, por_em_quarentena
 
@@ -223,6 +228,72 @@ async def test_quarentena_tira_o_servidor_inteiro(dono: AsyncEngine) -> None:
     assert await _da_ordem(dono, cena, cena.a, terceiros=True) is None
 
 
+async def _sem_nada_do_terceiro(dono: AsyncEngine, cena: Cena) -> None:
+    for terceiros in (True, False):
+        assert await _ids(dono, cena, terceiros=terceiros) == {cena.p}
+    for ferramenta_id in (cena.a, cena.b):
+        assert await _da_ordem(dono, cena, ferramenta_id, terceiros=True) is None
+        assert await _na_vitrine(dono, cena, ferramenta_id, terceiros=True) is None
+
+
+async def test_so_a_revisao_vigente_publica(dono: AsyncEngine) -> None:
+    cena = await _cena(dono)
+    async with dono.begin() as c:
+        await gravar_revisao_do_servidor(c, cena.terceiro_id, [cena.a, cena.b])
+    assert await _ids(dono, cena, terceiros=True) == {cena.p, cena.a, cena.b}
+    async with dono.begin() as c:
+        vigente = await gravar_revisao_do_servidor(c, cena.terceiro_id, [cena.a])  # o ADMIN tirou B da vitrine
+    assert await _ids(dono, cena, terceiros=True) == {cena.p, cena.a}
+    assert await _da_ordem(dono, cena, cena.b, terceiros=True) is None
+    assert await _na_vitrine(dono, cena, cena.b, terceiros=True) is None
+    # Uma revisao gravada que nao ficou vigente nao publica nada (a guarda so torna vigente a da conclusao).
+    async with dono.begin() as c:
+        await gravar_revisao_do_servidor(c, cena.terceiro_id, [cena.a, cena.b], vigente=False)
+        atual = (
+            await c.execute(text("SELECT revisao_servidor_id FROM sistemas WHERE id = :s"), {"s": cena.terceiro_id})
+        ).scalar_one()
+    assert atual == vigente
+    assert await _ids(dono, cena, terceiros=True) == {cena.p, cena.a}
+    assert await _da_ordem(dono, cena, cena.b, terceiros=True) is None
+
+
+async def test_terceiro_ativo_sem_revisao_vigente_depois_de_ja_ter_tido_uma_fica_fora(dono: AsyncEngine) -> None:
+    # Trocar o tipo de chave apaga a revisao vigente (guarda da 0006); a sondagem poe o servidor ativo de novo, e as
+    # revisoes antigas, que publicavam A e B, continuam gravadas. Nada dele aparece ate uma conclusao nova.
+    cena = await _cena(dono)
+    async with dono.begin() as c:
+        await gravar_revisao_do_servidor(c, cena.terceiro_id, [cena.a, cena.b])
+    assert await _ids(dono, cena, terceiros=True) == {cena.p, cena.a, cena.b}
+    async with dono.begin() as c:
+        await c.execute(text("UPDATE sistemas SET tipo_chave = 'compartilhada' WHERE id = :s"), {"s": cena.terceiro_id})
+        linha = (
+            await c.execute(
+                text("SELECT situacao, revisao_servidor_id FROM sistemas WHERE id = :s"), {"s": cena.terceiro_id}
+            )
+        ).one()
+    assert (linha.situacao, linha.revisao_servidor_id) == ("pendente", None)
+    async with dono.begin() as c:
+        await c.execute(
+            text("UPDATE sistemas SET situacao = 'ativo', versao_mcp = :v, sondagem_desfecho = 'aceito' WHERE id = :s"),
+            {"v": VERSAO_MCP, "s": cena.terceiro_id},
+        )
+        revisoes = (
+            await c.execute(
+                text("SELECT count(*) FROM revisoes_servidor WHERE sistema_id = :s AND :a = ANY (publicadas)"),
+                {"s": cena.terceiro_id, "a": cena.a},
+            )
+        ).scalar_one()
+    assert revisoes == 1
+    await _sem_nada_do_terceiro(dono, cena)
+    # O mesmo com a revisao vigente apagada direto, com o servidor sempre ativo.
+    async with dono.begin() as c:
+        await gravar_revisao_do_servidor(c, cena.terceiro_id, [cena.a, cena.b])
+    assert await _ids(dono, cena, terceiros=True) == {cena.p, cena.a, cena.b}
+    async with dono.begin() as c:
+        await c.execute(text("UPDATE sistemas SET revisao_servidor_id = NULL WHERE id = :s"), {"s": cena.terceiro_id})
+    await _sem_nada_do_terceiro(dono, cena)
+
+
 async def test_vitrine_de_terceiro_sem_nada_do_fornecedor(dono: AsyncEngine) -> None:
     cena = await _cena(dono)
     async with dono.begin() as c:
@@ -299,26 +370,125 @@ async def test_revisao_de_terceiro_grava_esquema_limpo_descricoes_do_admin_e_tex
     assert linha.impressao == impressao(declarada)  # a impressao e a do que foi declarado, nao do limpo
 
 
-async def test_revisao_de_terceiro_recusa_regra_perigosa_e_nada_muda(dono: AsyncEngine) -> None:
+def _aninhar(no: Any, niveis: int, palavra: str) -> Any:
+    for _ in range(niveis):
+        no = {"not": no} if palavra == "not" else {"allOf": [no], palavra: True}
+    return no
+
+
+def _recusados() -> list[tuple[dict[str, Any], str, str | None]]:
+    """Esquemas que a revisao de terceiro recusa, com o motivo e a palavra: os contornos do verificador e o resto."""
+    defs: dict[str, Any] = {f"d{i}": {"allOf": [{"$ref": f"#/$defs/d{i + 1}"}] * 2} for i in range(20)}
+    defs["d20"] = {"type": "string"}
+    # Niveis escondidos pela memoria da conta: cada definicao e contada rasa e depois chamada de dentro da seguinte.
+    fundas: dict[str, Any] = {"d0": _aninhar({"type": "string"}, 60, "not")}
+    for i in range(1, 7):
+        fundas[f"d{i}"] = _aninhar({"$ref": f"#/$defs/d{i - 1}"}, 60, "not")
+    return [
+        (  # contorno: regra escondida num enum, chamada por $ref
+            {
+                "type": "object",
+                "properties": {
+                    "isca": {"enum": [{"type": "string", "pattern": "^(a+)+$"}]},
+                    "texto": {"$ref": "#/properties/isca/enum/0"},
+                },
+            },
+            "referencia",
+            None,
+        ),
+        (  # contorno: regra escondida num const, chamada por $ref
+            {
+                "type": "object",
+                "$defs": {"d": {"const": {"pattern": "^(a|aa)+$"}}},
+                "properties": {"texto": {"$ref": "#/$defs/d/const"}},
+            },
+            "referencia",
+            None,
+        ),
+        (  # contorno: ancora repetida
+            {
+                "type": "object",
+                "$defs": {"a": {"$anchor": "x", "type": "string"}, "b": {"$anchor": "x", "type": "integer"}},
+                "properties": {"p": {"$ref": "#x"}},
+            },
+            "palavra",
+            "$anchor",
+        ),
+        (
+            {"type": "object", "patternProperties": {"^(a|b+)+$": {"type": "string"}}},
+            "palavra",
+            "patternProperties",
+        ),
+        (
+            {"type": "object", "properties": {"p": {"$id": "https://fornecedor.teste/p", "type": "string"}}},
+            "palavra",
+            "$id",
+        ),
+        (  # $dynamicRef sozinho, para dentro de um enum: a regra do fornecedor iria para a entrada
+            {
+                "type": "object",
+                "properties": {
+                    "isca": {"enum": [{"type": "string", "pattern": "^(a|aa)+$"}]},
+                    "a": {"$dynamicRef": "#/properties/isca/enum/0"},
+                },
+            },
+            "palavra",
+            "$dynamicRef",
+        ),
+        ({"type": "object", "$defs": {"d": {"$dynamicAnchor": "m", "type": "string"}}}, "palavra", "$dynamicAnchor"),
+        (  # unevaluated* aninhado: 15 niveis levavam 12 s na entrada com um pedido minusculo
+            {"type": "object", "properties": {"p": _aninhar({"type": "object"}, 15, "unevaluatedProperties")}},
+            "palavra",
+            "unevaluatedProperties",
+        ),
+        (
+            {"type": "object", "properties": {"p": _aninhar({"type": "array"}, 14, "unevaluatedItems")}},
+            "palavra",
+            "unevaluatedItems",
+        ),
+        (  # $schema numa parte troca a versao do JSON Schema dela na entrada
+            {
+                "type": "object",
+                "properties": {"c": {"$schema": "http://json-schema.org/draft-06/schema#", "type": "string"}},
+            },
+            "palavra",
+            "$schema",
+        ),
+        (
+            {"type": "object", "properties": {"a": {"$ref": "https://json-schema.org/draft/2020-12/schema"}}},
+            "referencia",
+            None,
+        ),
+        ({"type": "object", "$defs": defs, "properties": {"x": {"$ref": "#/$defs/d0"}}}, "grande", None),
+        (  # definicoes nao citadas tambem contam
+            {"type": "object", "$defs": {f"s{i}": {"type": "string"} for i in range(2000)}},
+            "grande",
+            None,
+        ),
+        (
+            {"type": "object", "$defs": fundas, "properties": {f"p{i}": {"$ref": f"#/$defs/d{i}"} for i in range(7)}},
+            "fundo",
+            None,
+        ),
+        (
+            {"type": "object", "$defs": {"a": {"$ref": "#/$defs/a"}}, "properties": {"p": {"$ref": "#/$defs/a"}}},
+            "ciclo",
+            None,
+        ),
+    ]
+
+
+async def test_revisao_de_terceiro_recusa_palavras_referencias_e_esquema_caro_e_nada_muda(dono: AsyncEngine) -> None:
     async with dono.begin() as c:
         terceiro_id = await cadastrar_terceiro(c)
         antiga = await _revisar(c, terceiro_id, _declarada("consultar_saldo"))
-    # As duas formas do verificador que passavam (modo verboso e teto alto) e a cadeia de $ref dobrada.
-    for regra in ("^(\\d+)+$", "a" * 300, "(?x)^( a + ) + $", "^(a?){28}a{28}$", "^a+a+a+$"):
-        with pytest.raises(PadraoRecusado) as erro:
+    for esquema, motivo, palavra in _recusados():
+        with pytest.raises(EsquemaRecusado) as erro:
             async with dono.begin() as c:
-                await _revisar(c, terceiro_id, _declarada("consultar_saldo", pattern=regra))
+                await _revisar(c, terceiro_id, definicao("consultar_saldo", f"{MARCA}", esquema=esquema))
+        assert (erro.value.motivo, erro.value.palavra) == (motivo, palavra), esquema
         assert isinstance(erro.value, EsquemaInvalido)  # a tela do ADMIN mostra esta frase
         assert "fornecedor" in str(erro.value)
-    defs: dict[str, Any] = {f"d{i}": {"allOf": [{"$ref": f"#/$defs/d{i + 1}"}] * 2} for i in range(20)}
-    defs["d20"] = {"type": "string"}
-    dobrada = definicao(
-        "consultar_saldo",
-        esquema={"type": "object", "$defs": defs, "properties": {"x": {"$ref": "#/$defs/d0"}}},
-    )
-    with pytest.raises(EsquemaRecusado, match="partes"):
-        async with dono.begin() as c:
-            await _revisar(c, terceiro_id, dobrada)
     with pytest.raises(CampoDesconhecido):
         async with dono.begin() as c:
             await _revisar(c, terceiro_id, _declarada("consultar_saldo"), descricoes_campos={"outro": "x"})
@@ -331,6 +501,63 @@ async def test_revisao_de_terceiro_recusa_regra_perigosa_e_nada_muda(dono: Async
     assert [(i, s) for i, s in linhas] == [(antiga, "ativa")]
 
 
+# Regras que travavam a conferencia (contornos do verificador) e uma lista comparada item a item.
+_ATAQUES = ("^(\\d+)+$", "(?x)^( a + ) + $", "^(a?){28}a{28}$", "^a+a+a+$", "^(?:a?){10}a+a+$", "(?:(?=[a-z]*)[a-z])+X")
+
+
+def _declarada_cara(nome: str) -> dict[str, Any]:
+    declarada = _declarada(nome, pattern=_ATAQUES[0])
+    propriedades = declarada["inputSchema"]["properties"]
+    for i, regra in enumerate(_ATAQUES[1:]):
+        propriedades[f"t{i}"] = {"oneOf": [{"type": "string", "pattern": regra}, {"type": "integer"}]}
+    propriedades["lista"] = {"type": "array", "uniqueItems": True, "items": {"not": {"pattern": _ATAQUES[3]}}}
+    return declarada
+
+
+async def test_regra_cara_e_lista_unica_sao_gravadas_e_nao_valem_para_chamar(dono: AsyncEngine) -> None:
+    cena = await _cena(dono)
+    async with dono.begin() as c:
+        cara = await _revisar(c, cena.terceiro_id, _declarada_cara("consultar_saldo"))
+        await gravar_revisao_do_servidor(c, cena.terceiro_id, [cara, cena.b])
+        gravado = (
+            await c.execute(text("SELECT esquema_entrada FROM ferramentas_revisadas WHERE id = :i"), {"i": cara})
+        ).scalar_one()
+    assert gravado["properties"]["conta"]["pattern"] == _ATAQUES[0]  # gravado como revisado
+    # A vitrine mostra as regras ao aplicativo (o desenho: o modelo precisa delas para chamar).
+    (vista,) = [f for f in await _vitrine(dono, cena, terceiros=True) if f.id == cara]
+    tool = vista.como_tool()
+    assert tool["inputSchema"]["properties"]["conta"]["pattern"] == _ATAQUES[0]
+    assert tool["inputSchema"]["properties"]["lista"]["uniqueItems"] is True
+    # Para chamar, nenhuma regra nem uniqueItems: quem confere e o servidor do terceiro.
+    na_vitrine = await _na_vitrine(dono, cena, cara, terceiros=True)
+    da_ordem = await _da_ordem(dono, cena, cara, terceiros=True)
+    assert na_vitrine is not None
+    assert da_ordem is not None
+    for achada in (na_vitrine, da_ordem):
+        assert "pattern" not in json.dumps(achada.esquema_entrada)
+        assert "uniqueItems" not in json.dumps(achada.esquema_entrada)
+        assert achada.esquema_entrada["required"] == ["conta"]
+    ataque = "a" * 20_000 + "!"
+    pedido = {"conta": ataque, **{f"t{i}": ataque for i in range(len(_ATAQUES) - 1)}}
+    pedido["lista"] = [{"n": i} for i in range(4000)]
+    conferir_argumentos(na_vitrine.esquema_entrada, {"conta": "1"})  # o validador fica pronto
+    inicio = time.perf_counter()
+    conferir_argumentos(na_vitrine.esquema_entrada, pedido)
+    assert time.perf_counter() - inicio < 0.05
+
+
+async def test_proprio_confere_com_o_esquema_revisado_inteiro(dono: AsyncEngine) -> None:
+    # Sistema proprio, como nas Fases 1 e 2: para chamar, o mesmo esquema revisado, com pattern e uniqueItems.
+    cena = await _cena(dono)
+    declarada = _declarada_cara("pedidos")
+    async with dono.begin() as c:
+        proprio = await _revisar(c, cena.proprio_id, declarada)
+    achada = await _na_vitrine(dono, cena, proprio, terceiros=True)
+    assert achada is not None
+    assert achada.esquema_entrada == declarada["inputSchema"]
+    assert await _da_ordem(dono, cena, proprio) == achada
+
+
 async def test_revisao_de_terceiro_recusa_referencia_para_texto_do_fornecedor(dono: AsyncEngine) -> None:
     declarada = definicao(
         "com_ref",
@@ -338,7 +565,7 @@ async def test_revisao_de_terceiro_recusa_referencia_para_texto_do_fornecedor(do
     )
     async with dono.begin() as c:
         terceiro_id = await cadastrar_terceiro(c)
-    with pytest.raises(EsquemaInvalido, match="so tinha texto do fornecedor"):
+    with pytest.raises(EsquemaInvalido, match="nao aponta para uma definicao deste esquema"):
         async with dono.begin() as c:
             await _revisar(c, terceiro_id, declarada)
 
