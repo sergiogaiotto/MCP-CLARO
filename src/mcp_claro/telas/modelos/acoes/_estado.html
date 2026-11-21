@@ -18,7 +18,13 @@
   {% elif a.op.estado == "enviando" %}
   <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>
   {% elif a.op.estado == "nao_confirmada" %}
-  <p>O pedido saiu uma vez para o sistema {{ a.op.sistema_nome }}, mas a resposta não chegou inteira. Ele pode ter chegado ao sistema.</p>
+  {# A retomada deu a acao como nao confirmada antes de o envio terminar, e o fim que chegou depois diz que o
+     pedido nem saiu (``acoes.nao_chegou_depois_da_retomada``): a tela nao diz que ele saiu uma vez. #}
+  {% if a.nao_chegou %}
+  <p id="nao-chegou">A ação foi dada como não confirmada antes de o envio terminar. Pelo que o MCP-CLARO viu depois, o pedido não chegou ao sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>.</p>
+  {% else %}
+  <p>O pedido saiu uma vez para o sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>, mas a resposta não chegou inteira. Ele pode ter chegado ao sistema.</p>
+  {% endif %}
   <p><strong>Nada será reenviado.</strong> Confira no sistema se a ação aconteceu e conte para nós.</p>
   {% if a.op.decisao_pessoa %}
   <p>Você registrou: <strong>{{ a.decisao }}</strong>.</p>
@@ -43,13 +49,39 @@
   <p class="dica">A decisão fica registrada uma vez, no seu extrato.</p>
   {% endif %}
   {% endif %}
-  {% if a.textos %}
+  {# Resposta de estranhos (servidor de terceiros ou ferramenta marcada "traz texto de fora"): o texto nao aparece
+     aqui (critica A4). So se a pessoa pedir (?ver=resposta), e como foi ao aplicativo, escapado e sem link. #}
+  {% if a.de_estranhos and a.respondeu %}
+  <h3>O que o sistema respondeu</h3>
+  <p id="resposta-de-estranhos">{% if a.op.de_terceiro %}O servidor de terceiros respondeu. A resposta foi entregue ao aplicativo, marcada como texto de estranhos.{% else %}O sistema respondeu com texto que pode ter sido escrito por gente de fora. A resposta foi entregue ao aplicativo, marcada como texto de estranhos.{% endif %}</p>
+  <p class="dica">{% if a.op.de_terceiro %}Texto escrito por estranhos: o servidor de terceiros <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>. O MCP-CLARO não confere o que ele diz.{% else %}Texto escrito por estranhos: gente de fora, no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>. O MCP-CLARO não confere o que ele diz.{% endif %}</p>
+  {% if a.estranhos %}
+  <div class="atencao" role="alert" id="aviso-texto-de-estranhos">
+    <p><strong>Abaixo está o texto que o sistema escreveu, como foi ao aplicativo</strong> (CPF e e-mail aparecem mascarados). O MCP-CLARO não confere este texto. Ele pode pedir uma senha, um código ou que você abra um link: não faça nada disso por causa dele.</p>
+  </div>
+  <div class="estranho" id="texto-de-estranhos">
+    {% for t in a.estranhos %}<p><bdi>{% for linha in t.splitlines() %}{{ linha }}{% if not loop.last %}<br>{% endif %}{% endfor %}</bdi></p>{% endfor %}
+  </div>
+  <p><a href="/telas/acoes/{{ a.op.id }}">Esconder o texto</a></p>
+  {% elif a.pode_ver %}
+  <details>
+    <summary>Ver o texto mesmo assim</summary>
+    <p>O texto foi escrito pelo sistema, não pelo MCP-CLARO. Ele pode pedir uma senha, um código ou que você abra um link: não faça nada disso por causa dele.</p>
+    <p><a href="/telas/acoes/{{ a.op.id }}?ver=resposta" hx-boost="false">Mostrar o texto nesta página</a></p>
+  </details>
+  {% endif %}
+  {% elif a.textos %}
   <h3>O que o sistema respondeu</h3>
   <div class="estranho">
     {% for t in a.textos %}<p>{% for linha in t.splitlines() %}{{ linha | escondidos }}{% if not loop.last %}<br>{% endif %}{% endfor %}</p>{% endfor %}
   </div>
   <p class="dica">Texto escrito pelo sistema.</p>
-  {% elif a.op.desfecho and a.op.estado not in ("aguardando_ficha", "liberada", "enviando") %}
-  <p class="dica">Detalhe: {{ a.op.desfecho }}.</p>
+  {% endif %}
+  {% if a.detalhe and a.op.estado not in ("aguardando_ficha", "liberada", "enviando") %}
+  <p class="dica">Detalhe: {{ a.detalhe }}.</p>
+  {% if a.explicacao %}<p>{{ a.explicacao }}</p>{% endif %}
+  {% endif %}
+  {% if a.op.de_terceiro %}
+  <p class="dica" id="dica-terceiro">O MCP-CLARO não repassa a você pedidos de dados, links ou confirmações que um sistema faça no meio de uma chamada. Um texto de resposta ainda pode trazer um link: confirme ações só na tela do MCP-CLARO.</p>
   {% endif %}
 </section>

@@ -11,8 +11,9 @@ fora de qualquer conexao aberta; 401 no envio nao e reenviado.
 Fase 3 (servidores de terceiros):
 
 - toda conversa com um sistema sai por ``ligacao(sistema)`` (``ligacao.ponto.ligacao_para``): proprio pelo cliente
-  fixado; terceiro pela sala de visitas. Sem sala, nada vai ao terceiro (``sala_fora`` no extrato); o cliente local
-  para terceiro so entra por injecao, em desenvolvimento e teste;
+  fixado; terceiro pela sala de visitas. Sem sala, nenhum pedido MCP vai ao terceiro (``sala_fora`` no extrato);
+  so a troca e a renovacao da chave (OAuth) saem do despachante, para o endereco de troca de chave do terceiro,
+  conferido antes. O cliente local para terceiro so entra por injecao, em desenvolvimento e teste;
 - a vitrine de terceiro so vale com a chave da Fase 3 ligada ou para pessoa de teste (``terceiros_ligados``);
 - pedido do sistema no meio da leitura (formulario, link, IA, pastas, nova volta, fio antigo) nunca passa: a
   leitura devolve um erro nosso e descarta o que o sistema mandou depois (D12);
@@ -45,6 +46,7 @@ from mcp_claro.cadastro import quarentena as cadastro_quarentena
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.impressao import impressao, impressao_servidor
 from mcp_claro.cadastro.modelos import FerramentaVitrine, Sistema
+from mcp_claro.cadastro.quarentena import MOTIVO_QUARENTENA_VERSAO
 from mcp_claro.cofre import ErroCofre
 from mcp_claro.despachante import chaves, medida, renovacao
 from mcp_claro.despachante.chaves import Cifra
@@ -80,12 +82,6 @@ META_PEDIDOS: Final = PREFIXO_META + "pedidos"
 TETO_NIVEIS_RESPOSTA: Final = 199
 """Niveis de listas e objetos, um dentro do outro, que um resultado pode ter ao voltar a entrada. E o que o leitor
 de JSON do kit aceita numa mensagem (200 niveis, contando o envelope): mais fundo, nem o aplicativo leria."""
-
-MOTIVO_QUARENTENA_VERSAO: Final = (
-    "mudou, parou: o servidor de terceiros deixou de falar a versao 2026-07-28 na sondagem; precisa de nova sondagem"
-    " e de nova revisao do ADMIN"
-)
-"""``sistemas.motivo`` do terceiro ativo e revisado que a sondagem recusou por versao (D29)."""
 
 MENSAGEM_CHAVE_INDISPONIVEL: Final = (
     "Nao deu para abrir a chave deste sistema no cofre agora. Nada foi enviado. Tente de novo em instantes."
@@ -732,7 +728,13 @@ class Despachante:
         if sala is not None:
             CONTADORES.somar(sala, onde="sondagem")
         if quarentena is not None:
+            # Como o mudou-parou (rotinas/mudou_parou.py): as acoes que a quarentena cancelou entram no painel "Acoes
+            # paradas antes de sair, por motivo", com o rotulo da porta de saida para a mesma causa.
             CONTADORES.somar("quarentenas_pela_sondagem")
+            if quarentena.paradas:
+                CONTADORES.somar(
+                    "acoes_paradas", valor=len(quarentena.paradas), motivo=cadastro_quarentena.MOTIVO_PARADA
+                )
         return sondagem
 
     async def _chave_das_declaracoes(self, sistema: Sistema) -> str | None:

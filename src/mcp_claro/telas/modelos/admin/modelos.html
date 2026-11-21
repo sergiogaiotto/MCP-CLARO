@@ -10,7 +10,7 @@
   <p>{{ m.descricao }}</p>
   <p class="dica">Prazo de até {{ m.validade_dias }} dias.</p>
   <ul class="ferramentas">
-    {% for f in m.ferramentas %}<li><code>{{ (f.nome_vitrine or f.nome_original) | escondidos }}</code> (sistema {{ f.sistema }}){% if f.classe %}: {{ f.classe | classe }}{% endif %}</li>{% endfor %}
+    {% for f in m.ferramentas %}<li><code{% if not f.nome_vitrine %} class="estranho"{% endif %}>{{ (f.nome_vitrine or f.nome_original) | escondidos }}</code> (sistema {{ f.sistema }}){% if f.origem != "proprio" %} (de terceiros){% endif %}{% if f.classe %}: {{ f.classe | classe }}{% endif %}</li>{% endfor %}
   </ul>
 </section>
 {% else %}
@@ -32,9 +32,10 @@
   <fieldset>
     <legend>Ferramentas</legend>
     {% if so_leitura %}<p class="dica">Nesta fase, só ferramentas que só leem.</p>{% endif %}
+    {% if ha_terceiros and not terceiros_ligados %}<p class="dica">Enquanto a Fase 3 estiver desligada, só pessoas de teste usam ferramentas de terceiros.</p>{% endif %}
     {% for f in ferramentas %}
-    <label class="opcao"><input type="checkbox" name="ferramentas" value="{{ f.id }}" {% if f.id|string in valores.get("ferramentas", []) %}checked{% endif %} {% if so_leitura and f.classe != "le" %}disabled{% endif %}>
-      <span><code>{{ f.nome_vitrine }}</code> (sistema {{ f.sistema }}): {{ f.descricao }} <span class="dica">{{ f.classe | classe }}</span></span></label>
+    <label class="opcao"><input type="checkbox" name="ferramentas" value="{{ f.id }}" {% if f.id|string in valores.get("ferramentas", []) %}checked{% endif %} {% if (so_leitura and f.classe != "le") or not f.publicada %}disabled{% endif %}>
+      <span><code>{{ f.nome_vitrine }}</code> (sistema {{ f.sistema }}){% if f.origem != "proprio" %} (de terceiros){% endif %}: {{ f.descricao }} <span class="dica">{{ f.classe | classe }}</span>{% if not f.publicada %} <span class="dica">{{ fora_da_revisao }}</span>{% endif %}</span></label>
     {% endfor %}
   </fieldset>
   <button type="submit">Criar o modelo</button>

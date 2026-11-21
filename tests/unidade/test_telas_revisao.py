@@ -300,7 +300,7 @@ def test_tres_partes_como_na_proposta() -> None:
     assert partes.paradas == [("CLR-2026-00000001", "esperava a sua ficha")]
     assert partes.ja_saidas == [("CLR-2026-00000002", "entregue ao sistema", "19/11/2026 12:00")]
     assert partes.em_conferencia == [
-        ("CLR-2026-00000003", "saiu, mas a resposta do sistema não chegou inteira", "19/11/2026 12:00")
+        ("CLR-2026-00000003", "pode ter saído, mas a resposta do sistema não chegou inteira", "19/11/2026 12:00")
     ]
     ambiente = criar_ambiente("America/Sao_Paulo")
     p = SimpleNamespace(

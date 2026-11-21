@@ -1,13 +1,30 @@
-"""Modelos Jinja2 das telas, sempre com escape automatico, e os textos de aviso."""
+"""Modelos Jinja2 das telas, sempre com escape automatico, e os textos de aviso.
+
+Fase 3 (servidores de terceiros), textos das telas do ADMIN, com acento: de quem e o servidor (``ORIGENS``), o
+desfecho da sondagem de versao (``frase_da_sondagem``), os pedidos que um sistema fez e o MCP-CLARO recusou
+(``PEDIDOS_LEGIVEIS``, com todas as categorias de ``ligacao.cliente``, inclusive as do fio antigo), os motivos da
+recusa da revisao do servidor (``MOTIVOS_REVISAO_SERVIDOR`` e ``PROBLEMAS_REVISAO``) e a recusa de um esquema de
+terceiro (``frase_do_esquema_recusado``). Nada daqui leva texto do servidor: so o nosso vocabulario e os nomes do
+cadastro. Onde uma frase precisa citar um nome de campo ou o caminho de uma recusa, que vem do fornecedor, a versao
+para a tela (``frase_do_esquema_recusado_na_tela`` e ``campo_do_fornecedor``) poe o nome dentro de
+``<code class="estranho">``, escapado e com os escondidos marcados.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from markupsafe import Markup, escape
+
+from mcp_claro.cadastro import esquema
+from mcp_claro.ligacao import cliente, sala_contrato
+from mcp_claro.regras.escondidos import marcar_escondidos
+from mcp_claro.versao import VERSAO_MCP
 
 PASTA_MODELOS: Final = Path(__file__).resolve().parent / "modelos"
 PASTA_ESTATICOS: Final = Path(__file__).resolve().parent / "estaticos"
@@ -27,6 +44,10 @@ AVISOS: Final[dict[str, str]] = {
     ),
     "declaracoes_lidas": "Pronto. Lemos as ferramentas que o sistema declara hoje.",
     "ferramenta_revisada": "Pronto. A revisão foi gravada. A ferramenta já pode entrar em modelos de ordem.",
+    "ferramenta_revisada_terceiro": (
+        "Pronto. A revisão foi gravada. Num servidor de terceiros, a ferramenta só aparece nas vitrines e nos"
+        " modelos de ordem depois que você concluir a revisão do servidor."
+    ),
     "modelo_criado": "Pronto. O modelo de ordem de serviço foi criado.",
     "programa_cadastrado": "Pronto. O programa foi cadastrado, com responsável e substituto.",
     "destino_cadastrado": "Pronto. O destino de webhook foi cadastrado.",
@@ -70,6 +91,20 @@ AVISOS: Final[dict[str, str]] = {
     "limite_criado": "Pronto. O limite foi criado e vale a partir de agora.",
     "limite_ampliado": "Pronto. O limite foi ampliado.",
     "limite_encerrado": "Pronto. O limite foi encerrado. A partir de agora, essa ação volta a pedir ficha.",
+    # Fase 3: servidores de terceiros (ADMIN).
+    "servidor_revisado": (
+        "Pronto. A revisão do servidor foi registrada. As ferramentas marcadas aparecem nas vitrines, dentro das"
+        " ordens de serviço."
+    ),
+    "servidor_revisao_recusada": "A revisão do servidor não foi concluída. Veja abaixo o que mudou e revise de novo.",
+    "despachante_mudo_revisao": "O despachante não respondeu. Nada mudou. Tente de novo daqui a pouco.",
+    "despachante_demorou_revisao": (
+        "O despachante não respondeu a tempo. A revisão do servidor pode ter sido registrada ou não: confira o"
+        " cartão “Revisão do servidor” abaixo antes de tentar de novo."
+    ),
+    "despachante_demorou_sondagem": (
+        "O despachante não respondeu a tempo. Confira a situação abaixo e peça a conferência de novo daqui a pouco."
+    ),
 }
 
 SITUACOES: Final[dict[str, str]] = {
@@ -101,6 +136,294 @@ TIPOS_CHAVE: Final[dict[str, str]] = {
     "compartilhada": "Uma chave para todos",
     "programa": "Chave do programa",
 }
+
+# --- Fase 3: servidores de terceiros (telas do ADMIN) ---
+
+ORIGENS: Final[dict[str, str]] = {
+    "proprio": "Da organização (sistema próprio)",
+    "terceiro": "De terceiros (de um fornecedor de fora)",
+}
+"""As escolhas de "De quem é este servidor?" no cadastro."""
+
+ORIGENS_CURTAS: Final[dict[str, str]] = {"proprio": "Da organização", "terceiro": "De terceiros"}
+"""A coluna "De quem" da lista de sistemas."""
+
+TIPOS_CHAVE_TERCEIRO: Final = ("por_pessoa", "compartilhada")
+"""Tipos de chave que um servidor de terceiros aceita (D2; o banco tambem recusa os outros)."""
+
+DESFECHOS_SONDAGEM: Final[dict[str, str]] = {
+    "aceito": f"Aceito. Este servidor fala a versão {VERSAO_MCP} do MCP.",
+    "versao": (
+        f"Este servidor de terceiros foi recusado. Ele não fala a versão {VERSAO_MCP} do MCP, a única que o"
+        " MCP-CLARO aceita. Ele anunciou: {versoes}. Peça ao fornecedor para atualizar o servidor e peça a"
+        " conferência de novo. A recusa entrou na contagem de versões."
+    ),
+    "desvio": (
+        "O servidor pediu para irmos a outro endereço. O MCP-CLARO só chama o endereço combinado e não segue"
+        " desvios. Confira o endereço certo com o fornecedor."
+    ),
+    "nao_mcp": "Este endereço não respondeu como um servidor MCP. Confira o endereço.",
+    "sem_acesso": "O servidor pediu uma chave. Informe a chave de teste e confira de novo.",
+    "inalcancavel": (
+        "Ainda não conseguimos falar com o servidor. Confira o endereço e peça a conferência de novo daqui a pouco."
+    ),
+}
+"""O que a ficha do sistema diz sobre a ultima sondagem, por ``sistemas.sondagem_desfecho`` (``Sondagem.desfecho``).
+No lugar do motivo tecnico cru, que deixa de aparecer. ``versao`` leva ``{versoes}``."""
+
+VERSAO_PROPRIO: Final = (
+    "Ele anunciou: {versoes}. Peça à equipe do sistema para atualizar o kit MCP. Depois, peça a conferência de novo."
+)
+"""O desfecho ``versao`` num sistema proprio (a ficha mostra antes "Este sistema foi recusado." e que ele so fala a
+geracao antiga do MCP)."""
+
+INALCANCAVEL_POR_MOTIVO: Final[dict[str, str]] = {
+    cliente.MOTIVO_ENDERECO_RECUSADO: (
+        "Nada foi enviado: o endereço deste servidor de terceiros não serve. Ou ele não é público (o MCP-CLARO só"
+        " chama servidores de terceiros em endereços da internet), ou não usa https, ou o nome do servidor é"
+        " inválido. Confira o endereço com o fornecedor."
+    ),
+    sala_contrato.MOTIVO_SALA_FORA: (
+        "A sala de visitas, por onde o MCP-CLARO fala com servidores de terceiros, não está disponível agora. Nada"
+        " foi enviado ao servidor. Peça a conferência de novo daqui a pouco."
+    ),
+}
+"""``inalcancavel`` quando a falha e nossa ou do endereco, nao do servidor: frase propria."""
+
+VERSOES_NENHUMA: Final = "nenhuma versão no formato do MCP de agora (é da geração antiga)"
+VERSAO_FORA_DO_FORMATO: Final = "uma versão escrita fora do formato AAAA-MM-DD"
+
+
+def versoes_legiveis(versoes: Iterable[str] | None) -> str:
+    """As versoes que o servidor anunciou, ja conferidas pelo despachante (AAAA-MM-DD ou ``outra``)."""
+    nomes: list[str] = []
+    for versao in versoes or ():
+        nome = VERSAO_FORA_DO_FORMATO if versao == cliente.OUTRA else str(versao)
+        if nome not in nomes:
+            nomes.append(nome)
+    return ", ".join(nomes) if nomes else VERSOES_NENHUMA
+
+
+def frase_da_sondagem(
+    desfecho: str | None, motivo: str | None, *, origem: str, versoes: Sequence[str] | None = None
+) -> str | None:
+    """A frase da ficha do sistema para o desfecho da ultima sondagem. None: sem sondagem com desfecho (linhas de
+    antes da Fase 3), e a ficha mostra o texto de antes."""
+    if desfecho is None:
+        return None
+    if desfecho == "versao":
+        modelo = DESFECHOS_SONDAGEM["versao"] if origem != "proprio" else VERSAO_PROPRIO
+        return modelo.format(versoes=versoes_legiveis(versoes))
+    if desfecho == "inalcancavel" and motivo in INALCANCAVEL_POR_MOTIVO:
+        return INALCANCAVEL_POR_MOTIVO[str(motivo)]
+    return DESFECHOS_SONDAGEM.get(desfecho, DESFECHOS_SONDAGEM["inalcancavel"])
+
+
+# Os pedidos que um sistema fez no meio de uma chamada e o MCP-CLARO recusou (``Resposta.pedidos``), em palavras
+# para quem nao e da area. O fio antigo e o jeito de antes da 2026-07-28: o servidor pedia pela resposta aberta.
+_FIO_ANTIGO: Final = "pelo jeito antigo do MCP, fora do padrão 2026-07-28"
+PEDIDOS_LEGIVEIS: Final[dict[str, str]] = {
+    cliente.PEDIDO_FORMULARIO: "dados por formulário",
+    cliente.PEDIDO_LINK: "que a pessoa abrisse um link",
+    cliente.PEDIDO_AMOSTRAGEM: "uma resposta da IA do aplicativo",
+    cliente.PEDIDO_RAIZES: "a lista de pastas do aplicativo",
+    cliente.PEDIDO_SO_ESTADO: "uma nova volta",
+    cliente.PEDIDO_LINK_CODIGO_ANTIGO: "que a pessoa abrisse um link (pelo código de erro antigo)",
+    cliente.PREFIXO_FIO_ANTIGO + "elicitation/create": f"dados ou um link, {_FIO_ANTIGO}",
+    cliente.PREFIXO_FIO_ANTIGO + "sampling/createMessage": f"uma resposta da IA do aplicativo, {_FIO_ANTIGO}",
+    cliente.PREFIXO_FIO_ANTIGO + "roots/list": f"a lista de pastas do aplicativo, {_FIO_ANTIGO}",
+    cliente.PREFIXO_FIO_ANTIGO + "ping": f"um sinal de que o aplicativo está ligado, {_FIO_ANTIGO}",
+    cliente.PREFIXO_FIO_ANTIGO + cliente.DESCONHECIDO: f"algo fora do padrão, {_FIO_ANTIGO}",
+}
+"""Cada categoria do vocabulario de ``ligacao.cliente``. Fora daqui: ``FORA_DO_PADRAO``, nunca o texto que veio."""
+FORA_DO_PADRAO: Final = "algo fora do padrão 2026-07-28"
+
+
+ONDE_O_PEDIDO: Final[dict[str, str]] = {
+    "leitura_sistema_pediu_dados": "Numa leitura",
+    "programa_leitura_sistema_pediu_dados": "Numa leitura de um programa",
+    "acao_sistema_pediu_dados": "Numa ação, que parou",
+    "acao_enviada": "Numa ação, que saiu",
+}
+"""Em que chamada o sistema fez o pedido, pela linha do extrato ("Pedidos recusados deste sistema")."""
+
+
+def pedido_legivel(categoria: Any) -> str:
+    return PEDIDOS_LEGIVEIS.get(str(categoria), FORA_DO_PADRAO)
+
+
+def pedidos_legiveis(categorias: Iterable[Any] | None) -> str:
+    """As categorias em palavras, sem repeticao, com "e" antes da ultima. Lista vazia: ``FORA_DO_PADRAO``."""
+    nomes: list[str] = []
+    for categoria in categorias or ():
+        nome = pedido_legivel(categoria)
+        if nome not in nomes:
+            nomes.append(nome)
+    if not nomes:
+        return FORA_DO_PADRAO
+    return nomes[0] if len(nomes) == 1 else ", ".join(nomes[:-1]) + " e " + nomes[-1]
+
+
+MOTIVOS_REVISAO_SERVIDOR: Final[dict[str, str]] = {
+    "nao_e_terceiro": "Só servidor de terceiros tem revisão do servidor.",
+    "fornecedor": "Escreva quem fornece este servidor, de 3 a 200 letras.",
+    "publicadas_demais": "Marque até 500 ferramentas para a vitrine.",
+    "situacao": "O servidor precisa estar ativo ou em quarentena para concluir a revisão.",
+    "versao": (
+        f"O servidor precisa passar na conferência da versão {VERSAO_MCP} antes de concluir a revisão. Toque em"
+        " “Conferir a versão de novo”."
+    ),
+    "chave_indisponivel": (
+        "Não deu para abrir no cofre a chave de leitura das declarações. Nada mudou. Tente de novo daqui a pouco."
+    ),
+    "sem_chave_declaracoes": (
+        "Guarde a chave de leitura das declarações deste servidor antes de concluir a revisão. Ela fica em"
+        " “Autorização e chaves deste sistema”. É a chave que o MCP-CLARO usa para conferir, de tempos em tempos,"
+        " se o servidor mudou."
+    ),
+    "sem_resposta": (
+        "O servidor não entregou a lista de ferramentas agora, ou a sala de visitas, por onde o MCP-CLARO fala com"
+        " ele, não estava disponível. Nada mudou. Tente de novo daqui a pouco."
+    ),
+    "situacao_mudou": (
+        "O servidor mudou de situação enquanto a revisão era concluída. Nada mudou. Leia as ferramentas de novo e"
+        " conclua outra vez."
+    ),
+    "ferramentas": "Algumas ferramentas marcadas não estão em dia. Nada foi publicado. Veja a lista abaixo.",
+    "pedido_invalido": (
+        "O pedido de conclusão trouxe algo que o MCP-CLARO não guarda. Nada mudou. Confira o nome do fornecedor e"
+        " as ferramentas marcadas."
+    ),
+}
+"""A frase da tela para cada ``motivo`` da recusa de ``/interno/revisao_servidor`` (a ``mensagem`` vem sem acento)."""
+MOTIVO_REVISAO_DESCONHECIDO: Final = "A revisão do servidor não foi concluída. Nada mudou."
+
+PROBLEMAS_REVISAO: Final[dict[str, str]] = {
+    "mudou": "mudou desde a sua revisão: revise de novo",
+    "sem_revisao": "ainda não tem revisão sua",
+    "sumiu": "o servidor não declara mais esta ferramenta",
+    "rever": "foi revisada antes da Fase 3: revise de novo para guardar o texto que o servidor declara",
+}
+"""Cada ``problema`` da lista ``ferramentas`` da recusa."""
+PROBLEMA_DESCONHECIDO: Final = "não está em dia"
+
+
+def frase_da_revisao_recusada(motivo: Any) -> str:
+    return MOTIVOS_REVISAO_SERVIDOR.get(str(motivo), MOTIVO_REVISAO_DESCONHECIDO)
+
+
+# Recusa do esquema de entrada de um terceiro (``esquema.EsquemaRecusado``), por ``motivo``, ``onde`` e ``palavra``.
+_PALAVRAS_RECUSADAS: Final[dict[str, str]] = {
+    "patternProperties": "regra de formato nos nomes de campo (patternProperties)",
+    "$id": "identificador de parte ($id)",
+    "$anchor": "âncora ($anchor)",
+    "$dynamicAnchor": "âncora dinâmica ($dynamicAnchor)",
+    "$dynamicRef": "referência dinâmica ($dynamicRef)",
+    "unevaluatedProperties": "regra dos campos não conferidos (unevaluatedProperties)",
+    "unevaluatedItems": "regra dos itens não conferidos (unevaluatedItems)",
+}
+ESQUEMA_FUNDO_DEMAIS: Final = (
+    "O esquema de entrada desta ferramenta tem partes demais umas dentro das outras para o MCP-CLARO conferir."
+    " Peça ao fornecedor um esquema mais simples."
+)
+"""``EsquemaInvalido`` com ``entrada.argumentos.ESQUEMA_FUNDO_DEMAIS`` (proprio e terceiro)."""
+
+
+def _numero(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def frase_do_esquema_recusado(motivo: str, onde: str, palavra: str | None) -> str:
+    """A frase com acento para o ADMIN. ``onde`` ja vem com os escondidos marcados (``(raiz)`` na raiz)."""
+    lugar = "na raiz do esquema" if onde == "(raiz)" else f"em {onde}"
+    if motivo == "palavra" and palavra == "$schema":
+        return (
+            f"O esquema deste servidor troca a versão do JSON Schema ($schema) {lugar}. Num servidor de terceiros, o"
+            " MCP-CLARO só aceita $schema na raiz do esquema. Peça ao fornecedor um esquema sem essa troca."
+        )
+    if motivo == "palavra":
+        nome = _PALAVRAS_RECUSADAS.get(palavra or "", marcar_escondidos(str(palavra or "uma palavra recusada")))
+        return (
+            f"O esquema deste servidor usa {nome} {lugar}. Num servidor de terceiros, o MCP-CLARO não aceita isso."
+            " Peça ao fornecedor um esquema sem essa palavra."
+        )
+    if motivo == "referencia" and palavra == "$ref":
+        return (
+            f"A referência ($ref) {lugar} tem mais de {esquema.REFERENCIA_MAXIMA} letras. Num servidor de terceiros,"
+            f" o MCP-CLARO só aceita referência de até {esquema.REFERENCIA_MAXIMA} letras, porque lê o texto inteiro"
+            " dela a cada chamada. Peça ao fornecedor um esquema com nomes mais curtos."
+        )
+    if motivo == "referencia" and palavra in ("$defs", "definitions"):
+        return (
+            f"O nome de uma definição ({palavra}) {lugar} tem mais de {esquema.REFERENCIA_MAXIMA} letras. Num"
+            f" servidor de terceiros, o MCP-CLARO só aceita nome de definição de até {esquema.REFERENCIA_MAXIMA}"
+            " letras. Peça ao fornecedor um esquema com nomes mais curtos."
+        )
+    if motivo == "referencia":
+        return (
+            f"A referência ($ref) {lugar} não aponta para uma definição deste esquema. Num servidor de terceiros, o"
+            " MCP-CLARO só aceita referência da forma #/$defs/<nome> ou #/definitions/<nome>, para uma definição"
+            " que existe. Peça ao fornecedor um esquema mais simples."
+        )
+    if motivo == "ciclo":
+        return (
+            f"A referência {lugar} volta a uma parte que a contém (esquema em ciclo). Num servidor de terceiros, o"
+            " MCP-CLARO não aceita esquema em ciclo, nem em definições que nenhuma parte usa. Peça ao fornecedor um"
+            " esquema mais simples."
+        )
+    if motivo == "grande":
+        return (
+            f"O esquema tem mais de {_numero(esquema.CUSTO_MAXIMO)} partes, contando todas as definições e seguindo"
+            f" as referências (passou {lugar}). Isso pode travar o MCP-CLARO a cada chamada. Peça ao fornecedor um"
+            " esquema mais simples."
+        )
+    if motivo == "fundo" and onde == "(raiz)":
+        return (
+            "O esquema tem partes demais umas dentro das outras para o MCP-CLARO conferir. Peça ao fornecedor um"
+            " esquema mais simples."
+        )
+    if motivo == "fundo":
+        return (
+            f"O esquema tem mais de {esquema.PROFUNDIDADE_MAXIMA} níveis, contando as definições e seguindo as"
+            f" referências, também a partir de cada definição (passou {lugar}). Peça ao fornecedor um esquema mais"
+            " simples."
+        )
+    if motivo == "pesado":
+        return (
+            f"O esquema tem mais de {esquema.BYTES_MAXIMOS // 1024} KiB ({_numero(esquema.BYTES_MAXIMOS)} bytes),"
+            " contando o esquema como fica gravado: sem os textos do fornecedor e com as descrições do ADMIN. Isso"
+            " pode travar o MCP-CLARO a cada chamada. Peça ao fornecedor um esquema menor."
+        )
+    if motivo == "escolhas":
+        return (
+            f"A lista de escolhas (enum) {lugar} tem mais de {_numero(esquema.ESCOLHAS_MAXIMAS)} valores. Isso pode"
+            " travar o MCP-CLARO a cada chamada. Peça ao fornecedor um esquema com menos escolhas."
+        )
+    return (
+        "O esquema deste servidor não é aceito num servidor de terceiros. Peça ao fornecedor um esquema mais simples."
+    )
+
+
+_LUGAR: Final = "\x00"
+"""Marca o lugar do caminho na frase, para ``frase_do_esquema_recusado_na_tela`` (o nulo nunca vem num texto nosso)."""
+
+
+def frase_do_esquema_recusado_na_tela(motivo: str, onde: str, palavra: str | None) -> Markup:
+    """A mesma frase, pronta para a tela: o caminho (``onde``) leva nomes de campo escritos pelo fornecedor, e vai
+    dentro de ``<code class="estranho">``, com os escondidos marcados. O resto do texto e escapado."""
+    if onde == "(raiz)":
+        return escape(frase_do_esquema_recusado(motivo, onde, palavra))
+    antes, achou, depois = frase_do_esquema_recusado(motivo, _LUGAR, palavra).partition(_LUGAR)
+    if not achou:
+        return escape(antes)
+    caminho = Markup('<code class="estranho">{}</code>').format(marcar_escondidos(onde))
+    return escape(antes) + caminho + escape(depois)
+
+
+def campo_do_fornecedor(campo: str) -> Markup:
+    """Um nome de campo escrito pelo fornecedor numa frase da tela: escapado, com os escondidos marcados e dentro de
+    ``<code class="estranho">``."""
+    return Markup('<code class="estranho">{}</code>').format(marcar_escondidos(campo))
 
 
 def criar_ambiente(fuso: str) -> Environment:
@@ -134,10 +457,11 @@ def criar_ambiente(fuso: str) -> Environment:
     ambiente.filters["situacao"] = lambda v: SITUACOES.get(str(v), str(v))
     ambiente.filters["classe"] = lambda v: CLASSES.get(str(v), str(v))
     ambiente.filters["tipo_chave"] = lambda v: TIPOS_CHAVE.get(str(v), str(v))
+    ambiente.filters["origem"] = lambda v: ORIGENS_CURTAS.get(str(v), ORIGENS_CURTAS["terceiro"])
+    ambiente.filters["pedido"] = pedido_legivel
+    ambiente.filters["pedidos"] = pedidos_legiveis
+    ambiente.filters["onde_pedido"] = lambda v: ONDE_O_PEDIDO.get(str(v), "Numa chamada")
     # Nome de campo e texto vindo do sistema (ou do aplicativo), no texto visivel: os caracteres escondidos viram
-    # uma marca como [U+200B], como na ficha. O ``value=`` dos formularios fica cru. Importado aqui, e nao no topo:
-    # telas/acoes.py importa este modulo.
-    from mcp_claro.telas import acoes
-
-    ambiente.filters["escondidos"] = lambda v: acoes.marcar_escondidos(str(v))
+    # uma marca como [U+200B], como na ficha. O ``value=`` dos formularios fica cru.
+    ambiente.filters["escondidos"] = lambda v: marcar_escondidos(str(v))
     return ambiente

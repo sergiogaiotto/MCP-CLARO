@@ -21,7 +21,8 @@ Numa transacao so, a de quem chama:
 5. grava ``sistema_em_quarentena`` (ou ``sistema_em_quarentena_sem_resposta``) no extrato, com as ferramentas que
    mudaram, os protocolos parados e quantos limites foram suspensos.
 
-So uma nova conclusao da revisao do servidor, pelo ADMIN, tira da quarentena (regra tambem no banco).
+So uma nova conclusao da revisao do servidor, pelo ADMIN, o poe de volta em servico (no banco, alem dela, so a
+desativacao tira da quarentena).
 """
 
 from __future__ import annotations

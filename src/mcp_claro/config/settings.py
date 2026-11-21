@@ -515,8 +515,8 @@ class Parametros(BaseSettings):
         if self.em_producao and not (sala or "").startswith("https://"):
             erros.append(
                 "Fora de desenvolvimento e teste, VISITS_INTERNAL_URL e obrigatorio e usa https (mTLS com a sala de"
-                " visitas), mesmo com FEATURE_PHASE3_THIRD_PARTY desligada: sem a sala, nada vai a servidor de"
-                " terceiros, e o despachante nunca fala direto com eles (A2)."
+                " visitas), mesmo com FEATURE_PHASE3_THIRD_PARTY desligada: sem a sala, nenhum pedido MCP vai a"
+                " servidor de terceiros; so a troca e a renovacao da chave (OAuth) saem do despachante (A2)."
             )
         if sala is not None:
             try:

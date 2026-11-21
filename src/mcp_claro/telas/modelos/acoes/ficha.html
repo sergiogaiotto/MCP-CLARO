@@ -5,13 +5,31 @@
 
 <section class="cartao">
   <h2>O que vai acontecer</h2>
-  <p>O aplicativo <strong>{{ d.aplicativo }}</strong> pede para usar a ferramenta <strong>{{ a.op.nome_vitrine }}</strong> no sistema <strong>{{ a.op.sistema_nome }}</strong>, em seu nome.</p>
+  <p>O aplicativo <strong><bdi>{{ d.aplicativo | escondidos }}</bdi></strong> pede para usar a ferramenta <strong>{{ a.op.nome_vitrine }}</strong> no sistema <strong><bdi>{{ a.op.sistema_nome | escondidos }}</bdi></strong>, em seu nome.</p>
   {% if d.descricao %}<p>O que essa ferramenta faz, segundo a revisão do ADMIN: {{ d.descricao }}</p>{% endif %}
   <p>{{ d.classe | classe }}. {{ risco }}.</p>
   <p><strong>Com estes dados:</strong></p>
   {% include "acoes/_argumentos.html" %}
   <p>É isto, e só isto, que vai para o sistema se você confirmar.</p>
+  {% if a.op.de_terceiro %}
+  <p class="atencao" id="aviso-terceiro">Este servidor é de terceiros. O MCP-CLARO não controla o que ele faz do lado de lá.</p>
+  {% endif %}
 </section>
+{% if a.alerta %}
+{# O retrato do alerta, gravado quando a ficha nasceu: so nomes do cadastro e horas, nunca dado do pedido. #}
+<section class="cartao atencao" aria-labelledby="alerta-tres-sinais" id="cartao-tres-sinais">
+  <h2 id="alerta-tres-sinais">Alerta dos três sinais</h2>
+  <p><strong>Seus limites com este aplicativo não valem agora.</strong></p>
+  <p>{{ a.alerta.janela }}, o aplicativo <bdi>{{ d.aplicativo | escondidos }}</bdi>:</p>
+  <ul>
+    <li>leu texto escrito por quem está fora: <bdi>{{ a.alerta.de_fora.ferramenta | escondidos }}</bdi>, no sistema <bdi>{{ a.alerta.de_fora.sistema | escondidos }}</bdi>, às {{ a.alerta.de_fora.hora }};</li>
+    <li>viu dados pessoais seus: <bdi>{{ a.alerta.privado.ferramenta | escondidos }}</bdi>, no sistema <bdi>{{ a.alerta.privado.sistema | escondidos }}</bdi>, às {{ a.alerta.privado.hora }};</li>
+    <li>e agora quer enviar algo.</li>
+  </ul>
+  <p>Texto de fora pode trazer ordens escondidas para a IA. Confira se foi você quem pediu esta ação e se os dados acima podem seguir.</p>
+  <p class="dica">Horas no horário de Brasília.</p>
+</section>
+{% endif %}
 
 <p class="atencao" id="codigo-de-conferencia">Código de conferência: <strong>{{ a.op.codigo_conferencia }}</strong><br>
   Confira: tem de ser igual ao que o aplicativo mostrou. Se for diferente, recuse.</p>

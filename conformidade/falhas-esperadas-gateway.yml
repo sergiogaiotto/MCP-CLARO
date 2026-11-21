@@ -56,10 +56,15 @@ server:
   - tools-call-mixed-content:tools-call-mixed-content
 
   # --- Sem pedidos do sistema ao aplicativo (SEP-2322, InputRequiredResult). O gateway nao repassa pedido
-  # de dados do sistema a pessoa ou ao modelo (elicitacao, amostragem, raizes), nao responde sozinho e nao
-  # faz segunda volta. Como cliente, ele nao declara essas capacidades ao sistema, que responde -32021. O
-  # gateway devolve ao aplicativo -32021 se o aplicativo tambem nao declarou a capacidade (server-stateless
-  # passa por isso) ou, se declarou, um resultado de erro dizendo que o MCP-CLARO nao repassa esses pedidos.
+  # de dados do sistema a pessoa ou ao modelo (elicitacao, amostragem, raizes) e nao faz segunda volta.
+  # Como cliente, ele nao declara essas capacidades ao sistema, que responde -32021. Sem callbacks, o kit
+  # ainda montaria sozinho uma resposta de erro a um pedido feito pelo fio antigo (SSE) e a mandaria num
+  # segundo POST, com a chave: a barreira de pedidos do cliente fixado (ligacao/cliente.py) nao deixa sair
+  # nenhum POST que nao seja o pedido da chamada, para todos os sistemas, e o pedido barrado vira so uma
+  # categoria do nosso vocabulario no extrato. O gateway devolve ao aplicativo -32021 se o aplicativo
+  # tambem nao declarou a capacidade (server-stateless passa por isso; so sistema proprio) ou, se declarou,
+  # um resultado de erro dizendo que o MCP-CLARO nao repassa esses pedidos. Num servidor de terceiros, vai
+  # sempre esse resultado de erro, nunca o -32021 (D13); o fixture desta suite e um sistema proprio.
   # Os cenarios abaixo esperam um InputRequiredResult, que o gateway nunca emite; inputResponses e
   # requestState nao seguem ao sistema.
   - input-required-result-basic-elicitation:sep-2322-elicitation-incomplete

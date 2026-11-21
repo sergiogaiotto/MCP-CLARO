@@ -17,7 +17,8 @@ Para cada acao liberada e na hora:
    liberada (nenhuma chave abriria);
 4. marca "enviando" e grava, antes de qualquer byte sair (o que o envio le do banco e lido antes);
 5. abre a chave (renovada antes, se for por pessoa) e faz exatamente uma chamada ao sistema, sempre por
-   ``ligacao(sistema)``: proprio pelo cliente fixado, terceiro pela sala de visitas (sem sala, nada sai). Argumentos
+   ``ligacao(sistema)``: proprio pelo cliente fixado, terceiro pela sala de visitas (sem sala, o pedido MCP nao
+   sai; a renovacao da chave, antes, vai ao endereco de troca de chave do terceiro, conferido antes). Argumentos
    com niveis demais para o kit escrever (``TETO_NIVEIS_PEDIDO``) nao saem por nenhum caminho: "nao saiu", sem
    abrir a chave nem chamar a ligacao;
 6. grava o fim: enviada, nao saiu, sistema pediu dados ou nao confirmada. Nunca reenvia. Num terceiro, o que a
@@ -97,7 +98,7 @@ Ligador = Callable[[Sistema], Ligacao]
 
 def ligacao_sem_sala(sistema: Sistema) -> Ligacao:
     """Ligacao de reserva, quando o app nao da a sua: sistema proprio pelo cliente fixado; servidor de terceiros
-    sem sala (nada sai: ``nao_enviado`` com ``SalaFora``). Nunca o cliente local para um terceiro."""
+    sem sala (nenhum pedido MCP sai: ``nao_enviado`` com ``SalaFora``). Nunca o cliente local para um terceiro."""
     return ponto.ligacao_para(sistema, ambiente="producao")
 
 

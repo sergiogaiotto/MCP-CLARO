@@ -9,7 +9,7 @@ Pela entrada real (``test_entrada_terceiros_apoio``) ate a acao liberada; dai a 
   a ordem: o motivo de antes. Nada chega ao terceiro;
 - I3: o terceiro responde 307 para o endereco de um sistema proprio cadastrado. Pela sala de verdade (processo
   filho, mTLS) e pelo cliente local de teste, o proprio conta 0 pedidos, a acao vira "nao saiu" e o extrato tem
-  ``sala_desvio_recusado``. Sem a sala, nada vai ao terceiro (``sala_fora``);
+  ``sala_desvio_recusado``. Sem a sala, nenhum pedido MCP vai ao terceiro (``sala_fora``);
 - pela sala: 500 ou corpo fora do contrato e "nao confirmada" (critica B6); sala fora do ar e "nao saiu";
   argumentos com niveis demais para escrever nao saem e sao "nao saiu";
 - o aviso de partes retiradas (texto e imagem) fica fora da moldura na consulta pelo protocolo (critica B4);

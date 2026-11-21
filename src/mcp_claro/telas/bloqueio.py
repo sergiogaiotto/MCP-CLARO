@@ -121,9 +121,11 @@ SAIDA: Final[dict[str, str]] = {
     "nao_confirmada": "resultado não confirmado",
     "sistema_pediu_dados": "o sistema pediu mais dados",
 }
+# O comprovante e o retrato da hora do bloqueio. Uma acao "nao confirmada" pode nem ter saido (a retomada a da como
+# nao confirmada quando o envio foi interrompido), e o fim que chega depois nao muda o comprovante: por isso "pode ter".
 EM_CONFERENCIA: Final[dict[str, str]] = {
     "enviando": "estava saindo na hora do bloqueio",
-    "nao_confirmada": "saiu, mas a resposta do sistema não chegou inteira",
+    "nao_confirmada": "pode ter saído, mas a resposta do sistema não chegou inteira",
 }
 # Sem a parte "em conferencia" (comprovante de antes dela), estas ficam nela, e nao em "ja tinha seguido".
 ESTADOS_EM_CONFERENCIA: Final = frozenset(EM_CONFERENCIA)

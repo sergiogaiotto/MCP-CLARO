@@ -90,6 +90,18 @@ def test_campos_de_entrada_e_campo_fora_do_esquema() -> None:
     assert erro.value.campos == ["bcc"]
 
 
+# Fase 3: o que a tela de revisao de ferramenta recebe a mais (sistema proprio, sem previa de terceiro).
+CONTEXTO_FASE3_REVISAO: dict[str, Any] = {
+    "terceiro": False,
+    "previa": None,
+    "recusa_previa": None,
+    "antes": None,
+    "antes_esquema": "{}",
+    "prefixo_descricao": "desc:",
+    "descricao_maxima": 300,
+}
+
+
 def test_tela_do_admin_explica_e_marca_os_campos_de_destinatario() -> None:
     html = _render(
         "admin/ferramenta.html",
@@ -111,6 +123,7 @@ def test_tela_do_admin_explica_e_marca_os_campos_de_destinatario() -> None:
             "campos": [],
             "destinatario": ["para", "copia"],
         },
+        **CONTEXTO_FASE3_REVISAO,
     )
     assert "Campos do pedido que dizem o destinatário" in html
     assert "O MCP-CLARO confere só os campos marcados aqui" in html
@@ -199,6 +212,7 @@ def test_escolha_le_a_coluna_da_ferramenta_revisada() -> None:
         descricao="Envia.",
         risco="medio",
         campos_destinatario=["para", "copia"],
+        origem="proprio",
     )
     assert limites.Escolha.da_linha(cast(Any, linha)).campos == ("para", "copia")
     assert (
@@ -224,6 +238,8 @@ def _linha_limite(com_passkey: bool, situacao: str = "ativo") -> Any:
         criado_em=agora,
         com_passkey=com_passkey,
         destinatarios=[],
+        sistema_origem="proprio",
+        sem_revisao=False,
     )
 
 
@@ -306,7 +322,7 @@ def _arranjo(monkeypatch: pytest.MonkeyPatch) -> tuple[Telas, EngineContado, lis
     p = Parametros(APP_ENV="teste", PUBLIC_BASE_URL="https://mcp-claro.teste", FEATURE_PASSKEY=False)
     t = Telas(p, ConfigTelas(), cast(Any, engine), cast(Any, None), cast(Any, None), criar_ambiente("UTC"))
     vistas: list[int] = []
-    pessoa = SimpleNamespace(id=uuid.uuid4(), papel="pessoa")
+    pessoa = SimpleNamespace(id=uuid.uuid4(), papel="pessoa", teste=False)
     velha = Sessao(
         b"h", cast(Any, pessoa), "csrf", datetime.now(UTC) + timedelta(hours=1), datetime(2026, 1, 1, tzinfo=UTC)
     )

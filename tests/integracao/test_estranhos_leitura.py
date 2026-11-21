@@ -348,7 +348,7 @@ async def test_leitura_de_terceiro_sem_sala_com_desvio_ou_endereco_recusado_vai_
     app = g.ContaPosts(mal_comportado.criar())
     async with servidor(app) as base, httpx2.AsyncClient() as http:
         arr = await g.preparar(cena.dono, cena.cifra, endereco=f"{base}/mcp", definicao=CONSULTAR, origem="terceiro")
-        # Sem sala e sem o cliente local injetado: nada sai ao terceiro.
+        # Sem sala e sem o cliente local injetado: nenhum pedido MCP vai ao terceiro.
         sem_sala = await cena.despachante(local=False).ler(arr.pedido())
         assert app.posts == 0
         # Endereco local sem a liberacao dos testes: recusado antes de abrir conexao.

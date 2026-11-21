@@ -29,7 +29,7 @@ conferido (não fala a 2026-07-28); ambiente de teste sobe numa máquina limpa; 
 | Argumentos contra o esquema revisado | Feito: Draft 2020-12, sem `$ref` de fora |
 | Servidor de baixo nível com vitrine do cadastro | Feito: textos e nomes do cadastro, dicas conhecidas apenas, sem `x-mcp-header` |
 | Sistema ligado com cliente fixado em 2026-07-28 e sondagem guardada | Feito: `server/discover` no cadastro; 401, 429 e 5xx não viram veredito de versão |
-| Sem volta automática | Feito: uma chamada por pedido, sem respostas sozinhas, sem reenvio depois de 401, sem GET de retomada |
+| Sem volta automática | Feito: uma chamada por pedido, sem reenvio depois de 401, sem GET de retomada. Até a Fase 3, o kit ainda respondia sozinho a um pedido do sistema pelo fio antigo (um segundo POST, com a chave); a barreira de pedidos da Fase 3 fechou isso para todos os sistemas ([decisões](decisoes.md), "Mudanças deliberadas da Fase 3") |
 | OpenBao sobre PostgreSQL com Transit | Feito: cliente fino, AppRole por papel, selo `static` em teste |
 | Caddy na frente, com mTLS na porta interna | Feito: cada porta interna aceita só quem pode chamá-la |
 | Simulado do dia ruim | Roteiro em `docs/simulado-dia-ruim.md`; falta rodar com os pilotos |
@@ -49,7 +49,7 @@ no CI, no job "suite oficial atraves do gateway".
 | Cofre de chaves: autorização na página do sistema, troca do código no despachante, a entrada nunca vê a chave | Feito: OAuth com PKCE S256; o despachante cria o pedido e cifra o verificador |
 | Renovação uma por vez, com trava, gravando a chave nova antes do uso | Feito (`despachante/renovacao.py`) |
 | Sistemas de chave compartilhada: só leitura e aviso no extrato | Feito |
-| Leitura com medida: máscara, catraca diária e texto de estranhos marcado | Máscara e catraca feitas; texto de estranhos entra com a Fase 3 |
+| Leitura com medida: máscara, catraca diária e texto de estranhos marcado | Feito: máscara e catraca na Fase 1; texto de estranhos marcado na Fase 3 |
 | Extrato único, resumo semanal do ADMIN e motivo para abrir extrato alheio | Feito |
 | Bloqueio de um toque e pausa; desativar uma pessoa derruba as autorizações | Feito |
 | Mudou-parou para sistemas próprios | Feito: ferramenta que pede mais fica suspensa até nova revisão |
@@ -134,3 +134,86 @@ O que se sabe e ficou como está:
   conferências seguidas (a cópia que assume recomeça as contagens e confere o cofre na hora).
 
 Roteiro para quem cuida do dia a dia: [Porta de saída](saida.md).
+
+## Fase 3: servidores de terceiros
+
+A Fase 3 recebe servidores MCP que não são da organização (no cadastro, a origem "de terceiros"). O código das
+etapas 1 a 5 está no repositório: banco, ligação, sala de visitas, cadastro, regras, entrada, fila, despachante,
+porta de saída, rotinas, telas e documentos. Falta a etapa 6: as provas de saída de ponta a ponta, os ensaios antes
+de ligar e uma revisão cruzada. As decisões e o que mudou de propósito estão em [decisões](decisoes.md), nas seções
+"Decisões da Fase 3" e "Mudanças deliberadas da Fase 3".
+
+**A chave da Fase 3 continua desligada na partida (D6).** Com `FEATURE_PHASE3_THIRD_PARTY` ligada, a partida é
+recusada em todos os papéis, como com `PROGRAM_ACTIONS_ENABLED`. Ligar depende da decisão registrada do dono,
+depois das provas de saída e das que dependem de gente e de ambiente real (listas abaixo). Enquanto isso, o ADMIN
+cadastra, sonda e revisa servidores de terceiros, e só pessoas de teste (`pessoas.teste`) os veem e usam. Prova:
+`tests/unidade/test_settings_fase3.py`.
+
+Os arquivos de teste citados ficam em `tests/integracao/`, salvo onde se diz `tests/unidade/`.
+
+| Entrega | Situação |
+| --- | --- |
+| Revisão servidor a servidor pelo ADMIN, com nomes e descrições escritos no cadastro | Feito: revisão de cada ferramenta (esquema sem o texto do fornecedor, descrição de cada campo escrita pelo ADMIN, dicas só da classe revisada) e conclusão da revisão do servidor, registrada em `revisoes_servidor`, só de acrescentar, com quem revisou e quem fornece. A vitrine de um terceiro mostra só as ferramentas publicadas na revisão vigente. Prova: `test_revisao_servidor.py`, `test_vitrine_terceiros.py` e `test_telas_fase3_admin.py::test_conclusao_da_revisao_do_servidor_pela_tela` |
+| Sala de visitas: endereço combinado, sem redirecionamento, chave separada e sem `traceparent` | Feito: contêiner `visitas`, sem banco e sem cofre, com um processo novo por chamada; só https e IP público; nenhum desvio seguido; chave do cofre só dos terceiros; nenhum dado de rastreio. Fora de desenvolvimento e teste, a sala é obrigatória. Prova: `tests/unidade/test_visitas_app.py`, `tests/unidade/test_ligacao_terceiro.py`, `test_chave_separada.py`, `test_compose_visitas.py` e `test_sala_isolada.py`, que sobe a sala de verdade e prova o isolamento a cada mudança |
+| Barrar pedidos de senha, link ou confirmação vindos do servidor; eles não chegam à pessoa | Feito, para todos os sistemas: nenhum pedido do sistema passa ao aplicativo nem à pessoa. Ele vira uma categoria nossa no extrato e na tela do ADMIN ("Pedidos recusados deste sistema"), sem texto, link ou campo do servidor. Prova: `tests/unidade/test_ligacao_pedidos.py`, `test_pedidos_do_servidor.py` e `test_telas_fase3_admin.py::test_pedidos_recusados_com_contagem_e_linhas_sem_texto_do_servidor` |
+| Marcar a resposta do servidor como texto escrito por estranhos | Feito: moldura com marca sorteada e aviso do MCP-CLARO, na leitura e na ação, também para ferramenta própria marcada "traz texto de fora". O texto do terceiro não aparece nas telas da pessoa. Prova: `test_estranhos_leitura.py`, `test_estranhos_acao.py` e `test_telas_fase3_pessoa.py::test_resposta_de_terceiro_com_pedido_de_senha_nao_chega_as_telas_da_pessoa` |
+| Mudou-parou endurecido: qualquer mudança leva o servidor inteiro à quarentena | Feito: ferramenta mudada (mesmo só no texto), nova ou sumida, e também 2 rodadas seguidas sem resposta. A quarentena cancela o que esperava para sair, suspende os limites das pessoas com o servidor e avisa o ADMIN. Só uma nova conclusão da revisão do servidor o põe de volta em serviço; além dela, o banco só aceita desativá-lo. Prova: `test_rotinas_terceiros.py::test_mudanca_so_de_texto_em_terceiro_leva_o_servidor_inteiro_a_quarentena`, `test_saida_quarentena.py` e `test_telas_fase3_admin.py::test_quarentena_mostra_o_bloco_os_passos_e_o_antes_e_depois_e_a_revisao_tira_de_la` |
+| Alerta dos três sinais, somado por pessoa e por aplicativo na janela | Feito: com "leu texto de fora" e "viu dado privado" na janela (`THREE_SIGNALS_WINDOW_MINUTES`, 240 minutos no início), toda ação vai para a ficha, sem consultar nem gastar limite, e a ficha mostra o motivo. Prova: `test_tres_sinais.py::test_tres_sinais_suspendem_o_limite_e_a_ficha_mostra_o_motivo` e `test_telas_fase3_pessoa.py::test_ficha_de_terceiro_avisa_e_mostra_o_cartao_do_alerta_dos_tres_sinais` |
+| Recusar no cadastro servidor que só fala a versão antiga, com contagem | Feito: a sondagem separa seis desfechos, e só "versão" conta como versão antiga. A recusa de um terceiro conta à parte (`cadastro_terceiro`), no painel e no resumo semanal, fora do alerta alto. Prova: `test_sondagem_fase3.py` e `test_telas_fase3_admin.py::test_terceiro_da_geracao_antiga_e_recusado_e_contado_a_parte` |
+| Porta de saída com terceiros | Feito: reconferência na saída, envio pela sala, quarentena, níveis e linhas da sala no extrato ([porta de saída](saida.md#ações-em-servidores-de-terceiros)). Prova: `test_saida_terceiros.py` |
+| Telas do ADMIN e da pessoa | Feito na etapa 5: cadastro com a origem, sondagem por desfecho, revisão do servidor, quarentena e pedidos recusados, do lado do ADMIN; aviso de terceiro e cartão do alerta na ficha, limites e tela da ação, do lado da pessoa. Prova: `test_telas_fase3_admin.py` e `test_telas_fase3_pessoa.py` |
+| Medições | Feito: bloco "Servidores de terceiros (Fase 3)" no Grafana (recusados por versão, em quarentena agora e por situação) e a linha de terceiros no resumo semanal. Prova: `test_grafana.py` |
+
+Também ficou pronto:
+
+- a barreira de pedidos e as outras mudanças que valem para todos os sistemas, inclusive os das Fases 1 e 2
+  (decisões, "Mudanças deliberadas da Fase 3", itens marcados "vale para todos");
+- o campo `Pedido.terceiros` é obrigatório e só por nome, sem valor padrão: um chamador que esquecesse o campo faria
+  o sinal de terceiro não contar no alerta dos três sinais (`tests/unidade/test_f4_pedido_terceiros.py`);
+- `OBS_TRACE_PROPAGATE_DOWNSTREAM` continua sem uso no código. Nenhum valor dele libera dados de rastreio a
+  terceiros (D10; `tests/unidade/test_settings_fase3.py::test_nenhum_valor_da_propagacao_de_rastro_libera_terceiros`).
+  A propagação de `traceparent` para sistemas próprios fica fora da Fase 3.
+
+Provas de saída do plano. Cada uma já tem provas por partes; a prova pelo gateway inteiro é da etapa 6:
+
+| Prova de saída | Situação |
+| --- | --- |
+| Cada servidor de terceiros revisado e registrado | Por partes: `test_revisao_servidor.py`, `test_migracao_0006.py` e a visão `medicoes.v_terceiros`. Falta a prova de ponta a ponta: todo terceiro com ferramenta na vitrine tem uma revisão vigente que a contém |
+| Sala de visitas isolada: o servidor não alcança chaves nem dados de outros sistemas | Por partes: `test_sala_isolada.py` (rede e certificados, a cada mudança), `tests/unidade/test_visitas_app.py` (um processo por chamada), `test_chave_separada.py` e `tests/unidade/test_ligacao_terceiro.py`. Falta gravar cada byte que um terceiro recebe, com as chaves de várias pessoas e de sistemas próprios no mesmo banco |
+| Provas de crachá não repassado e de chave por pessoa repetidas com um servidor de terceiros | A fazer na etapa 6 |
+| Mudança só de texto num servidor de teste leva à quarentena | Feito pelas rotinas (`test_rotinas_terceiros.py`). Falta repetir pelo gateway, com a sala |
+| Três sinais juntos suspendem o limite por aproximação, e a ficha mostra o motivo | Feito pela entrada e pela fila (`test_tres_sinais.py`) e pela tela (`test_telas_fase3_pessoa.py`). Falta repetir pelo gateway inteiro |
+| Pedido de senha vindo do servidor não chega à pessoa | Por partes: `test_pedidos_do_servidor.py` e `test_telas_fase3_pessoa.py`. Falta repetir pelo gateway inteiro |
+| Nova (D31): a resposta de um terceiro chega inteira dentro da marca, e nada passa fora dela | Por partes: `test_estranhos_leitura.py` e `test_estranhos_acao.py`. Falta repetir pelo gateway inteiro |
+
+Ainda falta, na etapa 6:
+
+- as provas de saída da tabela acima, pelo gateway inteiro;
+- os ensaios antes de ligar a chave: o dublê mal-intencionado (um terceiro que devolve uma instrução escondida: ler,
+  ler um dado pessoal e tentar enviar dentro do limite, que tem de ir para a ficha); a resposta perdida, com
+  `tests/cortador.py` entre o despachante e a sala e entre a sala e o terceiro (nada se repete, e o desfecho é "não
+  confirmada"); a suíte oficial de conformidade com as falhas esperadas iguais; a carga e o ensaio de restauração,
+  como em toda fase;
+- uma revisão cruzada, com cada achado conferido e corrigido.
+
+Provas que dependem de gente ou de ambiente real:
+
+- escolher os primeiros servidores de terceiros reais (decisões, "Ainda em aberto");
+- ver se um assistente de verdade segue uma instrução escondida no texto de um terceiro (simulado do dia ruim): o
+  teste automático só prova que a marca está lá;
+- conferir como o Claude Code e o Goose mostram ao modelo o `_meta`, os dados estruturados e vários blocos: ainda
+  não conferido;
+- um servidor real feito com o kit TypeScript ou Rust da geração antiga (opcional);
+- DNS, IP público e certificados públicos: só em ambiente real;
+- o OAuth de um terceiro real e a página de autorização dele;
+- o ajuste da janela dos três sinais no piloto (alarme falso), olhando `medicoes.v_acoes_pedidas`, e o efeito das
+  fichas do alerta no teto por aplicativo;
+- a revisão de LGPD: os sinais ficam 7 dias; o retrato do alerta fica na ficha pelo prazo do extrato;
+- uma sessão guiada com um ADMIN seguindo o roteiro [Ligar um servidor de terceiros](terceiros.md), sem ajuda da
+  equipe (recomendado);
+- a decisão do dono para ligar a chave da Fase 3 (D6).
+
+O que se sabe e ficou como está: os riscos aceitos estão em [decisões](decisoes.md), "Riscos aceitos da Fase 3".
+
+Roteiro do ADMIN: [Ligar um servidor de terceiros](terceiros.md). Roteiro para quem cuida do dia a dia:
+[Porta de saída](saida.md#ações-em-servidores-de-terceiros).

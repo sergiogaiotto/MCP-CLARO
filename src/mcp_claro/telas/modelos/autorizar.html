@@ -10,15 +10,15 @@
 {% endif %}
 {% for s in sistemas %}
 <section class="cartao">
-  <h2>{{ s.nome }}</h2>
+  <h2><bdi>{{ s.nome | escondidos }}</bdi></h2>
   {% if s.autorizado_em %}<p>Você autorizou pela última vez em {{ s.autorizado_em | data_hora }}.</p>{% else %}<p>Você ainda não autorizou este sistema.</p>{% endif %}
   {% if not s.configurado %}
   <p class="atencao">O ADMIN ainda não ligou a autorização deste sistema.</p>
   {% elif s.situacao != "ativo" %}
   <p class="atencao">Este sistema não está ativo agora. Tente mais tarde.</p>
   {% else %}
-  <p>O que acontece: você vai para a página do sistema {{ s.nome }}. Lá, você entra e autoriza. Depois, volta para cá.</p>
-  <p><a class="botao" href="/telas/autorizar/{{ s.id }}/ir?ficha={{ fichas[s.id] }}" hx-boost="false">{% if s.autorizado_em %}Autorizar de novo{% else %}Autorizar{% endif %} no sistema {{ s.nome }}</a></p>
+  <p>O que acontece: você vai para a página do sistema <bdi>{{ s.nome | escondidos }}</bdi>. Lá, você entra e autoriza. Depois, volta para cá.</p>
+  <p><a class="botao" href="/telas/autorizar/{{ s.id }}/ir?ficha={{ fichas[s.id] }}" hx-boost="false">{% if s.autorizado_em %}Autorizar de novo{% else %}Autorizar{% endif %} no sistema <bdi>{{ s.nome | escondidos }}</bdi></a></p>
   {% endif %}
   {% if s.autorizado_em %}
   <form method="post" action="/telas/autorizar/{{ s.id }}/retirar">

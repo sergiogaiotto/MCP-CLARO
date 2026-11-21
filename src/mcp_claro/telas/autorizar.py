@@ -52,6 +52,10 @@ MENSAGENS: Final[dict[str, str]] = {
     "configuracao_invalida": "A autorização deste sistema está mal configurada. Fale com o ADMIN.",
     "sem_autorizacao_por_pessoa": "Este sistema não pede autorização de cada pessoa.",
     "sistema_desconhecido": "Este sistema não está cadastrado.",
+    "terceiros_desligados": (
+        "Servidores de terceiros ainda estão desligados neste MCP-CLARO. Só pessoas de teste os autorizam. Nada foi"
+        " guardado."
+    ),
 }
 SEM_RESPOSTA: Final = "O MCP-CLARO não conseguiu falar com o despachante agora. Nada foi guardado. Tente de novo."
 SEM_RESPOSTA_RETIRAR: Final = "O MCP-CLARO não conseguiu falar com o despachante agora. Nada mudou. Tente de novo."

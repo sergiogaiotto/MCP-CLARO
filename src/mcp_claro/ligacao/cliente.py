@@ -14,8 +14,9 @@ Regras do plano, provadas por teste:
   notificacao, uma lista ou um corpo ilegivel ficam no transporte, com um 202 que nao
   conta como status. Cada pedido barrado vira uma categoria do nosso vocabulario
   (``Resposta.pedidos``), nunca com texto, link ou nome de campo do sistema;
-- sem ``elicitation_callback`` e sem ``sampling_callback``: nao responde sozinho a
-  pedidos do sistema; ``InputRequiredResult`` volta cru;
+- sem ``elicitation_callback`` e sem ``sampling_callback``: o kit montaria sozinho uma
+  resposta de erro a um pedido pelo fio antigo; a barreira de pedidos nao a deixa sair;
+  ``InputRequiredResult`` volta cru;
 - rastro: toda chamada ao kit roda num contexto OpenTelemetry vazio; o transporte tira
   ``traceparent``, ``tracestate`` e ``baggage`` dos cabecalhos e, num servidor de
   terceiros, deixa no ``_meta`` do corpo so o envelope do MCP (com ou sem provedor de

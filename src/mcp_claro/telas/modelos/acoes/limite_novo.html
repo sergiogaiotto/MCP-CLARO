@@ -4,7 +4,8 @@
 <h1>Criar um limite</h1>
 <section class="cartao">
   <h2>{{ e.nome_vitrine }}</h2>
-  <p>Pelo aplicativo <strong>{{ e.aplicativo }}</strong>, no sistema <strong>{{ e.sistema }}</strong>.</p>
+  <p>Pelo aplicativo <strong><bdi>{{ e.aplicativo | escondidos }}</bdi></strong>, no sistema <strong><bdi>{{ e.sistema | escondidos }}</bdi></strong>.{% if e.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}</p>
+  {% if e.de_terceiro %}<p class="atencao" id="aviso-terceiro">Este servidor é de terceiros. O MCP-CLARO não controla o que ele faz do lado de lá. Com o limite, as ações vão a ele sem ficha.</p>{% endif %}
   <p>{{ e.descricao }}</p>
   <p>Com o limite, o aplicativo faz esta ação sem ficha, dentro do que você escolher abaixo. Cada vez fica no seu extrato e ainda espera um pouco antes de sair: dá para cancelar.</p>
 </section>

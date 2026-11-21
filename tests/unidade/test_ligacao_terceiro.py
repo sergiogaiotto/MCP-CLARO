@@ -4,7 +4,8 @@
   cabecalhos, mesmo com um provedor OpenTelemetry instalado (o kit cria um span proprio e injeta o contexto dele);
 - endereco combinado (U4): so https e IP publico fora de desenvolvimento e teste, conferido antes de conectar;
 - sem desvio (U2) e sem cookie (U5), com nome e versao genericos (D11);
-- ``ligacao_para``: terceiro so pela sala; sem sala, nada sai; cliente local para terceiro so por injecao em teste.
+- ``ligacao_para``: terceiro so pela sala; sem sala, nenhum pedido MCP sai; cliente local para terceiro so por
+  injecao em teste.
 """
 
 from __future__ import annotations

@@ -19,7 +19,7 @@
     <tr>
       <td><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a></td>
       <td>{{ a.op.criada_em | data_hora }}</td>
-      <td>{{ a.op.nome_vitrine }} <span class="dica">no sistema {{ a.op.sistema_nome }}</span></td>
+      <td>{{ a.op.nome_vitrine }} <span class="dica">no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi></span>{% if a.op.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}</td>
       <td>{{ a.rotulo }}{% if a.op.estado == "nao_confirmada" and not a.op.decisao_pessoa %} <span class="etiqueta ruim">Falta a sua decisão</span>{% endif %}</td>
     </tr>
   {% endfor %}

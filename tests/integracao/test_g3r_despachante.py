@@ -162,7 +162,7 @@ async def _duas_rodadas(cena: Cena, sistema_id: uuid.UUID, cifra: Any, **kw: Any
 
 async def test_sala_fora_por_duas_rodadas_nao_conta_como_sem_resposta_do_servidor(cena: Cena) -> None:
     sistema_id = await cena.terceiro_revisado(chave_das_declaracoes=False)
-    # Sem VISITS_INTERNAL_URL e sem o cliente local injetado: o despachante nunca fala com o terceiro (sem sala).
+    # Sem VISITS_INTERNAL_URL e sem o cliente local injetado: nenhum pedido MCP vai ao terceiro (sem sala).
     direto, chamadas = await _duas_rodadas(cena, sistema_id, CifraFalsa())
     assert direto.status_code == 503
     assert direto.json()["motivo"] == "sala_fora"

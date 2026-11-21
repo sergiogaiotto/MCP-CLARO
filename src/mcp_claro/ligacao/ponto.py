@@ -1,11 +1,12 @@
 """Ponto unico de ligacao com um sistema: ``ligacao_para(sistema)`` (desenho 3.4; ajustes, D1 e A2).
 
 - Sistema proprio: o cliente fixado local, como nas Fases 1 e 2.
-- Servidor de terceiros: a sala de visitas (``ClienteSala``), quando existe. Sem sala, nada vai ao terceiro
-  (``SemSala``: ``nao_enviado`` com ``SalaFora``; o despachante grava ``sala_fora`` no extrato e conta).
+- Servidor de terceiros: a sala de visitas (``ClienteSala``), quando existe. Sem sala, nenhum pedido MCP vai ao
+  terceiro (``SemSala``: ``nao_enviado`` com ``SalaFora``; o despachante grava ``sala_fora`` e conta); so a troca e
+  a renovacao da chave (OAuth) saem do despachante, para o endereco de troca de chave do terceiro, conferido antes.
 - O cliente local para terceiro so entra por injecao explicita (``local_para_terceiro``), e so em
-  desenvolvimento e teste. Fora deles, a injecao e ignorada: o despachante, que abre todas as chaves, nunca fala
-  direto com um servidor de terceiros.
+  desenvolvimento e teste. Fora deles, a injecao e ignorada, e vale o item de cima: o despachante, que abre todas
+  as chaves, so manda pedido MCP a um terceiro pela sala.
 
 Vocabulario comum do despachante (leitura, declaracoes, sondagem) e da porta de saida (acoes), para que os dois
 lados digam o mesmo, com as mesmas palavras:
@@ -117,7 +118,8 @@ class ClienteLocal:
 
 @dataclass(frozen=True, slots=True)
 class SemSala:
-    """Servidor de terceiros sem sala de visitas: nada sai, e o chamador fica sabendo por ``SalaFora``."""
+    """Servidor de terceiros sem sala de visitas: nenhum pedido MCP sai por aqui, e o chamador fica sabendo por
+    ``SalaFora``."""
 
     async def chamar_ferramenta(
         self,

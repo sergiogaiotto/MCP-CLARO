@@ -3,8 +3,9 @@
 - sala fora (conexao recusada antes de enviar): ``nao_enviado`` e a linha ``sala_fora``;
 - qualquer outra falha da sala (caiu depois de receber, 500, corpo fora do contrato): ``duvida``;
 - ``nao_enviado``, ``duvida`` e ``recusado_http`` do terceiro atravessam a sala iguais, com o ``status_http``;
-- sem sala, um terceiro nunca sai pelo despachante (nem com o cliente local injetado, fora de desenvolvimento e
-  teste); o app monta a sala a partir de ``VISITS_INTERNAL_URL`` e da a mesma ligacao a porta de saida.
+- sem sala, nenhum pedido MCP a um terceiro sai pelo despachante (nem com o cliente local injetado, fora de
+  desenvolvimento e teste); o app monta a sala a partir de ``VISITS_INTERNAL_URL`` e da a mesma ligacao a porta de
+  saida.
 """
 
 from __future__ import annotations

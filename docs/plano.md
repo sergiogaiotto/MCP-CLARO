@@ -203,19 +203,21 @@ A afirmação de identidade empresarial fica fora agora, com a chave `AUTH_ENTER
 
 ## O que vai rodar
 
-Na máquina principal rodam, em Docker, o portão, o gateway em três papéis, o cofre, o banco, o login, o Grafana e o backup. Na segunda máquina roda o vigia, com banco próprio.
+Na máquina principal rodam, em Docker, o portão, o gateway em quatro papéis (entrada, despachante, rotinas e, da Fase 3 em diante, a sala de visitas), o cofre, o banco, o login, o Grafana e o backup. Na segunda máquina roda o vigia, com banco próprio.
 
-Só dois papéis do gateway saem para a internet: o despachante, que fala com os sistemas, e as rotinas, que mandam avisos.
+Três papéis do gateway saem para a internet: o despachante, que fala com os sistemas próprios e com o endereço de troca de chave (OAuth) de cada terceiro; a sala de visitas, que fala com os servidores de terceiros; e as rotinas, que mandam avisos.
 
 > Desenho: peças em Docker · máquina principal, vigia e quem fica fora (versao com desenhos no documento compartilhado).
 
-Leia de cima para baixo. O pedido entra pelo portão e passa pela entrada; só o despachante fala com os sistemas e abre as chaves. As peças guardam dados no PostgreSQL, e o vigia confere tudo de fora, em outra máquina.
+Leia de cima para baixo. O pedido entra pelo portão e passa pela entrada. O despachante fala com os sistemas próprios, com a sala e com o endereço de troca de chave (OAuth) de cada terceiro; só o despachante abre as chaves. As peças guardam dados no PostgreSQL, e o vigia confere tudo de fora, em outra máquina.
 
 ### Máquina principal
 
 - **Portão (Caddy).** Atende a internet com TLS automático. Aplica o limite grosso de pedidos por endereço de origem. Não repete pedidos, e não decide nada pelos cabeçalhos MCP.
 - **Gateway, papel `entrada`.** Recebe os pedidos MCP e as telas. Aplica o porteiro de versão, confere o crachá, monta a vitrine e decide pelas regras.
-- **Gateway, papel `despachante`.** É o único que fala com os sistemas e o único que abre as chaves das pessoas. Atende leituras na hora, depois de reconferi-las, e envia ações só a partir da fila.
+- **Gateway, papel `despachante`.** É o único que abre as chaves das pessoas. Fala com os sistemas próprios, com a sala de visitas e com o endereço de troca de chave (OAuth) de cada terceiro. Atende leituras na hora, depois de reconferi-las, e envia ações só a partir da fila. A conversa MCP com um servidor de terceiros passa sempre pela sala: sem ela, nenhum pedido MCP vai ao servidor. Só a troca e a renovação da chave saem do despachante direto ao endereço de troca de chave do terceiro.
+- **Gateway, papel `visitas` (sala de visitas, Fase 3).** É o único que fala MCP com os servidores de terceiros. Não tem banco, cofre nem extrato. Cada chamada roda num processo novo, que só recebe os dados daquela chamada e morre no fim. Recebe do despachante, só pela rede própria e com certificado dos dois lados, o pedido e a chave do terceiro daquela chamada.
+- **Muro da sala (`visitas-muro`).** Contêiner pequeno, dono da rede da sala. Na partida, tira da tabela de rotas todo endereço que não é da internet (redes privadas, o endereço de metadados das nuvens, a própria rede de saída da sala). Ficam só o despachante e os endereços públicos.
 - **Gateway, papel `rotinas`.** Roda a ronda das portas, vencimentos, avisos, fechamento e resumos de medições. Recebe os alertas do Grafana e os manda pela fila de avisos.
 - **Cofre (OpenBao).** Guarda as chaves de cifra. As chaves das pessoas ficam cifradas nas tabelas do gateway.
 - **PostgreSQL.** O único banco. Tem bancos e usuários separados para gateway, cofre, provedor de login e Grafana. Roda numa imagem própria sobre a oficial, com o pgBackRest dentro.
@@ -235,7 +237,11 @@ A segunda máquina fica em outro provedor ou outra rede, com acessos separados d
 
 - `borda`: portão e provedor de login. Tem saída para a internet, para os certificados do portão e, se ligada, a conta da organização.
 - `interna`: portão, entrada, despachante, rotinas, cofre, banco, provedor de login, Grafana, backup e, se ligado, o Collector. Sem saída para a internet.
-- `saida`: só despachante, rotinas, backup e, se ligado, o Collector, com saída para a internet.
+- `saida`: só despachante, rotinas, backup e, se ligado, o Collector, com saída para a internet. O despachante a usa para os sistemas próprios e para a troca de chave (OAuth) dos terceiros.
+- `visitas` (Fase 3): só despachante e sala de visitas. Sem saída para a internet.
+- `saida_visitas` (Fase 3): só a sala de visitas, para os servidores de terceiros. O muro da sala deixa nela só a rota para endereços públicos. Essas duas redes não têm IPv6.
+
+A sala de visitas não está na `interna` nem na `saida`: de lá, ela não alcança o banco, o cofre, a entrada, as rotinas nem o login. Se o muro reiniciar, a sala fica sem rede até reiniciar também.
 
 O Grafana não sai para a internet. Ele manda os alertas por webhook interno às rotinas, que os enviam pela fila de avisos, com assinatura e novas tentativas. O provedor de login fala com o banco pela `interna`, e o emissor dos crachás continua sendo o endereço público.
 
@@ -250,13 +256,17 @@ As portas internas são valores iniciais, ajustáveis por parâmetro. mTLS quer 
 | Portão | Entrada | 8443, interna | mTLS: certificado de cliente do portão |
 | Portão | Provedor de login | Interna, do provedor | Nenhuma; o login é da própria pessoa |
 | Entrada | Provedor de login | Interna, do provedor | Nenhuma; busca as chaves públicas dos crachás (JWKS) |
-| Entrada | Despachante | 9443, interna | mTLS: certificado da entrada. Serve leituras e a entrega do código de autorização. O despachante só atende ferramenta "lê" do cadastro revisado e da ordem de serviço; o resto é recusado e vai ao extrato |
+| Entrada | Despachante | 9443, interna | mTLS: certificado da entrada. Serve leituras e a entrega do código de autorização. O despachante só atende ferramenta "lê" do cadastro revisado e da ordem de serviço; o resto é recusado e vai ao extrato. Pelas telas do ADMIN, também a conferência da versão, a leitura das ferramentas declaradas e a conclusão da revisão de um servidor de terceiros |
+| Rotinas | Despachante | 9443, interna | mTLS: certificado das rotinas. Pede a lista de ferramentas que cada sistema declara, para o mudou-parou |
 | Entrada, despachante, rotinas | PostgreSQL | 5432, TLS | Usuário próprio de cada papel |
 | Despachante | Cofre | 8200, TLS | AppRole do despachante: login de máquina com token curto |
 | Entrada | Cofre | 8200, TLS | AppRole da entrada: só lê a chave do estado das confirmações |
 | Cofre | PostgreSQL | 5432, TLS | Usuário do banco do cofre |
 | Provedor de login | PostgreSQL | 5432, TLS | Usuário do banco do provedor |
-| Despachante | Sistemas conectados | 443, HTTPS | Chave do cofre, por pessoa ou do programa; só o endereço cadastrado |
+| Despachante | Sistemas próprios | 443, HTTPS | Chave do cofre, por pessoa ou do programa; só o endereço cadastrado |
+| Despachante | Sala de visitas | 9446, rede `visitas` | mTLS: o despachante leva o certificado de cliente da `ca_clientes_visitas` e só confia na `ca_visitas`. Leva o pedido e a chave do terceiro daquela chamada, já aberta (Fase 3) |
+| Sala de visitas | Servidores de terceiros | 443, HTTPS, rede `saida_visitas` | A chave daquela chamada. Só o endereço combinado, só https e só endereço da internet; nenhum desvio seguido; sem `traceparent`, `tracestate` nem `baggage`; nome e versão genéricos (`mcp-claro`) |
+| Despachante | Endereço de troca de chave (OAuth) de cada terceiro | 443, HTTPS, rede `saida` | Código de autorização, chave de renovação e segredo do cliente do MCP-CLARO naquele terceiro. Antes, o endereço passa pela mesma conferência da sala: https e só endereço da internet (Fase 3) |
 | Rotinas | SMTP e webhooks | 587 e 443 | Senha do SMTP e segredo de assinatura, em segredos do Docker |
 | Grafana | PostgreSQL | 5432, TLS | Usuário `grafana` no banco próprio; `grafana_leitor`, só SELECT em visões de medições |
 | Grafana | Rotinas | 9444, interna | Senha própria do webhook interno, em segredo do Docker |
@@ -274,7 +284,9 @@ JWKS é a lista de chaves públicas com que o provedor assina os crachás. AppRo
 | --- | --- | --- | --- |
 | Portão | `caddy:2.11.9-builder` com o módulo `caddy-ratelimit` fixado por commit | TLS, limite grosso, mTLS para a entrada | Arquivos no volume `/data` (certificados), fora do PostgreSQL; exceção a confirmar, com cópia cifrada no backup |
 | Entrada | Imagem própria `mcp-gateway`, papel `entrada` | Porteiro de versão, crachá, vitrine, regras, telas | PostgreSQL |
-| Despachante | Mesma imagem, papel `despachante` | Leituras e envio de ações aos sistemas | PostgreSQL |
+| Despachante | Mesma imagem, papel `despachante` | Leituras e envio de ações aos sistemas; aos servidores de terceiros, sempre pela sala de visitas | PostgreSQL |
+| Sala de visitas | Mesma imagem, papel `visitas`, iniciada por `python -m mcp_claro visitas` | Conversa com os servidores de terceiros, cada chamada num processo novo (Fase 3) | Nada: sem banco, sem cofre e sem extrato |
+| Muro da sala | `busybox:1.36`, fixada por digest, só com a permissão de mudar rotas (`NET_ADMIN`) | Dono da rede da sala: deixa só o despachante e os endereços públicos | Nada |
 | Rotinas | Mesma imagem, papel `rotinas` | Ronda, vencimentos, avisos, fechamento, resumos, alertas do Grafana | PostgreSQL |
 | Cofre | `openbao/openbao:2.7.2` | Chaves de cifra (Transit) e chaves de operação | PostgreSQL, banco próprio |
 | Banco | Imagem própria sobre `postgres:18.7`, com pgBackRest 2.60.1 | Único banco do produto | Volume do Docker, com backup |
@@ -289,7 +301,7 @@ Digest é a impressão digital de uma imagem Docker; fixar por ela evita trocar 
 
 ## Como o código se organiza
 
-Um repositório, um pacote Python, `mcp_gateway`, e uma imagem Docker com quatro papéis. Os papéis são `entrada`, `despachante`, `rotinas` e `vigia`, escolhidos pelo comando de partida.
+Um repositório, um pacote Python, `mcp_gateway`, e uma imagem Docker com cinco papéis. Os papéis são `entrada`, `despachante`, `rotinas`, `visitas` (a sala de visitas, da Fase 3) e `vigia`, escolhidos pelo comando de partida.
 
 ```
 mcp-gateway/
@@ -305,6 +317,7 @@ mcp-gateway/
     telas/       pendências, ficha, extrato, passkey
     extrato/     gravação só de acrescentar, fechamento
     ronda/       ronda das portas
+    visitas/     sala de visitas: servidores de terceiros, um processo por chamada
     vigia/       programa da segunda máquina
     avisos/      e-mail e webhook assinado
     medicoes/    contadores e resumos
@@ -323,11 +336,12 @@ mcp-gateway/
 | `cadastro` | Aplicativos, sistemas, ferramentas revisadas, tipo de chave, selo, impressão digital das ferramentas | entrada, despachante, rotinas |
 | `regras` | Ordem de serviço, catraca de leituras, limite por aproximação, alerta dos três sinais, pedido igual | entrada |
 | `saida` | Fila da porta única de saída, despachante, estados e transições, cancelar, bloquear, comprovante | despachante, entrada |
-| `ligacao` | Cliente MCP para os sistemas, fixado em 2026-07-28, sem seguir redirecionamento e sem volta automática. Troca o código de autorização e renova chaves, uma por vez. Também lê as definições para o mudou-parou | despachante |
+| `ligacao` | Cliente MCP para os sistemas, fixado em 2026-07-28, sem seguir redirecionamento e sem volta automática. Também lê as definições para o mudou-parou. Num servidor de terceiros, a conversa MCP roda dentro da sala de visitas. A troca do código de autorização e a renovação das chaves, uma por vez, não ficam aqui: ficam no despachante (`despachante/autorizacao.py` e `despachante/renovacao.py`), também para os terceiros, direto ao endereço de troca de chave de cada um | despachante, visitas |
 | `cofre` | Login de máquina, cifra e decifra pelo Transit, rodízio de chaves | despachante, entrada |
 | `telas` | Ordens de serviço, pendências, ficha, extrato, bloqueio, cadastro do ADMIN | entrada |
 | `extrato` | Linhas só de acrescentar, frases-padrão, cálculo do número de fechamento | todos, por função própria |
 | `ronda` | Tentativas de entrar com crachá falso, vencido, de outro condomínio e de outra pessoa | rotinas |
+| `visitas` | Sala de visitas: recebe o pedido do despachante e atende cada chamada a um servidor de terceiros num processo novo, isolado dos outros | visitas |
 | `vigia` | Ronda de fora, alarme de silêncio, guarda do fechamento | vigia |
 | `avisos` | Fila de avisos com novas tentativas, e-mail, webhook assinado e entrada dos alertas do Grafana | rotinas, vigia |
 | `medicoes` | Contadores em memória, resumos por minuto, hora e dia, partições | todos |
@@ -347,7 +361,16 @@ A partida recusa `MCP_ACCEPTED_VERSIONS` e `MCP_UPSTREAM_VERSION` com valor dife
 
 **Conferência dos argumentos.** O servidor de baixo nível do kit não confere os argumentos contra o esquema; a validação antiga foi removida. A entrada valida cada pedido contra o esquema revisado, com `jsonschema` (Draft 2020-12), antes das regras e da ficha. Ela não busca referências externas do esquema (`$ref` de fora).
 
-**Versão no cadastro de sistemas.** Ao cadastrar um sistema, o despachante faz uma sondagem com `server/discover`. Se a resposta não for 2026-07-28, o cadastro é recusado com mensagem legível e contado. No uso diário, o cliente fica fixado na versão, com a sondagem guardada no banco.
+**Versão no cadastro de sistemas.** Ao cadastrar um sistema, o despachante faz uma sondagem com `server/discover`. A sondagem dá um de seis desfechos, guardado no cadastro com as versões que o sistema anunciou:
+
+- aceito: o sistema fala a 2026-07-28;
+- versão: ele responde como servidor MCP e não fala a 2026-07-28. Conta também o HTTP 405, a resposta típica de um servidor do transporte antigo;
+- desvio: ele pediu para ir a outro endereço (HTTP 3xx), e o MCP-CLARO não segue;
+- não é MCP: o endereço não respondeu como servidor MCP (404 sem resposta MCP, página HTML, HTTP 406 ou 415);
+- sem acesso: ele pediu uma chave (HTTP 401, 403 ou 407);
+- inalcançável: rede, prazo esgotado, HTTP 408, 429 ou 5xx.
+
+Só o desfecho "versão" recusa o cadastro, com mensagem legível, e entra na contagem de versões antigas (decisão 8). O aceito põe em "ativo" um sistema pendente ou recusado; um sistema em quarentena ou desativado fica como está. Os desfechos sem veredito (desvio, não é MCP, sem acesso, inalcançável) não mudam a situação e não contam como versão. A recusa de um servidor de terceiros conta à parte (motivo `cadastro_terceiro`): aparece no painel e no resumo semanal, mas não dispara o alerta alto. Das versões anunciadas, o cadastro guarda só as escritas no formato AAAA-MM-DD, com algarismos comuns, até 10; o resto vira "outra". Num servidor de terceiros, do `server/discover` fica guardada só uma lista do que o cliente usa, sem nenhum texto do fornecedor. No uso diário, o cliente fica fixado na versão, com a sondagem guardada no banco. Um servidor de terceiros ativo e revisado que, numa nova sondagem, deixa de falar a 2026-07-28 entra em quarentena. Em quarentena, a sondagem não muda a situação nem o motivo: só a nova revisão do servidor o põe de volta em serviço (além dela, o banco só aceita desativá-lo).
 
 **Impressão digital das ferramentas.** O mudou-parou usa um cálculo próprio, com a biblioteca padrão do Python. Ele inclui nome, descrição, esquemas de entrada e de saída e etiquetas. A receita do FastMCP para isso deixa a descrição de fora por padrão e não serve aqui.
 
@@ -389,8 +412,8 @@ Vencida, enviada, não saiu, sistema pediu dados, cancelada, parada por bloqueio
 
 **Sem volta automática.** O guia de migração do kit diz que `Client.call_tool()` refaz sozinho as voltas de `InputRequiredResult`. Esse é o pedido de dados que o sistema devolve no meio de uma chamada. Por isso, o cliente do gateway segue três regras:
 
-- não tem `elicitation_callback` nem `sampling_callback`, e assim não responde sozinho a pedidos do sistema;
-- numa ação, `InputRequiredResult` vira o estado final "sistema pediu dados", sem segunda volta, também nos sistemas próprios;
+- não tem `elicitation_callback` nem `sampling_callback`. Sem eles, o kit ainda montaria sozinho uma resposta de erro a um pedido que o sistema faça pelo jeito antigo (pela resposta aberta, antes da 2026-07-28), e mandaria essa resposta num segundo POST, com a chave. A barreira de pedidos do cliente fixado não deixa sair nenhum POST que não seja o pedido da própria chamada: essa resposta fica no MCP-CLARO, e o sistema não recebe nada além do pedido. Cada pedido barrado vira uma categoria do nosso vocabulário ("dados por formulário", "que a pessoa abrisse um link" e outras), que vai ao extrato e, num servidor de terceiros, também ao quadro "Pedidos recusados deste sistema" na tela do ADMIN, nunca o texto, o link ou os campos que o sistema mandou. A barreira vale para todos os sistemas e corrige um defeito da Fase 2, em que o status desse segundo POST podia transformar uma ação recebida em "não saiu" ([decisões, "Mudanças deliberadas da Fase 3"](decisoes.md#mudanças-deliberadas-da-fase-3-21112026));
+- numa ação, `InputRequiredResult` vira o estado final "sistema pediu dados", sem segunda volta, também nos sistemas próprios. Numa leitura, o aplicativo recebe só um erro com texto do MCP-CLARO, que diz o que o sistema pediu; um resultado que viesse depois do pedido é descartado;
 - numa ação, não há reenvio depois de 401: o despachante renova a chave antes de enviar, e um 401 no envio vira "não saiu" (o sistema recusou na porta, antes de executar), com a chave dada como vencida: o próximo pedido a renova antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada.
 
 O `OAuthClientProvider` do kit pode reenviar um pedido depois de um 401, para renovar a chave. Isso será conferido em "Provar a base", com um sistema de teste que conta as chamadas.
@@ -494,6 +517,9 @@ Nos parâmetros usados pela Fase 2, o valor inicial vem com a faixa aceita entre
 | `GATEWAY_INTERNAL_PORT` | 8443 | Porta interna da entrada, com mTLS | Raramente |
 | `DISPATCHER_INTERNAL_PORT` | 9443 | Porta interna do despachante, para leituras e códigos de autorização vindos da entrada | Raramente |
 | `ROUTINES_INTERNAL_PORT` | 9444 | Porta interna das rotinas, só para os alertas do Grafana | Raramente |
+| `VISITS_INTERNAL_PORT` | 9446 (de 1024 a 65535) | Porta da sala de visitas, só com mTLS do despachante (Fase 3). A partida recusa porta igual à de outra peça | Raramente |
+| `VISITS_INTERNAL_URL` | `https://visitas:9446` no Compose; sem valor por padrão | Onde o despachante acha a sala. Fora de desenvolvimento e teste, é obrigatório e usa https, mesmo com a chave da Fase 3 desligada. Sem a sala, nenhum pedido MCP vai a servidor de terceiros: o despachante não fala MCP direto com eles (só os testes automáticos põem essa ligação, de propósito). A troca e a renovação da chave vão do despachante ao endereço de troca de chave de cada terceiro, com ou sem a sala | Raramente |
+| `VISITS_CA_FILE`, `VISITS_CLIENT_CERT_FILE`, `VISITS_CLIENT_KEY_FILE` | Segredos do Docker, só no despachante | Autoridade da sala (`ca_visitas`) e certificado de cliente do despachante para a sala ([segredos](segredos.md)) | No rodízio dos certificados |
 | `INTERNAL_CA_FILE` | Certificado da autoridade interna | Autoridade aceita só nas conexões internas, num contexto TLS próprio de cada destino. As conexões para fora usam o repositório do sistema, e `SSL_CERT_FILE` fica sem valor | Se a autoridade interna mudar |
 | `GATEWAY_WORKERS` | 2 | Processos da entrada | Pelo teste de carga |
 
@@ -509,6 +535,7 @@ Nos parâmetros usados pela Fase 2, o valor inicial vem com a faixa aceita entre
 | `VAULT_ADDR` | Endereço interno do cofre | Onde está o OpenBao | Na instalação |
 | `VAULT_SEAL_MODE` | `static` em teste; produção a decidir (`shamir`, `static`, `transit` ou `kms`) | Como o cofre é destravado depois de um reinício. `transit` pede outro OpenBao. `kms` usa plugin e, em geral, um serviço comercial de chaves, fora da regra do código aberto | Decisão 6 |
 | `VAULT_AUTH_METHOD` | `approle` | Login de máquina do despachante e da entrada | Raramente |
+| `VAULT_TRANSIT_KEY_THIRD_PARTY` | `mcp-claro-chaves-terceiros` | Chave Transit só dos servidores de terceiros, separada da dos sistemas próprios (`VAULT_TRANSIT_KEY`, `mcp-claro-chaves`). A partida recusa nome igual ao da outra, e o despachante não sobe se ela não existir ou não for `derived` | Nunca, depois de guardar chaves |
 | `VAULT_CHECK_SECONDS` | 15 (de 5 a 300) | A cada quantos segundos o despachante que segura a porta de saída confere a saúde do cofre | Pelo piloto |
 | `REQUEST_STATE_KEY_ROTATION_DAYS` | 30 | Rodízio da chave comum do estado das confirmações | Pela revisão de segurança |
 | `SCREENS_RECENT_LOGIN_SECONDS` | 300 (de 60 a 900) | Idade máxima do login, pela hora que o provedor assina (`auth_time`), para contar como login refeito na hora | Pela revisão de segurança |
@@ -519,7 +546,7 @@ Nos parâmetros usados pela Fase 2, o valor inicial vem com a faixa aceita entre
 | --- | --- | --- | --- |
 | `FEATURE_PHASE1_READ` | `desligado` | Leitura para pessoas reais | Liga quando a Fase 1 passa nas provas |
 | `FEATURE_PHASE2_ACT` | `desligado` | Ações com ficha e limite | Liga quando a Fase 2 passa nas provas |
-| `FEATURE_PHASE3_THIRD_PARTY` | `desligado` | Servidores de terceiros | Liga quando a Fase 3 passa nas provas |
+| `FEATURE_PHASE3_THIRD_PARTY` | `desligado` | Servidores de terceiros para pessoas reais: vitrine, chamada e reconferência na porta de saída. Desligada, o ADMIN cadastra, confere e revisa, e só pessoas de teste veem e usam terceiros. Exige `FEATURE_PHASE2_ACT`. Hoje a partida recusa o valor ligado, como `PROGRAM_ACTIONS_ENABLED` ([decisões, D6](decisoes.md#decisões-da-fase-3-servidores-de-terceiros-21112026)) | Liga só depois das provas da Fase 3 que dependem de gente e de ambiente real, por decisão registrada do dono |
 | `FEATURE_PHASE4_BADGES` | `desligado` | Selos de nível 2 e 3 | Liga quando a Fase 4 passa nas provas |
 | `FEATURE_TASKS` | `desligado` | Extensão Tasks (decisão 13) | Só com implementação própria sobre PostgreSQL e provas |
 | `FEATURE_PASSKEY` | `ligado` com a Fase 2 | Passkey nas ações de maior risco e para criar ou ampliar limites. Desligada, essas ações pedem o login refeito na hora | Desliga só pela ordem de corte |
@@ -541,7 +568,7 @@ Todos ficam na tabela de política, com registro de quem mudou. Todos são inici
 | `CARD_TTL_MINUTES` | 30 (de 1 a 1440) | Prazo de uma ficha; sem resposta, nada segue | Piloto |
 | `CONFIRM_CAP_PER_HOUR` | 10 (de 1 a 1000) | Teto de confirmações por aplicativo; acima dele, o aplicativo pausa | Piloto |
 | `CONFIRM_TOO_FAST_SECONDS` | 3 (de 0 a 60) | Confirmação mais rápida que isso entra na contagem de "rápida demais" | Piloto |
-| `THREE_SIGNALS_WINDOW_MINUTES` | 240 | Janela em que os três sinais se somam | Fase 3 |
+| `THREE_SIGNALS_WINDOW_MINUTES` | 240 (de 5 a 10080) | Janela em que os três sinais se somam, por pessoa e aplicativo. Os sinais ficam guardados 7 dias, o maior valor da faixa | Piloto, olhando quantas ações foram para a ficha pelo alerta |
 | `DUPLICATE_WINDOW_MINUTES` | 30 (de 1 a 1440) | Intervalo em que um pedido igual a uma ação que já saiu, ou ficou não confirmada, conta como repetição, desde a última mudança dela. A ação que ainda pode sair conta em qualquer idade | Piloto |
 | `BADGE_TTL_DAYS` | 90 | Validade de um selo de nível 2 ou 3 | Fase 4 |
 | `LEDGER_RETENTION_DAYS` | 730 | Guarda do extrato | Piloto e revisão de LGPD |
@@ -580,6 +607,7 @@ Todos ficam na tabela de política, com registro de quem mudou. Todos são inici
 | `WATCH_SILENCE_ALARM_SECONDS` | 900 | Silêncio que dispara o alarme do vigia | Piloto |
 | `WATCH_SMTP_*` e `WATCH_WEBHOOK_TARGETS` | Próprios do vigia | Canais de aviso do vigia | Na instalação |
 | `BACKUP_RESTORE_DRILL_DAYS` | 30 | Intervalo dos ensaios de restauração | Piloto |
+| `TOOL_DRIFT_CHECK_SECONDS` | 900 (de 60 a 86400) | Intervalo do mudou-parou, que lê de novo o que cada sistema declara. Num servidor de terceiros, qualquer mudança leva à quarentena, e duas rodadas seguidas sem resposta também | Piloto |
 
 ### Limites de pedidos e medições
 
@@ -594,7 +622,7 @@ Todos ficam na tabela de política, com registro de quem mudou. Todos são inici
 | `METRICS_HOUR_RETENTION_MONTHS` | 13 | Guarda dos resumos por hora | Piloto |
 | `METRICS_DAY_RETENTION_YEARS` | 5 | Guarda dos resumos por dia | Piloto |
 | `OBS_TRACE_ACCEPT_INBOUND` | `ligado` | Aceitar o `traceparent` do aplicativo, só para correlação | Raramente |
-| `OBS_TRACE_PROPAGATE_DOWNSTREAM` | `sistemas_proprios` | Enviar `traceparent` novo aos sistemas próprios; nunca a terceiros por padrão | Raramente |
+| `OBS_TRACE_PROPAGATE_DOWNSTREAM` | `sistemas_proprios` (aceita também `nunca`) | Enviar `traceparent` novo aos sistemas próprios. Nenhum valor libera `traceparent`, `tracestate` ou `baggage` a servidores de terceiros (D10): o cliente fixado os tira dos cabeçalhos e do corpo de todo pedido a terceiro, com ou sem rastros ligados. Hoje o parâmetro ainda não é lido: o despachante não manda `traceparent` a nenhum sistema. Com um provedor de rastros instalado (por exemplo, instrumentação automática do OpenTelemetry), o kit pode pôr um `traceparent` novo no pedido a um sistema próprio (decisão do dono); a um terceiro, nunca | Raramente |
 | `OBS_TRACES_EXPORT` | `desligado` | Exportar rastros por OTLP | Se a empresa tiver ferramenta de rastros |
 | `OBS_EXPORT_CONTENT` | `falso` | Conteúdo de ferramenta em rastros | Não muda no começo |
 | `LOG_DRIVER` | `local` | Rotação de logs do Docker; `json-file` só com o Collector. O [padrão do Docker](https://github.com/docker/docs/blob/main/content/manuals/engine/logging/configure.md) não faz rotação e pode encher o disco | Se o Collector ligar |
@@ -776,6 +804,9 @@ Prova de saída:
 - Mudança só de texto num servidor de teste leva à quarentena.
 - Três sinais juntos suspendem o limite por aproximação, e a ficha mostra o motivo.
 - Pedido de senha vindo do servidor não chega à pessoa.
+- A resposta de um servidor de terceiros chega ao aplicativo inteira dentro da marca de texto de estranhos, inclusive o erro e os dados estruturados, e nada dela passa fora da marca (prova acrescentada pela decisão D31 do desenho da Fase 3).
+
+O roteiro do ADMIN para ligar um servidor de terceiros está em [terceiros](terceiros.md). O que mudou de propósito em relação a este plano durante a Fase 3 está em [decisões, "Mudanças deliberadas da Fase 3"](decisoes.md#mudanças-deliberadas-da-fase-3-21112026). O que cada prova já tem, e o que depende de gente ou de ambiente real, está no [andamento](andamento.md#fase-3-servidores-de-terceiros).
 
 ### Fase 4: selos
 
@@ -842,26 +873,37 @@ Regras dos testes:
 | `aplicativos` | Aplicativos habilitados, identificador no provedor, família, versão do MCP vista | ADMIN, pelas telas |
 | `pessoas` | Emissor e identificador da pessoa, situação | Entrada, no primeiro login; ADMIN |
 | `programas` | Programas que rodam sozinhos, responsável, substituto, data de fim | ADMIN; responsável aprova limites |
-| `sistemas` | Endereço, tipo de chave, selo, versão, sondagem guardada, quarentena | ADMIN; rotinas marcam quarentena |
-| `ferramentas_revisadas` | Definição revisada, classe (lê, muda, tem volta), risco, campos pessoais, campos de destinatário, impressão digital | ADMIN; cada mudança vira nova versão |
+| `sistemas` | Endereço, tipo de chave, de quem é (`origem`: próprio ou terceiro), selo, versão, sondagem guardada com o desfecho e as versões anunciadas, revisão do servidor vigente, quarentena e rodadas seguidas sem resposta ao mudou-parou | ADMIN, pelas telas; despachante (sondagem, conclusão da revisão do servidor e quarentena pela sondagem); rotinas (quarentena e rodadas sem resposta) |
+| `revisoes_servidor` | Revisão de cada servidor de terceiros, uma versão por conclusão: impressão de tudo o que ele declara, impressão de cada ferramenta declarada, ferramentas publicadas na vitrine (até 500), quem fornece (de 3 a 200 letras), quem revisou e a hora do banco | Despachante, na conclusão pedida pelo ADMIN; ninguém muda nem apaga |
+| `ferramentas_revisadas` | Definição revisada, classe (lê, muda, tem volta), risco, campos pessoais, campos de destinatário, impressão digital, marca "traz texto de fora" e o que o fornecedor declarou na hora da revisão (para mostrar o antes e depois). Num servidor de terceiros, o banco liga a marca sempre e não guarda as dicas do fornecedor | ADMIN; cada mudança vira nova versão |
 | `ferramentas_vistas` | Definição que o sistema declarou na última leitura | Despachante, a pedido das rotinas |
 | `modelos_ordem` e `ordens_servico` | Ordens que existem e ordens concedidas, com prazo e situação | ADMIN; pessoa |
-| `limites` | Limites por aproximação: ferramenta, destinatários, quantidade, prazo | Pessoa, com passkey (com ela desligada, com o login refeito) |
+| `limites` | Limites por aproximação: ferramenta, destinatários, quantidade, prazo | Pessoa, com passkey (com ela desligada, com o login refeito); rotinas e despachante suspendem os do servidor que entra em quarentena (o despachante só suspende) |
 | `operacoes` | Número de protocolo, código de conferência, estado | Entrada; despachante |
-| `fichas` | Ficha montada, decisão, hora, confirmação por passkey | Entrada; pessoa |
+| `fichas` | Ficha montada, decisão, hora, confirmação por passkey e, quando ela nasce com o alerta dos três sinais ligado (pelo alerta, por risco alto ou no período de experiência), o retrato do alerta (só nomes do cadastro e horas), que não muda | Entrada; pessoa |
 | `fila_saida` | Uma linha por ação, com os estados de "A porta de saída por dentro". Cada mudança exige o estado anterior | Entrada cria; despachante envia; pessoa cancela |
 | `bloqueios` e `comprovantes` | Bloqueios e as três partes do comprovante | Pessoa ou ADMIN; despachante |
 | `chaves_cifradas` | Chaves das pessoas e dos programas, cifradas pelo Transit | Despachante |
 | `extrato` | Cada passo, em linhas só de acrescentar | Todos os papéis, por uma função própria |
 | `fechamentos` | Número de cada fechamento e o trecho que cobre | Rotinas; cópia no vigia |
 | `politica` | Valores de política, versionados, com autor | ADMIN |
-| `sinais` | Sinais do alerta dos três sinais, por pessoa e aplicativo | Entrada |
+| `sinais` | Sinais do alerta dos três sinais ("leu texto de fora" e "viu dado pessoal"), por pessoa e aplicativo, com a ferramenta, o sistema e a hora do banco; nenhum conteúdo. Um sinal não muda e só se apaga depois de 7 dias | Entrada grava; rotinas apagam os velhos, pelo menos uma vez por hora |
 | `recusas_versao` | Resumos por minuto das recusas por versão antiga, por aplicativo e por sistema | Entrada e despachante, pelos contadores |
 | `continuidade_banco` | Linha do tempo e identificador do banco vistos na última partida; marca "restaurado" | Despachante; roteiro de restauração |
 | `ronda` | Resultado de cada ronda | Rotinas |
 | `avisos` | Fila de e-mails e webhooks, com tentativas | Rotinas |
 | `medicoes_minuto`, `_hora`, `_dia` | Contagens sem pessoa e sem conteúdo | Todos os papéis; rotinas resumem |
 | `sessoes_telas` | Sessões de login das telas | Entrada |
+
+O que a migração 0006 (Fase 3) acrescenta, em palavras simples:
+
+- A `origem` de um sistema não muda, nem pelo dono das tabelas. Num servidor de terceiros, o endereço não muda depois do cadastro, e a configuração de autorização só passa de vazia a preenchida; depois, para mudar, é preciso cadastrar o servidor de novo. Assim, as chaves já guardadas não seguem para um endereço cadastrado depois. O nome do servidor continua dependendo do DNS e do certificado do fornecedor ([modelo de ameaças](modelo-de-ameacas.md#o-que-fica-de-propósito)).
+- A revisão vigente de um terceiro só vale com ele ativo, e só passa a valer na mesma transação que a grava. Sair de "ativo" (quarentena, recusa, desativação, volta a pendente) apaga a revisão vigente, e uma revisão que deixou de valer não volta. Um servidor em quarentena só sai dela para "ativo" pela conclusão de uma nova revisão do servidor, feita pelo despachante, ou para "desativado".
+- Um servidor de terceiros usa só chave por pessoa ou chave compartilhada (que só lê).
+- `sistemas.conferencias_sem_resposta`: rodadas seguidas em que o servidor não respondeu ao mudou-parou. `sistemas.conferencia_sem_resposta_em`: a hora, no relógio do banco, da última rodada somada (vazia sem soma). Só as rotinas mudam as duas. Uma rodada sem resposta só soma quando a última soma tem mais de metade de `TOOL_DRIFT_CHECK_SECONDS`; assim, duas cópias das rotinas que rodam a segundos uma da outra contam uma rodada só. Uma resposta zera a contagem e apaga a hora. A guarda do banco também zera e apaga as duas quando a revisão vigente muda: uma conclusão nova, uma quarentena ou outra saída de "ativo", ou um tipo de chave novo. Com 2 rodadas seguidas sem resposta, um servidor de terceiros entra em quarentena.
+- Para o Grafana, a visão `medicoes.v_terceiros` conta os servidores de terceiros por situação e por revisão vigente, sem nomes. A recusa por versão de um terceiro fica na visão de recusas que já existia (`medicoes.v_recusas_versao_sistema`), com o motivo `cadastro_terceiro`.
+- O extrato ganha um índice para as linhas de pedido recusado de cada sistema; num servidor de terceiros, a tela do ADMIN as mostra no quadro "Pedidos recusados deste sistema".
+- Toda função de gatilho do banco passa a rodar com o caminho de busca fixo, e o direito de criar tabela temporária no banco do gateway deixa de vir por padrão a todo usuário (`REVOKE TEMPORARY ... FROM PUBLIC`, também nos bancos que já existem). As duas medidas impedem que uma tabela temporária com o nome de uma tabela do produto mude o que as guardas leem.
 
 ### O que é só de acrescentar
 
@@ -872,12 +914,14 @@ Regras dos testes:
 - O fechamento para antes da transação aberta mais antiga (`pg_snapshot_xmin`). Assim, uma linha que termina atrasada entra no fechamento seguinte, sem falso alarme.
 - Um fechamento roda por vez, com trava consultiva própria e restrição única sobre o anterior. Alterar um trecho já fechado faz a conta refeita deixar de bater com o número guardado no vigia.
 - `fechamentos` e `ronda` também são só de acrescentar.
+- `revisoes_servidor` também é só de acrescentar: cada conclusão da revisão de um servidor de terceiros é uma versão nova. Em `sinais`, nenhuma linha muda, e uma linha só se apaga depois da maior janela possível do alerta (7 dias).
 - As medições são derivadas do extrato e nunca o contrário. Se gravar uma contagem falhar, perde-se a contagem, não o pedido.
 
 ### Cofre e chaves
 
 - O OpenBao guarda só as chaves de cifra, no motor Transit. As chaves das pessoas ficam cifradas nas tabelas do gateway, na mesma transação da fila.
 - Só o despachante tem permissão de decifrar. A entrada lê apenas a chave comum do estado das confirmações, num caminho separado.
+- As chaves guardadas para servidores de terceiros usam outra chave do Transit (`mcp-claro-chaves-terceiros`), separada da dos sistemas próprios (`mcp-claro-chaves`). As duas são `derived`: cada texto cifrado fica amarrado ao sistema. Girar, perder ou ter recusada a chave dos terceiros não toca nos sistemas próprios. O despachante escolhe a chave pela origem do sistema e, na partida, confere que a dos terceiros existe e é `derived`.
 - A chave comum do estado das confirmações tem pelo menos 32 bytes e troca em rodízio. Todas as réplicas da entrada usam a mesma.
 - Os certificados internos vêm do motor PKI do OpenBao ou do `tls internal` do Caddy. A escolha fica para "Provar a base".
 - Enquanto o cofre estiver trancado, a porta de saída fica fechada, e sai um aviso "cofre trancado". O despachante confere a saúde do cofre a cada `VAULT_CHECK_SECONDS` e logo antes de cada ação sair. Trancado, a saída fecha na primeira conferência que o encontra assim. Sem resposta, fecha na segunda conferência seguida sem resposta. A ação que espera continua liberada; quando a saída reabrir, ela é conferida de novo antes de sair.

@@ -25,6 +25,13 @@ MOTIVO_QUARENTENA: Final = (
 )
 """``sistemas.motivo`` do servidor em quarentena."""
 
+MOTIVO_QUARENTENA_VERSAO: Final = (
+    "mudou, parou: o servidor de terceiros deixou de falar a versao 2026-07-28 na sondagem; precisa de nova sondagem"
+    " e de nova revisao do ADMIN"
+)
+"""``sistemas.motivo`` do terceiro ativo e revisado que a sondagem recusou por versao (D29, ``despachante.servico``).
+As telas do ADMIN leem daqui o motivo da quarentena."""
+
 MOTIVO_PARADA: Final = "o servidor entrou em quarentena (mudou, parou); nada seguiu"
 """Desfecho da acao que esperava na fila quando o servidor entrou em quarentena."""
 

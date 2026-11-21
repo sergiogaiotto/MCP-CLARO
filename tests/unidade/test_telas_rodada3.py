@@ -30,6 +30,7 @@ from mcp_claro.telas.paginas import AVISOS, criar_ambiente
 from mcp_claro.telas.seguranca import Formulario
 from mcp_claro.telas.sessoes import Sessao
 from tests.unidade.test_telas_acoes_paginas import AGORA, _escolha, operacao
+from tests.unidade.test_telas_rodada2 import CONTEXTO_FASE3_REVISAO
 
 BASE: dict[str, Any] = {
     "sessao": None,
@@ -78,6 +79,7 @@ def _revisao(**mudar: Any) -> str:
             "campos": [],
             "destinatario": [],
         },
+        **CONTEXTO_FASE3_REVISAO,
     }
     contexto.update(mudar)
     return _render("admin/ferramenta.html", **contexto)
@@ -91,7 +93,7 @@ def test_nome_de_campo_com_escondido_e_marcado_na_revisao_e_no_limite() -> None:
     assert f'name="destinatario" value="para{ZW}" > <code>para[U+200B]</code>' in html
     assert f'name="campos" value="nome{ZW}" > <code>nome[U+200B]</code>' in html
     # O nome e o texto que o sistema declara, e o esquema de entrada.
-    assert "<h1>Revisar a ferramenta <code>enviar[U+202E]email</code></h1>" in html
+    assert '<h1>Revisar a ferramenta <code class="estranho">enviar[U+202E]email</code></h1>' in html
     assert "<title>Revisar enviar[U+202E]email" in html
     assert f'<input type="hidden" name="nome" value="enviar{RLO}email">' in html
     assert '<p class="estranho">Envia[U+202E] o e-mail.</p>' in html
@@ -135,6 +137,8 @@ def _linha_limite(ferramenta: str, com_passkey: bool, situacao: str = "ativo") -
         criado_em=agora,
         com_passkey=com_passkey,
         destinatarios=[],
+        sistema_origem="proprio",
+        sem_revisao=False,
     )
 
 
@@ -185,12 +189,26 @@ def _render_sistema() -> str:
         versao_mcp="2026-07-28",
         motivo=None,
         sondado_em=None,
+        origem="proprio",
     )
-    return _render("admin/sistema.html", sistema=sistema, vistas=[vista])
+    return _render(
+        "admin/sistema.html",
+        sistema=sistema,
+        vistas=[vista],
+        detalhe=None,
+        terceiro=None,
+        frase_sondagem=None,
+        sem_veredito=False,
+        versao_certa=True,
+        terceiros_ligados=False,
+        recusa=None,
+    )
 
 
 def _render_modelos() -> str:
-    f = SimpleNamespace(nome_vitrine=None, nome_original=f"ler{RLO}fatura", sistema="caixa", classe=None)
+    f = SimpleNamespace(
+        nome_vitrine=None, nome_original=f"ler{RLO}fatura", sistema="caixa", classe=None, origem="proprio"
+    )
     m = SimpleNamespace(nome="Ver faturas", descricao="Deixa ver.", validade_dias=10, ferramentas=[f])
     return _render("admin/modelos.html", modelos=[m], ferramentas=[], maximo_dias=30, so_leitura=False)
 
@@ -228,13 +246,13 @@ def _render_extrato() -> str:
 @pytest.mark.parametrize(
     ("onde", "montar", "marcas"),
     [
-        ("sistema", _render_sistema, ["<code>ler[U+202E]fatura</code>", "Mostra[U+200B] a fatura."]),
-        ("modelos", _render_modelos, ["<code>ler[U+202E]fatura</code>"]),
+        ("sistema", _render_sistema, ['<code class="estranho">ler[U+202E]fatura</code>', "Mostra[U+200B] a fatura."]),
+        ("modelos", _render_modelos, ['<code class="estranho">ler[U+202E]fatura</code>']),
         ("ordens", _render_ordens, ["ler[U+202E]fatura (ainda sem revisão)", "Pode ler: ler[U+202E]fatura."]),
         (
             "limite",
             lambda: _pagina_limite(_linha_limite(f"ler{RLO}fatura", True)),
-            ["<h1>Limite de ler[U+202E]fatura</h1>", "<dd>ler[U+202E]fatura, no sistema caixa</dd>"],
+            ["<h1>Limite de ler[U+202E]fatura</h1>", "<dd>ler[U+202E]fatura, no sistema <bdi>caixa</bdi></dd>"],
         ),
         (
             "limites",
@@ -307,7 +325,7 @@ class EngineFalso:
 def _telas(monkeypatch: pytest.MonkeyPatch, *, ligada: bool, form: list[tuple[str, str]]) -> Telas:
     p = Parametros(APP_ENV="teste", PUBLIC_BASE_URL="https://mcp-claro.teste", FEATURE_PASSKEY=ligada)
     t = Telas(p, ConfigTelas(), cast(Any, EngineFalso()), cast(Any, None), cast(Any, None), criar_ambiente("UTC"))
-    pessoa = SimpleNamespace(id=uuid.uuid4(), papel="pessoa", nome="Ana")
+    pessoa = SimpleNamespace(id=uuid.uuid4(), papel="pessoa", nome="Ana", teste=False)
     sessao = Sessao(b"h", cast(Any, pessoa), "csrf", datetime.now(UTC) + timedelta(hours=1), datetime.now(UTC))
 
     async def exigir(_: Any) -> Sessao:
@@ -333,6 +351,7 @@ def _consultas_falsas(monkeypatch: pytest.MonkeyPatch, nova: limites.Escolha, an
         descricao=nova.descricao,
         risco=nova.risco,
         campos_destinatario=list(nova.campos),
+        origem=nova.origem,
     )
 
     async def ferramentas(*_: Any) -> list[Any]:

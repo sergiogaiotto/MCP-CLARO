@@ -12,7 +12,7 @@
 <p>Nada sai sem a sua confirmação. Sem resposta no prazo, a ficha vence e nada segue.</p>
 {% for a in caixa.fichas %}
 <section class="cartao">
-  <h3>{{ a.op.nome_vitrine }} <span class="dica">no sistema {{ a.op.sistema_nome }}</span></h3>
+  <h3>{{ a.op.nome_vitrine }} <span class="dica">no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi></span>{% if a.op.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}</h3>
   <p>Protocolo <code>{{ a.op.protocolo }}</code>. Código de conferência <strong>{{ a.op.codigo_conferencia }}</strong>.</p>
   <p>{% if a.prazo > 0 %}Faltam {{ a.prazo_texto }} para decidir.{% else %}O prazo para decidir acabou.{% endif %}
     {% if a.op.ficha_exige_passkey and passkey_ligada %}<span class="etiqueta ruim">Risco alto: pede a passkey</span>{% elif a.de_risco_alto %}<span class="etiqueta ruim">Risco alto: pede login refeito</span>{% endif %}</p>
@@ -26,7 +26,7 @@
 <p>Já confirmadas. Até a hora de sair, ainda dá para cancelar.</p>
 <ul>
   {% for a in caixa.espera %}
-  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema {{ a.op.sistema_nome }}. Sai às {{ a.hora_saida }} (horário de Brasília).</li>
+  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>{% if a.op.de_terceiro %} (de terceiros){% endif %}. Sai às {{ a.hora_saida }} (horário de Brasília).</li>
   {% endfor %}
 </ul>
 {% endif %}
@@ -36,7 +36,7 @@
 <p>O pedido pode ter chegado ao sistema, mas a resposta não chegou inteira. Nada será reenviado. Conte para nós o que aconteceu.</p>
 <ul>
   {% for a in caixa.confirmando %}
-  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema {{ a.op.sistema_nome }}. Falta a sua decisão.</li>
+  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>{% if a.op.de_terceiro %} (de terceiros){% endif %}.{% if a.nao_chegou %} Esta ação foi dada como não confirmada antes de o envio terminar. Pelo que o MCP-CLARO viu depois, o pedido não chegou ao sistema.{% endif %} Falta a sua decisão.</li>
   {% endfor %}
 </ul>
 {% endif %}

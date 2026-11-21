@@ -5,7 +5,7 @@
 <section class="cartao comprovante">
   <dl>
     <dt>Número de protocolo</dt><dd><code>{{ a.op.protocolo }}</code></dd>
-    <dt>O quê</dt><dd>{{ a.op.nome_vitrine }}, no sistema {{ a.op.sistema_nome }}</dd>
+    <dt>O quê</dt><dd>{{ a.op.nome_vitrine }}, no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>{% if a.op.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}</dd>
     <dt>Pedida em</dt><dd>{{ a.op.criada_em | data_hora }}</dd>
     <dt>Código de conferência</dt><dd><strong>{{ a.op.codigo_conferencia }}</strong></dd>
     <dt>Como passou</dt><dd>{{ a.como }}</dd>

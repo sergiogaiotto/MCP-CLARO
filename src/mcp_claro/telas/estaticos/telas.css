@@ -91,3 +91,6 @@ ul.ferramentas { margin: .25rem 0; padding-left: 1.25rem; }
    texto nao mexer no outro. Os caracteres escondidos ja chegam trocados por marcas como [U+202E]. */
 bdi { unicode-bidi: isolate; }
 .dado, .dado bdi { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Fase 3, telas do ADMIN: passos para sair da quarentena e o antes e depois do texto do fornecedor. */
+.passos { margin: .5rem 0; padding-left: 1.5rem; }
+.antes-depois { border-top: 1px solid var(--linha); margin-top: .75rem; padding-top: .5rem; }

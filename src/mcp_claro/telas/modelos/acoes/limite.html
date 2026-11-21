@@ -1,19 +1,26 @@
 {% extends "base.html" %}
 {% block titulo %}Limite de {{ l.linha.ferramenta | escondidos }}{% endblock %}
 {% block conteudo %}
-<h1>Limite de {{ l.linha.ferramenta | escondidos }}</h1>
+{# O titulo da aba nao aceita classe: la, o nome de fora vai so com o filtro. No h1, como texto do fornecedor. #}
+<h1>Limite de {% if l.nome_de_fora %}<span class="estranho">{{ l.linha.ferramenta | escondidos }}</span>{% else %}{{ l.linha.ferramenta | escondidos }}{% endif %}</h1>
 <section class="cartao comprovante">
   <dl>
-    <dt>Ação</dt><dd>{{ l.linha.ferramenta | escondidos }}, no sistema {{ l.linha.sistema }}</dd>
-    <dt>Aplicativo</dt><dd>{{ l.linha.aplicativo }}</dd>
+    <dt>Ação</dt><dd>{% if l.nome_de_fora %}<span class="estranho">{{ l.linha.ferramenta | escondidos }}</span>{% else %}{{ l.linha.ferramenta | escondidos }}{% endif %}, no sistema <bdi>{{ l.linha.sistema | escondidos }}</bdi>{% if l.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}</dd>
+    <dt>Aplicativo</dt><dd><bdi>{{ l.linha.aplicativo | escondidos }}</bdi></dd>
     <dt>Destinatários</dt><dd>{{ l.destinatarios }}</dd>
     <dt>Por dia</dt><dd>até {{ l.linha.por_dia }} vezes; hoje, {{ l.linha.usados_hoje }}</dd>
     <dt>Até</dt><dd>{{ l.linha.valido_ate | data_hora }}</dd>
-    <dt>Situação</dt><dd>{{ l.situacao }}{% if l.linha.motivo %} ({{ l.linha.motivo }}){% endif %}</dd>
+    <dt>Situação</dt><dd>{{ l.situacao }}{% if l.motivo %} ({{ l.motivo }}){% endif %}</dd>
     <dt>Criado em</dt><dd>{{ l.linha.criado_em | data_hora }}</dd>
     <dt>Passkey</dt><dd id="passkey-do-limite">{% if l.linha.com_passkey %}Pedida ao criar e a cada ampliação{% else %}Criado ou ampliado sem a passkey{% endif %}</dd>
   </dl>
 </section>
+{% if l.linha.situacao == "suspenso" %}
+<p class="atencao" id="limite-suspenso">Este limite está suspenso: o servidor deste sistema entrou em quarentena. Ele não volta sozinho. Depois que o ADMIN revisar o servidor de novo, crie outro limite, se ainda precisar.</p>
+{% endif %}
+{% if alertas is defined and alertas %}
+<p class="atencao" role="status" id="alerta-tres-sinais">{% for x in alertas %}Enquanto durar o alerta dos três sinais (até {{ x.ate }}), seus limites com <bdi>{{ x.aplicativo | escondidos }}</bdi> não valem.{% endfor %} Nesse tempo, cada ação desse aplicativo passa pela ficha. A hora é a de Brasília.</p>
+{% endif %}
 {% if l.nao_vale_com_passkey %}
 <p class="atencao" id="nao-vale-com-passkey"><strong>Não vale com a passkey ligada.</strong> Este limite foi criado ou ampliado sem a passkey, quando ela estava desligada nesta instalação. Agora que a passkey está ligada, ele não é usado: as ações dele passam pela ficha. Ele também não pode ser ampliado. Para voltar a ter um limite, encerre este e crie outro, com a passkey.</p>
 {% endif %}

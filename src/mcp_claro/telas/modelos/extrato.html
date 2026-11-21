@@ -19,11 +19,14 @@
       <td>{{ l.criado_em | data_hora }}</td>
       <td>{{ l.frase | escondidos }}{% if l.protocolo %} <span class="dica">Protocolo {{ l.protocolo }}.</span>{% endif %}</td>
       <td>{{ l.aplicativo or "" }}</td>
-      <td>{{ l.sistema or "" }}</td>
+      <td>{% if l.sistema %}<bdi>{{ l.sistema | escondidos }}</bdi>{% endif %}{% if l.sistema_origem is defined and l.sistema_origem and l.sistema_origem != "proprio" %} <span class="etiqueta">de terceiros</span>{% endif %}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+{% if linhas | selectattr("sistema_origem", "defined") | selectattr("sistema_origem") | rejectattr("sistema_origem", "equalto", "proprio") | list %}
+<p class="dica" id="dica-terceiro">O MCP-CLARO não repassa a você pedidos de dados, links ou confirmações que um sistema faça no meio de uma chamada. Um texto de resposta ainda pode trazer um link: confirme ações só na tela do MCP-CLARO.</p>
+{% endif %}
 {% endif %}
 <nav class="paginas" aria-label="Páginas do extrato">
   <span>{% if pagina > 1 %}<a href="{{ base }}?pagina={{ pagina - 1 }}">Mais novas</a>{% endif %}</span>

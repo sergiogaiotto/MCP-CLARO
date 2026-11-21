@@ -22,8 +22,9 @@ listas (``publicar``). Os argumentos de uma leitura nao entram nessa regra: vao 
 
 Toda conversa com um sistema sai por um ponto so (``Despachante.ligacao``, ``ligacao.ponto.ligacao_para``), o
 mesmo da porta de saida: sistema proprio pelo cliente fixado; servidor de terceiros pela sala de visitas
-(``ClienteSala``, montado aqui a partir de ``VISITS_INTERNAL_URL``; sem sala, nada vai ao terceiro). A cifra e por
-origem (``cifra_origem.CifraPorOrigem``): a chave Transit dos terceiros e outra.
+(``ClienteSala``, montado aqui a partir de ``VISITS_INTERNAL_URL``; sem sala, nenhum pedido MCP vai ao terceiro, e
+so a troca e a renovacao da chave (OAuth) saem daqui, para o endereco de troca de chave do terceiro, conferido
+antes). A cifra e por origem (``cifra_origem.CifraPorOrigem``): a chave Transit dos terceiros e outra.
 
 Na partida, depois da conferencia de continuidade, sobe a porta unica de saida (``saida.despachante``):
 a fila de acoes e enviada por um despachante so, mesmo com varias copias do papel no ar. Quando o papel entra
