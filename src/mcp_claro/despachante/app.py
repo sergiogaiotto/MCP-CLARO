@@ -6,9 +6,12 @@ Rotas internas (nunca expostas ao portao):
 - ``POST /interno/sondar``: sondagem de versao no cadastro de um sistema (com o desfecho e as versoes anunciadas;
   sistema desconhecido: 404);
 - ``POST /interno/declaracoes``: le o que o sistema declara (revisao e mudou-parou). 502
-  ``declaracoes_indisponiveis`` quando o sistema nao entregou; 503 com motivo proprio quando a falha e do
-  MCP-CLARO (``sala_fora``: a sala de visitas fora; ``chave_indisponivel``: o cofre nao abriu a chave das
-  declaracoes), para as rotinas nao contarem a rodada como "sem resposta" do servidor (critica A5);
+  ``declaracoes_indisponiveis`` quando o sistema nao entregou, inclusive quando declarou o que o banco nao guarda
+  (``servico._listar``); 503 com motivo proprio quando a falha e do MCP-CLARO (``sala_fora``: a sala de visitas
+  fora; ``sala_sem_vaga``: a sala cheia, dita pelo processo pai dela; ``chave_indisponivel``: o cofre nao abriu a
+  chave das declaracoes; ``conferencia_nao_feita``: o banco ou o grupo de conexoes do despachante falhou, por
+  exemplo um impasse ou todas as conexoes ocupadas, contrato K5), para as rotinas nao contarem a rodada como "sem
+  resposta" do servidor (critica A5). O log dessa falha leva so o tipo do erro;
 - ``POST /interno/revisao_servidor``: conclusao da revisao de um servidor de terceiros pelo ADMIN (texto que o
   banco nao guarda, com caractere nulo ou com um pedaco de par UTF-16 sozinho, e pedido invalido: 400);
 - ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN);
@@ -39,9 +42,10 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, TypeIs
+from typing import Any, Final, TypeIs
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -73,6 +77,14 @@ from mcp_claro.versao import VERSAO_MCP
 from mcp_claro.visitas.tls import contexto_do_despachante
 
 log = logger("mcp_claro.despachante.app")
+
+FALHA_DO_BANCO: Final = (SQLAlchemyError, TimeoutError, OSError)
+"""Falha do MCP-CLARO no banco ou no grupo de conexoes do despachante (erro do banco, impasse, conexao que nao abre,
+pool sem conexao livre): nas declaracoes, a rodada nao conta contra o servidor (contrato K5). O erro do banco causado
+pelo que o servidor declarou nao chega aqui: ``servico._listar`` o levanta como ``DeclaracoesIndisponiveis`` (502),
+que conta."""
+CONFERENCIA_NAO_FEITA: Final = "conferencia_nao_feita"
+MENSAGEM_SEM_BANCO: Final = "o MCP-CLARO nao conseguiu usar o banco; a rodada nao conta"
 
 
 def _uuid(valor: Any) -> uuid.UUID | None:
@@ -319,6 +331,10 @@ def criar_app_despachante(
             return JSONResponse({"motivo": erro.motivo, "mensagem": str(erro)}, status_code=503)
         except DeclaracoesIndisponiveis as erro:
             return JSONResponse({"motivo": "declaracoes_indisponiveis", "mensagem": str(erro)}, status_code=502)
+        except FALHA_DO_BANCO as erro:
+            # Falha nossa, nao do servidor: 503 com motivo, nunca 500 (as rotinas contariam "sem resposta").
+            log.warning("declaracoes_sem_banco", erro=type(erro).__name__)
+            return JSONResponse({"motivo": CONFERENCIA_NAO_FEITA, "mensagem": MENSAGEM_SEM_BANCO}, status_code=503)
         return JSONResponse({"ferramentas": ferramentas})
 
     async def guardar_chave(pedido: Request) -> JSONResponse:

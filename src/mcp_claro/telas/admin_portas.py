@@ -25,12 +25,12 @@ from mcp_claro.despachante.autorizacao import (
     AUTENTICACOES,
     MENSAGEM_TERCEIRO_JA_CONFIGURADO,
     ConfiguracaoAutorizacaoInvalida,
+    caminho_da_volta,
 )
 from mcp_claro.logs import logger
 from mcp_claro.regras import bloqueios, estado
 from mcp_claro.regras.bloqueios import ALCANCES, CAMPOS_POR_ALCANCE, TIPOS, BloqueioInvalido, SemPermissao
 from mcp_claro.telas import consultas
-from mcp_claro.telas.autorizar import CAMINHO_VOLTA
 from mcp_claro.telas.bloqueio import ALCANCES_LEGIVEIS, parada, quem_legivel
 from mcp_claro.telas.nucleo import Interrompe, Telas, tela, uuid_ou_none, ver_depois
 from mcp_claro.telas.seguranca import Formulario
@@ -368,7 +368,9 @@ class TelasDoAdminPortas:
                 "entregas": entregas,
                 "programas": programas,
                 "autenticacoes": AUTENTICACOES,
-                "redirect_uri": self.t.p.PUBLIC_BASE_URL + CAMINHO_VOLTA,
+                # O endereco de volta que o ADMIN cadastra: o de um servidor de terceiros e so dele.
+                "redirect_uri": self.t.p.PUBLIC_BASE_URL
+                + caminho_da_volta(sistema.id if sistema.origem != "proprio" else None),
                 "erros": erros or [],
                 "valores": valores,
             },

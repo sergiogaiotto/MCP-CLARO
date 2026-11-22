@@ -11,6 +11,15 @@ O gateway e cliente OAuth de cada sistema com ``tipo_chave = 'por_pessoa'``. O c
    (uso unico, prazo, mesma pessoa), troca o codigo no ``token_endpoint`` e grava as chaves de acesso
    e de renovacao cifradas pelo Transit. A entrada nunca ve as chaves.
 
+Endereco de volta (``caminho_da_volta``): os sistemas proprios voltam por ``/telas/autorizar/volta``, o endereco
+cadastrado desde a Fase 2; cada servidor de terceiros volta por um endereco so dele,
+``/telas/autorizar/<id do sistema>/volta``, e as telas dizem ao despachante por qual endereco a volta chegou
+(``sistema_id``). Isso fecha a mistura de servidores de autorizacao (RFC 9700, 4.4): um terceiro que mande a pessoa a
+pagina de autorizacao de outro sistema, com o estado dele, recebe a volta pelo endereco do outro sistema, e o
+despachante recusa (``estado_de_outro_sistema``) antes de abrir o segredo do cliente, decifrar o verificador ou trocar
+o codigo. Nada vai a ninguem. Supoe que o servidor de autorizacao de cada sistema so aceita o endereco de volta que
+tem cadastrado (RFC 6749, 3.1.2). O ``iss`` na volta (RFC 9207) ainda nao e conferido.
+
 Configuracao em ``sistemas.autorizacao`` (jsonb), conferida por ``ConfigAutorizacao.de_json``::
 
     {"authorization_endpoint": "https://...", "token_endpoint": "https://...",
@@ -23,19 +32,24 @@ sem aplicativo, tipo ``acesso``, cifrado com contexto proprio (``|cliente-oauth`
 o sistema mude para chave compartilhada, essa linha nao decifra como chave compartilhada e nunca vai
 ao sistema como ``Bearer``.
 
-Todo HTTP de saida vai pelo ``httpx2``, sem seguir redirecionamento, sem proxy do ambiente, com
-prazo curto e resposta de tamanho limitado. Nada de chave, codigo ou verificador vai ao log ou ao
-extrato.
+Todo HTTP de saida vai pelo ``httpx2``, sem seguir redirecionamento, sem proxy do ambiente e com resposta de
+tamanho limitado. A troca inteira (abrir a conexao, o POST e ler o corpo) tem prazo total ``PRAZO_TROCA``; o
+prazo de leitura do httpx sozinho nao basta, porque vale para cada pedaco lido. A renovacao espera
+a trava de outra renovacao do mesmo par no maximo ``ESPERA_TRAVA_RENOVACAO`` (``travar_com_prazo``). Nada de chave,
+codigo ou verificador vai ao log ou ao extrato.
 
 Servidor de terceiros (Fase 3):
 
-- a troca do codigo e a renovacao ficam no despachante (codigo nosso, pequeno, com teto), mas o ``token_endpoint``
+- a troca do codigo e a renovacao ficam no despachante (codigo nosso, pequeno, com teto de tamanho e o prazo
+  total ``PRAZO_TROCA``), mas o ``token_endpoint``
   passa antes pela mesma conferencia do endereco combinado da sala (https, sem usuario nem fragmento, todo IP
   publico: ``ligacao.cliente.conferir_endereco_terceiro``). Endereco recusado: nada sai e o extrato ganha
   ``sala_endereco_recusado``;
 - com a chave da Fase 3 desligada, so pessoa de teste autoriza um terceiro (``terceiros_desligados``);
 - a configuracao de um terceiro so passa de vazia a preenchida: depois disso ``configurar`` recusa ("Para mudar,
-  cadastre o servidor de novo."), como a guarda do banco (critica M1).
+  cadastre o servidor de novo."), como a guarda do banco (critica M1);
+- o ``redirect_uri`` de um terceiro precisa ser o endereco de volta dele (``iniciar_autorizacao`` recusa outro), e a
+  volta de um terceiro so e aceita por esse endereco.
 """
 
 from __future__ import annotations
@@ -79,6 +93,15 @@ PRAZO_PENDENTE: Final = timedelta(minutes=10)
 """Prazo para a pessoa voltar da pagina do sistema com o codigo."""
 
 TAMANHO_MAXIMO_RESPOSTA: Final = 64 * 1024
+PRAZO_TROCA: Final = 15.0
+"""Segundos para a troca inteira no ``token_endpoint`` (abrir a conexao, o POST e ler o corpo). Num terceiro, a
+conferencia do endereco vem antes, com o prazo dela (``cliente.PRAZO_CONEXAO``)."""
+ESPERA_TRAVA_RENOVACAO: Final = 3.0
+"""Segundos que uma renovacao espera a trava do par (pessoa, sistema) segura por outra renovacao."""
+CAMINHO_VOLTA_PROPRIOS: Final = "/telas/autorizar/volta"
+"""Endereco de volta dos sistemas proprios (o cadastrado nos servidores de autorizacao desde a Fase 2)."""
+ESTADO_DE_OUTRO_SISTEMA: Final = "estado_de_outro_sistema"
+MENSAGEM_ESTADO_DE_OUTRO_SISTEMA: Final = "Este pedido de autorizacao e de outro sistema. Nada foi guardado."
 VALIDADE_MAXIMA: Final = timedelta(days=366)
 _CAMPOS_CONFIG: Final = frozenset(
     {"authorization_endpoint", "token_endpoint", "client_id", "escopos", "autenticacao_cliente", "recurso"}
@@ -382,8 +405,32 @@ def chave_da_trava(pessoa_id: uuid.UUID, sistema_id: uuid.UUID) -> int:
 
 
 async def travar(c: AsyncConnection, pessoa_id: uuid.UUID, sistema_id: uuid.UUID) -> None:
-    """Trava consultiva do par (pessoa, sistema) ate o fim da transacao: uma troca ou renovacao por vez."""
+    """Trava consultiva do par (pessoa, sistema) ate o fim da transacao: uma troca ou renovacao por vez.
+
+    Espera sem prazo: so para quem nao fala com ninguem de dentro da trava (concluir e derrubar)."""
     await c.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": chave_da_trava(pessoa_id, sistema_id)})
+
+
+async def travar_com_prazo(
+    c: AsyncConnection, pessoa_id: uuid.UUID, sistema_id: uuid.UUID, *, prazo: float = ESPERA_TRAVA_RENOVACAO
+) -> bool:
+    """A mesma trava de ``travar``, esperando no maximo ``prazo`` segundos (relogio monotonico).
+
+    Para a renovacao, que troca a chave de dentro da trava: quem a segura pode estar esperando um servidor de
+    autorizacao lento (ate ``PRAZO_TROCA``). Tenta com ``pg_try_advisory_xact_lock``, que nunca espera no banco, e
+    entre uma tentativa e outra so dorme. ``False``: sem a trava; a transacao segue sem nada feito, e quem chamou
+    desiste e a fecha, devolvendo a conexao ao pool."""
+    chave = chave_da_trava(pessoa_id, sistema_id)
+    fim = anyio.current_time() + prazo
+    pausa = 0.02
+    while True:
+        if (await c.execute(text("SELECT pg_try_advisory_xact_lock(:k)"), {"k": chave})).scalar_one():
+            return True
+        resta = fim - anyio.current_time()
+        if resta <= 0:
+            return False
+        await anyio.sleep(min(pausa, resta))
+        pausa = min(pausa * 2, 0.2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +506,11 @@ async def trocar(
 
     ``terceiro``: o endereco passa antes pela conferencia da sala (https e IP publico; ``liberar_locais`` so vale
     em desenvolvimento e teste). Recusado, levanta ``TrocaRecusada(ENDERECO_RECUSADO)`` sem nada enviado.
+
+    A troca inteira (abrir a conexao, o POST e ler o corpo) tem ``PRAZO_TROCA`` segundos, para proprio e para
+    terceiro: o prazo de leitura do httpx vale por pedaco lido, e um servidor que manda um byte por vez seguraria a
+    troca por horas. Esgotado, levanta ``TrocaIndisponivel("prazo")`` (o pedido pode ter chegado ao servidor; nada e
+    guardado). A conferencia do endereco de um terceiro vem antes, com o prazo dela (``cliente.PRAZO_CONEXAO``).
     """
     if terceiro:
         await _conferir_troca_de_terceiro(config.token_endpoint, ambiente, liberar_locais)
@@ -473,17 +525,20 @@ async def trocar(
         corpo["client_id"] = config.client_id
     bruto = b""
     try:
-        async with (
-            http_para_autorizacao() as http,
-            http.stream("POST", config.token_endpoint, data=corpo, headers=cabecalhos) as resposta,
-        ):
-            async for pedaco in resposta.aiter_bytes():
-                bruto += pedaco
-                if len(bruto) > TAMANHO_MAXIMO_RESPOSTA:
-                    raise TrocaRecusada("resposta_grande_demais")
-            status = resposta.status_code
+        with anyio.fail_after(PRAZO_TROCA):
+            async with (
+                http_para_autorizacao() as http,
+                http.stream("POST", config.token_endpoint, data=corpo, headers=cabecalhos) as resposta,
+            ):
+                async for pedaco in resposta.aiter_bytes():
+                    bruto += pedaco
+                    if len(bruto) > TAMANHO_MAXIMO_RESPOSTA:
+                        raise TrocaRecusada("resposta_grande_demais")
+                status = resposta.status_code
     except httpx2.HTTPError as erro:
         raise TrocaIndisponivel(type(erro).__name__) from None
+    except TimeoutError:
+        raise TrocaIndisponivel("prazo") from None
     if status >= 500 or status == 429:
         raise TrocaIndisponivel(f"http {status}")
     if status != 200:
@@ -528,6 +583,17 @@ async def guardar_resposta(
 
 
 # --- Os tres passos --------------------------------------------------------------------------------
+
+
+def caminho_da_volta(sistema_id: uuid.UUID | None) -> str:
+    """Caminho da volta nas telas: o de um servidor de terceiros (``sistema_id``) ou, sem ele, o dos proprios."""
+    return CAMINHO_VOLTA_PROPRIOS if sistema_id is None else f"/telas/autorizar/{sistema_id}/volta"
+
+
+def _volta_do_terceiro(redirect_uri: str, sistema_id: uuid.UUID) -> bool:
+    """O ``redirect_uri`` de um terceiro termina no endereco de volta dele, sem consulta."""
+    partes = urlsplit(redirect_uri)
+    return partes.path.endswith(caminho_da_volta(sistema_id)) and not partes.query
 
 
 def montar_url(config: ConfigAutorizacao, *, estado: str, desafio: str, redirect_uri: str, recurso: str) -> str:
@@ -579,12 +645,19 @@ async def iniciar_autorizacao(
     Grava na transacao do chamador. ``cifra`` so precisa cifrar (a entrada nunca decifra o
     verificador; quem decifra e o despachante, na volta). Levanta ``AutorizacaoRecusada``.
     ``terceiros_ligados``: a chave da Fase 3; desligada, so pessoa de teste autoriza um terceiro.
+    Num terceiro, ``redirect_uri`` precisa terminar no endereco de volta dele (``caminho_da_volta``).
     """
     try:
         conferir_endereco(redirect_uri, "redirect_uri")
     except ConfiguracaoAutorizacaoInvalida as erro:
         raise AutorizacaoRecusada("redirect_uri_invalido", str(erro)) from None
     sistema = await carregar_sistema(conexao, sistema_id)
+    if sistema.de_terceiro and not _volta_do_terceiro(redirect_uri, sistema.id):
+        raise AutorizacaoRecusada(
+            "redirect_uri_invalido",
+            "O endereco de volta de um servidor de terceiros precisa ser o dele"
+            f" ({caminho_da_volta(sistema.id)}). Nada foi guardado.",
+        )
     await _conferir_pessoa_e_sistema(conexao, pessoa_id, sistema, terceiros_ligados=terceiros_ligados)
     estado = secrets.token_urlsafe(32)
     verificador = novo_verificador()
@@ -691,20 +764,43 @@ async def _gastar_estado(engine: AsyncEngine, estado: str, pessoa_id: uuid.UUID)
     raise await _recusar(engine, motivo, _MENSAGENS_ESTADO[motivo], pessoa_id=pessoa_id, sistema_id=sistema_id)
 
 
+def _conferir_volta(sistema: SistemaAutorizavel, sistema_da_volta: uuid.UUID | None) -> None:
+    """A volta chegou pelo endereco do sistema da pendencia? Pelo de outro sistema, ou um terceiro pela volta dos
+    proprios: o codigo pode ser de outro servidor de autorizacao (mistura), e nada pode ir ao deste."""
+    pela_volta_dos_proprios = sistema_da_volta is None
+    de_outro = sistema.de_terceiro if pela_volta_dos_proprios else sistema_da_volta != sistema.id
+    if de_outro:
+        log.warning(
+            "autorizacao_de_outro_sistema", sistema=sistema.nome, pela_volta_dos_proprios=pela_volta_dos_proprios
+        )
+        raise AutorizacaoRecusada(ESTADO_DE_OUTRO_SISTEMA, MENSAGEM_ESTADO_DE_OUTRO_SISTEMA)
+
+
 async def _preparar_troca(
-    engine: AsyncEngine, cifra: Cifra, pendente: _Pendente, pessoa_id: uuid.UUID, *, terceiros_ligados: bool
+    engine: AsyncEngine,
+    cifra: Cifra,
+    pendente: _Pendente,
+    pessoa_id: uuid.UUID,
+    *,
+    terceiros_ligados: bool,
+    sistema_da_volta: uuid.UUID | None,
 ) -> tuple[SistemaAutorizavel, str | None]:
+    """Le o sistema da pendencia, confere a pessoa, o sistema e o endereco da volta, e so depois abre o segredo do
+    cliente. Toda recusa daqui sai antes de abrir segredo, decifrar o verificador ou trocar o codigo."""
     recusa: AutorizacaoRecusada | None = None
+    nome = "desconhecido"
     async with engine.connect() as c:
         try:
             sistema = await carregar_sistema(c, pendente.sistema_id)
+            nome = sistema.nome
             await _conferir_pessoa_e_sistema(c, pessoa_id, sistema, terceiros_ligados=terceiros_ligados)
+            _conferir_volta(sistema, sistema_da_volta)
             segredo = await abrir_segredo_cliente(c, cifra, sistema.id) if sistema.config.usa_segredo else None
         except AutorizacaoRecusada as erro:
             recusa = erro
     if recusa is not None:
         raise await _recusar(
-            engine, recusa.motivo, recusa.mensagem, pessoa_id=pessoa_id, sistema_id=pendente.sistema_id
+            engine, recusa.motivo, recusa.mensagem, pessoa_id=pessoa_id, sistema_id=pendente.sistema_id, sistema=nome
         )
     return sistema, segredo
 
@@ -720,6 +816,7 @@ async def concluir_autorizacao(
     ambiente: str = "producao",
     liberar_locais: bool = False,
     terceiros_ligados: bool = False,
+    sistema_id: uuid.UUID | None = None,
 ) -> Concluida:
     """Despachante: confere o estado, troca o codigo pela chave e grava tudo cifrado.
 
@@ -728,13 +825,20 @@ async def concluir_autorizacao(
     guardado. Toda recusa vai ao extrato e levanta ``AutorizacaoRecusada``. Num terceiro, o
     ``token_endpoint`` passa antes pela conferencia do endereco combinado (``ambiente`` e
     ``liberar_locais``, este so em desenvolvimento e teste).
+
+    ``sistema_id``: o sistema do endereco por onde a volta chegou (``/telas/autorizar/<id>/volta``); ``None`` e a
+    volta dos proprios. Diferente do sistema da pendencia, ou ``None`` com a pendencia de um terceiro, a recusa e
+    ``estado_de_outro_sistema``, depois de gastar o estado e antes de abrir o segredo, decifrar o verificador ou
+    trocar o codigo: o codigo pode ser de outro servidor de autorizacao (mistura), e nada vai a ninguem.
     """
     if not estado or len(estado) > 256 or (codigo is not None and not _VISIVEL.match(codigo)):
         raise await _recusar(
             engine, "pedido_invalido", "Pedido de autorizacao invalido.", pessoa_id=pessoa_id, sistema_id=None
         )
     pendente = await _gastar_estado(engine, estado, pessoa_id)
-    sistema, segredo = await _preparar_troca(engine, cifra, pendente, pessoa_id, terceiros_ligados=terceiros_ligados)
+    sistema, segredo = await _preparar_troca(
+        engine, cifra, pendente, pessoa_id, terceiros_ligados=terceiros_ligados, sistema_da_volta=sistema_id
+    )
     if erro is not None or not codigo:
         codigo_erro = erro if erro in _ERROS_OAUTH else "outro"
         raise await _recusar(
@@ -942,6 +1046,12 @@ class _PortaAutorizacao:
         pessoa_id, estado = _uuid(corpo.get("pessoa_id")), _texto(corpo.get("estado"))
         if pessoa_id is None or estado is None:
             return _invalido("estado e pessoa_id sao obrigatorios.")
+        # O sistema do endereco por onde a volta chegou: opcional (sem ele, a volta dos proprios), mas, se veio,
+        # precisa ser um uuid. Invalido, nada e conferido e o estado nao e gasto.
+        bruto = corpo.get("sistema_id")
+        sistema_id = _uuid(bruto) if isinstance(bruto, str) else None
+        if bruto is not None and sistema_id is None:
+            return _invalido("sistema_id invalido.")
         try:
             feito = await concluir_autorizacao(
                 engine,
@@ -953,6 +1063,7 @@ class _PortaAutorizacao:
                 ambiente=self._ambiente,
                 liberar_locais=self._liberar_locais,
                 terceiros_ligados=self._terceiros_ligados,
+                sistema_id=sistema_id,
             )
         except AutorizacaoRecusada as recusa:
             return JSONResponse(
@@ -1031,7 +1142,8 @@ def rotas_autorizacao(
 ) -> list[Route]:
     """Rotas internas do despachante (so com mTLS da entrada), ja ligadas ao ``engine`` e a ``cifra``.
 
-    - ``POST /interno/autorizacao/concluir`` {estado, pessoa_id, codigo | erro}: a volta da pagina do sistema;
+    - ``POST /interno/autorizacao/concluir`` {estado, pessoa_id, codigo | erro, sistema_id?}: a volta da pagina do
+      sistema (``sistema_id``: o do endereco por onde ela chegou; sem ele, a volta dos proprios);
     - ``POST /interno/autorizacao/iniciar`` {pessoa_id, sistema_id, redirect_uri}: alternativa a chamar
       ``iniciar_autorizacao`` na entrada, para quando a entrada nao puder cifrar no cofre;
     - ``POST /interno/autorizacao/derrubar`` {pessoa_id, motivo, sistema_id?}: ao desativar a pessoa;

@@ -28,7 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import repositorio
-from mcp_claro.cadastro.esquema import CampoDesconhecido, EsquemaRecusado
+from mcp_claro.cadastro.esquema import CampoDesconhecido, EsquemaRecusado, nomes_neutros
 from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import FIM_DA_DESCRICAO_TERCEIRO, FerramentaVitrine
 from mcp_claro.config.settings import Parametros
@@ -552,11 +552,15 @@ async def test_revisao_de_terceiro_recusa_palavras_referencias_e_esquema_caro_e_
 
 async def test_esquema_no_teto_de_escolhas_e_bytes_e_gravado_e_chamado(dono: AsyncEngine) -> None:
     # No teto exato (1000 valores no enum, 256 KiB), a revisao grava; a vitrine mostra o esquema inteiro, e a copia
-    # para chamar (sem nada a afrouxar) e igual a ele. A definicao booleana vale.
+    # para chamar (sem nada a afrouxar) e igual a ele. A definicao booleana vale. O nome dela e do fornecedor: vai
+    # gravado com o nome neutro (R6b-1, contrato K3), depois da conferencia dos bytes.
     cena = await _cena(dono)
-    esquema = _no_teto_de_largura()
+    declarado = _no_teto_de_largura()
+    esquema = nomes_neutros(declarado)
+    assert esquema["$defs"] == {"d1": True}
+    assert esquema["properties"]["livre"] == {"$ref": "#/$defs/d1"}
     async with dono.begin() as c:
-        ferramenta = await _revisar(c, cena.terceiro_id, definicao("consultar_saldo", f"{MARCA}", esquema=esquema))
+        ferramenta = await _revisar(c, cena.terceiro_id, definicao("consultar_saldo", f"{MARCA}", esquema=declarado))
         await gravar_revisao_do_servidor(c, cena.terceiro_id, [ferramenta, cena.b])
         gravado = (
             await c.execute(text("SELECT esquema_entrada FROM ferramentas_revisadas WHERE id = :i"), {"i": ferramenta})
@@ -612,9 +616,12 @@ async def test_regra_cara_e_lista_unica_sao_gravadas_e_nao_valem_para_chamar(don
     pedido = {"conta": ataque, **{f"t{i}": ataque for i in range(len(_ATAQUES) - 1)}}
     pedido["lista"] = [{"n": i} for i in range(4000)]
     conferir_argumentos(na_vitrine.esquema_entrada, {"conta": "1"})  # o validador fica pronto
-    inicio = time.perf_counter()
+    # Tempo de CPU do processo, nao de relogio: a carga da maquina nao conta (R6b-7). Medido: 7 ms de CPU (0,06 ms
+    # em test_esquema_limpo); com uniqueItems na copia, 8,7 s. O teto e folgado e ainda separa os dois.
+    inicio = time.process_time()
     conferir_argumentos(na_vitrine.esquema_entrada, pedido)
-    assert time.perf_counter() - inicio < 0.05
+    gasto = time.process_time() - inicio
+    assert gasto < 0.5, f"{gasto:.3f} s de CPU"
 
 
 async def test_proprio_confere_com_o_esquema_revisado_inteiro(dono: AsyncEngine) -> None:

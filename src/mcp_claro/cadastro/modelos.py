@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Final, Literal
 
-from mcp_claro.cadastro.esquema import limpar_textos
+from mcp_claro.cadastro.esquema import limpar_textos, nomes_neutros
 from mcp_claro.regras.estranhos import vem_de_estranhos
 
 Classe = Literal["le", "muda", "tem_volta"]
@@ -101,8 +101,10 @@ class FerramentaVitrine:
         """Definicao no formato do fio da 2026-07-28, com nomes e textos do cadastro, nao do sistema.
 
         Num terceiro, nada do fornecedor: o esquema de entrada sai limpo de novo (so as descricoes de campo do
-        primeiro nivel ficam: a revisao gravou as do ADMIN), as dicas saem so da classe revisada, com
-        ``openWorldHint`` sempre verdadeiro, e a descricao termina com a frase fixa.
+        primeiro nivel ficam: a revisao gravou as do ADMIN), sem o ``$schema`` da raiz e com nomes neutros nas
+        definicoes (``nomes_neutros``, contados na ordem em que o banco devolve as chaves: a revisao ja grava assim,
+        com os mesmos nomes; aqui e a segunda barreira, tambem para uma revisada gravada antes), as dicas saem so da
+        classe revisada, com ``openWorldHint`` sempre verdadeiro, e a descricao termina com a frase fixa.
         """
         meta: dict[str, Any] = {
             "br.com.claro.mcp-claro/sistema": self.sistema.nome,
@@ -115,7 +117,7 @@ class FerramentaVitrine:
                 "openWorldHint": True,
             }
             descricao = f"{self.descricao.rstrip()} {FIM_DA_DESCRICAO_TERCEIRO}"
-            entrada = limpar_textos(self.esquema_entrada, descricoes_de_campo=True)
+            entrada = nomes_neutros(limpar_textos(self.esquema_entrada, descricoes_de_campo=True))
             meta["br.com.claro.mcp-claro/origem"] = "terceiro"
         else:
             etiquetas = {k: bool(v) for k, v in self.etiquetas.items() if k in DICAS_CONHECIDAS}

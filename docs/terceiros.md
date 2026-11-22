@@ -108,7 +108,18 @@ cifra no cofre. Depois de entregues, elas não aparecem mais em lugar nenhum.
 
 1. Em "Autorização de cada pessoa", preencha os dados que o fornecedor deu: endereço da página de autorização,
    endereço de troca do código, `client_id`, escopos e como o MCP-CLARO se apresenta na troca. Copie o endereço de
-   volta que a tela mostra e peça ao fornecedor para cadastrá-lo. A tela avisa:
+   volta que a tela mostra e peça ao fornecedor para cadastrá-lo no servidor de autorização dele. A tela mostra:
+
+   > No servidor de autorização deste fornecedor, cadastre este endereço de volta. Ele é só deste servidor: (o endereço)
+
+   Num servidor de terceiros, o endereço de volta é só dele: ele termina em
+   `/telas/autorizar/<número do servidor>/volta`. Os sistemas próprios continuam com `/telas/autorizar/volta`. Não
+   use o endereço de outro servidor nem o dos sistemas próprios: o MCP-CLARO recusa a volta que chega pelo endereço
+   de outro sistema, e a pessoa vê "Este pedido de autorização não é deste sistema. Nada foi guardado. Comece de novo
+   por aqui." Assim, fica mais difícil um servidor de terceiros usar a autorização que a pessoa deu a outro sistema.
+   Isso conta com o servidor de autorização de cada sistema aceitar só o endereço de volta que tem cadastrado.
+
+   A tela também avisa:
 
    > Servidor de terceiros: a troca do código e a renovação da chave só vão a endereços https da internet. Depois de guardada, esta configuração não muda; para mudar, cadastre o servidor de novo.
 
@@ -130,10 +141,17 @@ ferramenta, com o nome e o texto que o fornecedor escreveu, e a situação da su
 ou "Mudou desde a revisão". O texto do fornecedor aparece num quadro à parte: ele não foi escrito por nós e não é
 mostrado às pessoas nem aos aplicativos.
 
-Se a leitura falhar, a tela diz o motivo. "A sala de visitas não está disponível agora. Nada foi pedido ao
-servidor. Tente de novo daqui a pouco." e "Não deu para abrir no cofre a chave de leitura das declarações. Tente de
-novo daqui a pouco." são problemas do MCP-CLARO: espere um pouco e, se continuar, avise a equipe que opera o
-gateway.
+Se a leitura falhar, a tela diz o motivo. Estas quatro frases são problemas do MCP-CLARO, e não do servidor:
+
+- "A sala de visitas não está disponível agora. Nada foi pedido ao servidor. Tente de novo daqui a pouco.";
+- "Todas as vagas da sala de visitas estavam ocupadas. Nada foi pedido ao servidor. Tente de novo daqui a pouco.";
+- "Não deu para abrir no cofre a chave de leitura das declarações. Tente de novo daqui a pouco.";
+- "O MCP-CLARO não conseguiu usar o próprio banco de dados agora. A falha é do MCP-CLARO, não do servidor. Tente de
+  novo daqui a pouco."
+
+Espere um pouco e, se continuar, avise a equipe que opera o gateway. "O despachante não conseguiu ler as ferramentas
+deste sistema. Confira a chave e tente de novo." aparece quando o servidor não entregou a lista e nas outras falhas:
+confira a chave e, se ela estiver certa, tente de novo daqui a pouco.
 
 ## Passo 5. Revisar cada ferramenta
 
@@ -163,6 +181,10 @@ Duas coisas são fixas num servidor de terceiros:
 
   > Nada do texto escrito pelo fornecedor vai para o aplicativo, nem as dicas como “só leitura”.
 
+  Nele, as partes internas do esquema aparecem com nomes neutros (`d1`, `d2`...), no lugar dos nomes que o
+  fornecedor deu. Os nomes de campo, as listas de escolhas e as regras de formato continuam como o fornecedor
+  escreveu: o aplicativo precisa deles para chamar a ferramenta.
+
 Toque em "Gravar a revisão". Cada gravação cria uma versão nova da revisão. Num servidor de terceiros, a tela diz:
 
 > Pronto. A revisão foi gravada. Num servidor de terceiros, a ferramenta só aparece nas vitrines e nos modelos de ordem depois que você concluir a revisão do servidor.
@@ -175,10 +197,10 @@ exemplo, quando ele tem partes demais umas dentro das outras:
 
 > O esquema de entrada desta ferramenta tem partes demais umas dentro das outras para o MCP-CLARO conferir. Peça ao fornecedor um esquema mais simples.
 
-Os limites de um esquema de terceiro: até 2.000 partes, até 64 níveis, cada lista de escolhas com até 1.000 valores
-e o esquema gravado com até 256 KiB. Nesses casos, peça ao fornecedor para simplificar. O MCP-CLARO não confere as
-regras de formato (`pattern`) nem a regra de itens sem repetição (`uniqueItems`) de um servidor de terceiros: quem
-confere é o próprio servidor.
+Os limites de um esquema de terceiro: até 2.000 partes, até 64 níveis, cada lista de escolhas com até 1.000 valores e
+o esquema, já sem os textos do fornecedor, com até 256 KiB. Nesses casos, peça ao fornecedor para simplificar. O
+MCP-CLARO não confere as regras de formato (`pattern`) nem a regra de itens sem repetição (`uniqueItems`) de um
+servidor de terceiros: quem confere é o próprio servidor.
 
 Uma ferramenta de terceiros com nome de mais de 128 letras também não pode ser revisada. A tela diz:
 
@@ -317,9 +339,13 @@ O que a pessoa de teste e o ADMIN veem nos dias ruins está no [simulado do dia 
 
 - **"Pedidos recusados deste sistema".** O MCP-CLARO não repassa a ninguém pedidos de dados, links ou confirmações
   que um sistema faça no meio de uma chamada. Este quadro mostra quantos pedidos o servidor fez nos últimos 30 dias
-  e os últimos, com a data, a ferramenta e o que ele pediu, em palavras nossas (por exemplo, "dados por formulário"
-  ou "que a pessoa abrisse um link"). O texto, o link e os campos que o servidor mandou não são guardados nem
-  mostrados. Muitos pedidos são um sinal para conversar com o fornecedor.
+  e os últimos, com a data, onde foi, a ferramenta e o que ele pediu, em palavras nossas (por exemplo, "dados por
+  formulário" ou "que a pessoa abrisse um link"). Conta também os pedidos que o servidor fez fora de uma chamada, na
+  leitura das ferramentas e na sondagem, e as ações que terminaram sem confirmação ou que não saíram depois de um
+  pedido recusado. A coluna "Onde" diz em que ponto foi: por exemplo, "Na leitura das ferramentas", "Na sondagem",
+  "Numa ação sem confirmação" ou "Numa ação, que não saiu". Na leitura das ferramentas e na sondagem, a linha vem sem
+  o nome de ferramenta. O texto, o link e os campos que o servidor mandou não são guardados nem mostrados. Muitos
+  pedidos são um sinal para conversar com o fornecedor.
 - **Avisos por e-mail e webhook.** Quando a conferência de tempos em tempos põe o servidor em quarentena, o
   MCP-CLARO avisa os ADMIN por e-mail e pelos webhooks cadastrados. A quarentena pela conferência da versão, que você
   mesmo pede na tela, aparece ali na hora, sem aviso. Os eventos são `sistema_em_quarentena` (o servidor mudou),

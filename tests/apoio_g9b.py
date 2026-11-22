@@ -8,8 +8,12 @@
   para terceiro e injetado, entao todo pedido MCP a um terceiro passa pela sala;
 - a sala: ``processo`` e a ``sala_em_processo`` (o mesmo contrato, sem os filhos, por http); ``filhos`` e a sala de
   verdade (``visitas.app.Sala``, um processo filho por chamada, mTLS com o certificado do despachante);
-- o intermediario ``tests/cortador.py`` (so usado) na frente da sala (so com ``processo``: por TLS ele nao ve
-  o pedido) e na frente do terceiro, os dois em modo ``inteiro`` ate o teste mudar;
+  ``filhos-http`` e a mesma sala de verdade, por http (em ``teste`` o despachante aceita ``VISITS_INTERNAL_URL``
+  http), para o cortador ficar na frente do pai de verdade; a ``Sala`` dela e uma ``SalaContada``
+  (``Gateway.sala_de_verdade``), que guarda o que atendeu, para o teste provar que o pedido passou pelo pai de
+  verdade e foi atendido por um filho;
+- o intermediario ``tests/cortador.py`` (so usado) na frente da sala (com ``processo`` e ``filhos-http``: por TLS
+  ele nao ve o pedido) e na frente do terceiro, os dois em modo ``inteiro`` ate o teste mudar;
 - tres sistemas de exemplo, todos com chave por pessoa: o terceiro ``exemplos.ensaio_mal_intencionado``
   (``ler_avisos`` e ``enviar_recado``) e dois proprios, ``exemplos.leitura_por_pessoa`` (``ver_cadastro``, com CPF
   e e-mail) e ``exemplos.acoes_caixa`` (``enviar_mensagem``).
@@ -52,6 +56,7 @@ from mcp_claro.despachante import chaves
 from mcp_claro.despachante.app import criar_app_despachante
 from mcp_claro.entrada.app import criar_app_entrada
 from mcp_claro.entrada.despachante_cliente import ClienteDespachante
+from mcp_claro.ligacao import sala_contrato
 from mcp_claro.saida import fila
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.pedidos import CONSULTA
@@ -84,7 +89,51 @@ D6 = "FEATURE_PHASE3_THIRD_PARTY ainda nao liga"
 # O que ficou liberado na fila do banco da sessao (deste ou de outro teste) nao sai por esta porta de saida.
 SOBRAS = "UPDATE fila_saida SET estado = 'cancelada', mudou_por = 'teste:sobra' WHERE estado = 'liberada'"
 
-Sala = Literal["processo", "filhos"]
+Sala = Literal["processo", "filhos", "filhos-http"]
+
+
+@dataclass(frozen=True)
+class Atendida:
+    """Um pedido que a sala de verdade atendeu (``SalaContada``). Sem a chave do sistema, que vem no mesmo corpo."""
+
+    rota: str
+    ferramenta: str | None
+    argumentos: Any
+    desfecho: str
+    """O da ``visitas.app.Sala``: ``filho`` quando um processo filho atendeu e escreveu a resposta; ``interrompida``
+    quando o despachante desistiu antes de a sala responder."""
+
+
+class SalaContada(visitas_app.Sala):
+    """A sala de verdade (um processo filho por chamada), que guarda cada pedido que atendeu. So o teste le o corpo,
+    depois de a sala atender; a sala continua sem ler nada do que o filho escreve."""
+
+    def __init__(self, p: Parametros) -> None:
+        super().__init__(p)
+        self.atendidas: list[Atendida] = []
+
+    async def atender(self, rota: str, corpo: bytes) -> visitas_app.Atendimento:
+        desfecho = "interrompida"
+        try:
+            atendimento = await super().atender(rota, corpo)
+            desfecho = atendimento.desfecho
+            return atendimento
+        finally:
+            try:
+                pedido = json.loads(corpo)
+            except ValueError:
+                pedido = None
+            if not isinstance(pedido, dict):
+                pedido = {}
+            self.atendidas.append(Atendida(rota, pedido.get("nome"), pedido.get("argumentos"), desfecho))
+
+    def desfechos(self, trecho: str) -> list[str]:
+        """Os desfechos das chamadas de ferramenta (``/chamar``) que levavam ``trecho`` nos argumentos, na ordem."""
+        return [
+            a.desfecho
+            for a in self.atendidas
+            if a.rota == sala_contrato.ROTA_CHAMAR and trecho in json.dumps(a.argumentos, ensure_ascii=False)
+        ]
 
 
 def conferir_sem_d6(self: Parametros) -> Parametros:
@@ -130,6 +179,8 @@ class Gateway:
     cadastro: Sistema
     caixa: Sistema
     sufixo: str
+    sala_de_verdade: SalaContada | None = None
+    """Com ``filhos-http``: a sala de verdade que o cortador tem atras dele."""
 
     def cracha(self, pessoa: str = "ana") -> str:
         return self.idp.cracha(audiencia=RECURSO, sujeito=f"g9b-{pessoa}-{self.sufixo}", client_id=self.client_id)
@@ -147,6 +198,20 @@ class Gateway:
     async def listar(self, pessoa: str = "ana") -> list[types.Tool]:
         async with cliente_mcp(f"{self.entrada}/mcp", self.cracha(pessoa)) as c:
             return list((await c.list_tools()).tools)
+
+    async def descoberta(self, pessoa: str = "ana") -> dict[str, Any]:
+        """O que o aplicativo le da entrada ao conectar: o cliente do kit em modo ``auto`` pede ``server/discover``
+        (sem cair no ``initialize``, que a 2026-07-28 nao tem). Devolve o resultado inteiro, as ``instructions`` e
+        o ``serverInfo`` como o kit os le."""
+        async with cliente_mcp(f"{self.entrada}/mcp", self.cracha(pessoa), modo="auto") as c:
+            resultado = c.session.discover_result
+            assert resultado is not None, "a entrada nao respondeu a descoberta"
+            info = c.server_info
+            return {
+                "discover": resultado.model_dump(by_alias=True, mode="json"),
+                "instructions": c.instructions,
+                "server_info": info.model_dump(by_alias=True, mode="json") if info is not None else None,
+            }
 
     async def consultar(self, protocolo: str, pessoa: str = "ana") -> Any:
         async with cliente_mcp(f"{self.entrada}/mcp", self.cracha(pessoa)) as c:
@@ -260,6 +325,20 @@ async def _sala_em_processo() -> AsyncIterator[str]:
 
 
 @contextlib.asynccontextmanager
+async def _sala_de_verdade_sem_tls() -> AsyncIterator[tuple[str, SalaContada]]:
+    """A sala de visitas de verdade (um filho por chamada, o pai que mata o filho quando o despachante desiste), por
+    http: o cortador fica na frente dela e ve o pedido. Em desenvolvimento, para aceitar o terceiro local. Devolve a
+    URL e a sala, que guarda o que atendeu."""
+    porta = porta_livre()
+    p = Parametros(
+        APP_ENV="desenvolvimento", VISITS_INTERNAL_PORT=porta, VISITS_INTERNAL_URL=f"http://127.0.0.1:{porta}"
+    )
+    sala = SalaContada(p)
+    async with servidor(visitas_app.criar_app_visitas(p, sala=sala), porta) as base:
+        yield base, sala
+
+
+@contextlib.asynccontextmanager
 async def _sala_de_verdade(certificados: Certificados) -> AsyncIterator[tuple[str, dict[str, str]]]:
     """A sala de visitas de verdade (um filho por chamada), em desenvolvimento para aceitar o terceiro local.
     Devolve a URL https e os parametros do despachante para o mTLS (so a ``ca_visitas`` e o certificado dele)."""
@@ -359,9 +438,13 @@ async def subir(
         bases = {nome: await pilha.enter_async_context(servidor(app)) for nome, app in apps.items()}
         corte_terceiro = await pilha.enter_async_context(cortador(bases["terceiro"]))
         corte_sala: Cortador | None = None
+        sala_de_verdade: SalaContada | None = None
         extra_sala: dict[str, str] = {}
-        if sala == "processo":
-            base_sala = await pilha.enter_async_context(_sala_em_processo())
+        if sala in ("processo", "filhos-http"):
+            if sala == "processo":
+                base_sala = await pilha.enter_async_context(_sala_em_processo())
+            else:
+                base_sala, sala_de_verdade = await pilha.enter_async_context(_sala_de_verdade_sem_tls())
             corte_sala = await pilha.enter_async_context(cortador(base_sala))
             url_sala = corte_sala.url
         else:
@@ -528,6 +611,8 @@ async def subir(
         if corte_sala is not None:
             corte_sala.pedidos.clear()
             corte_sala.conexoes = 0
+        if sala_de_verdade is not None:
+            sala_de_verdade.atendidas.clear()  # o arranjo (sondagem e declaracoes) tambem passou por ela
         yield Gateway(
             p=p,
             idp=idp,
@@ -548,6 +633,7 @@ async def subir(
             cadastro=cadastro,
             caixa=caixa,
             sufixo=sufixo,
+            sala_de_verdade=sala_de_verdade,
         )
 
 

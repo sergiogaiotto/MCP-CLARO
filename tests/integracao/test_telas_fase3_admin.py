@@ -823,6 +823,44 @@ async def test_despachante_fora_na_sondagem_e_cofre_fechado_na_leitura_tem_frase
     assert nome
 
 
+@pytest.mark.parametrize(
+    ("motivo", "titulo", "mensagem"),
+    [
+        (
+            "sala_sem_vaga",
+            "A sala de visitas estava cheia",
+            "Todas as vagas da sala de visitas estavam ocupadas. Nada foi pedido ao servidor. Tente de novo daqui a"
+            " pouco.",
+        ),
+        (
+            "conferencia_nao_feita",
+            "O MCP-CLARO não conseguiu usar o banco de dados",
+            "O MCP-CLARO não conseguiu usar o próprio banco de dados agora. A falha é do MCP-CLARO, não do servidor."
+            " Tente de novo daqui a pouco.",
+        ),
+    ],
+)
+async def test_sala_cheia_e_banco_do_despachante_na_leitura_tem_frase_propria_e_503(
+    cena: Cena, motivo: str, titulo: str, mensagem: str
+) -> None:
+    """Os dois 503 das declaracoes do R6e (a sala cheia dita pelo pai, contrato K7, e a falha do banco ou do grupo de
+    conexoes do despachante, contrato K5): a falha e do MCP-CLARO, e a tela nao manda conferir a chave (R7a)."""
+    sistema_id, _ = await cena.terceiro()
+    ficha = f"/telas/admin/sistemas/{sistema_id}"
+    falso = _despachante_falso(
+        503, {"motivo": motivo, "mensagem": "texto do despachante"}, caminho="/interno/declaracoes"
+    )
+    async with servidor(falso) as url, telas_para(cena, url) as nav:
+        r = await nav.post(f"{ficha}/declaracoes", {}, csrf=cena.csrf)
+    assert r.status_code == 503
+    assert titulo in r.text
+    assert mensagem in r.text
+    assert "Confira a chave" not in r.text
+    assert "texto do despachante" not in r.text
+    assert [ln.tipo for ln in await cena.extrato(sistema_id)].count("admin_declaracoes_lidas") == 0
+    assert (await cena.linha(sistema_id)).situacao == "ativo"  # nada mudou
+
+
 async def _declarar(cena: Cena, sistema_id: uuid.UUID, nomes: list[str]) -> None:
     """Ferramentas que o servidor declarou, direto em ``ferramentas_vistas`` (sem revisao)."""
     async with cena.amb.engine.begin() as c:
@@ -1115,7 +1153,7 @@ async def test_quarentena_sem_resposta_e_nomes_escondidos_escapados(cena: Cena) 
             tipo="sistema_em_quarentena_sem_resposta",
             campos={"sistema": "x", "rodadas": 2},
             sistema_id=sistema_id,
-            dados={"ferramentas": [{"ferramenta": "<b>pega‮</b>", "mudanca": "sumiu"}]},
+            dados={"ferramentas": [{"ferramenta": "<b>pega\u202e</b>", "mudanca": "sumiu"}]},
         )
         await c.execute(
             text(
@@ -1124,8 +1162,8 @@ async def test_quarentena_sem_resposta_e_nomes_escondidos_escapados(cena: Cena) 
             ),
             {
                 "s": sistema_id,
-                "n": "<script>x</script>‮",
-                "d": json.dumps(t3.definicao("<script>x</script>‮", "<img src=x onerror=alert(1)>")),
+                "n": "<script>x</script>\u202e",
+                "d": json.dumps(t3.definicao("<script>x</script>\u202e", "<img src=x onerror=alert(1)>")),
                 "i": "sha256:" + "3" * 64,
             },
         )
@@ -1135,7 +1173,7 @@ async def test_quarentena_sem_resposta_e_nomes_escondidos_escapados(cena: Cena) 
     assert "<img src=x" not in r.text
     assert "&lt;b&gt;pega[U+202E]&lt;/b&gt;</code>: o servidor não declara mais" in r.text
     assert '<code class="estranho">&lt;script&gt;x&lt;/script&gt;[U+202E]</code>' in r.text
-    assert "‮" not in r.text
+    assert "\u202e" not in r.text
 
 
 async def test_quarentena_pela_versao_diz_o_motivo_e_o_passo_ate_a_versao_voltar(cena: Cena) -> None:

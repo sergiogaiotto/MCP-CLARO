@@ -81,10 +81,13 @@ redirecionamento, no último status que o sistema deu), erro do protocolo que o 
 -32602, -32600, -32700 e -32021), chave que não ficou pronta antes do envio (a pessoa ainda não autorizou o
 sistema, a autorização venceu, a renovação falhou ou o cofre recusou abrir a chave: o detalhe diz "não deu para
 abrir a chave no cofre") ou um pedido que nem chegou a ser escrito (argumentos com mais de 255 níveis, um dentro
-do outro). Só um 401 no último status deixa a chave da pessoa naquele sistema dada como vencida: o próximo
-pedido a renova antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada. Um "recusado" sem um
-desses status vira "não confirmada". Qualquer outra falha, ou a dúvida, vira "não confirmada". Num servidor de
-terceiros, a sala de visitas tem regras a mais (veja "Ações em servidores de terceiros").
+do outro). Quando a renovação falha, o detalhe diz "não deu para renovar a chave"; isso inclui o servidor de
+autorização que não responde dentro do prazo total de 15 s da troca e outra renovação da mesma pessoa no mesmo
+sistema que segura a vez por mais de 3 s. Nos dois casos, se a chave atual ainda não venceu, ela é usada e a ação
+sai. Só um 401 no último status deixa a chave da pessoa naquele sistema dada como vencida: o próximo pedido a renova
+antes de enviar, e a pessoa só autoriza de novo se a renovação for recusada. Um "recusado" sem um desses status vira
+"não confirmada". Qualquer outra falha, ou a dúvida, vira "não confirmada".
+Num servidor de terceiros, a sala de visitas tem regras a mais (veja "Ações em servidores de terceiros").
 
 Com o cofre trancado ou sem resposta, a ação em geral não vira "não saiu": o despachante pergunta ao cofre antes
 de marcar "enviando", e a ação espera. Ela só vira "não saiu" se o cofre trancar ou parar de responder no curto
@@ -177,7 +180,9 @@ protocolo. Só uma nova conclusão da revisão do servidor, pelo ADMIN, o põe d
 e manda o pedido à sala, que chama o servidor uma vez, só no endereço combinado (https e endereço público), sem
 seguir desvios e sem dados de rastreio. Sem a sala, a ação não vai ao servidor. O despachante espera a sala pelo
 prazo da chamada mais 10 segundos. Só a renovação da chave da pessoa, quando é preciso, não passa pela sala: ela sai
-do despachante direto para o endereço de troca de chave do servidor (OAuth), conferido antes (https e IP público).
+do despachante direto para o endereço de troca de chave do servidor (OAuth), conferido antes (https e IP público),
+com prazo total de 15 s para a troca inteira. Um endereço de troca lento segura a porta de saída por até esse tempo,
+e nesse tempo nenhuma outra ação sai.
 
 **"Não saiu" e "não confirmada" pela sala.**
 
@@ -186,6 +191,8 @@ do despachante direto para o endereço de troca de chave do servidor (OAuth), co
     ao servidor de terceiros";
   - o endereço do servidor não é público ou não usa https: "o endereço do servidor de terceiros não é público ou
     não usa https; o pedido não chegou ao sistema";
+  - todas as 32 vagas da sala de visitas ficaram ocupadas por mais de 2 segundos: "a sala de visitas estava cheia;
+    nada saiu". Nada foi a um processo da sala, e um pedido igual depois é uma ação nova;
   - argumentos com mais de 255 níveis, um dentro do outro: não saem por nenhum caminho, e a chave nem é aberta.
     Pela sala, argumentos com mais de uns 200 níveis também não chegam ao servidor: "o pedido não cabe no contrato
     da sala de visitas" (aqui a chave já foi aberta). Na prática, a entrada já recusa um terceiro acima de 64
@@ -195,14 +202,14 @@ do despachante direto para o endereço de troca de chave do servidor (OAuth), co
   sala (por exemplo, funda demais). A sala pode ter chamado o servidor: nada é reenviado, e a pessoa confere no
   sistema. Uma resposta "dúvida" nunca vira "não saiu".
 
-**Pedidos do servidor no meio da ação.** Se o servidor pede, no meio da ação, dados por formulário, que a pessoa
-abra um link, uma resposta da IA do aplicativo, a lista de pastas do aplicativo ou uma nova volta, o MCP-CLARO não
-repassa. Se o pedido é a própria resposta, a ação fica "sistema pediu dados". Se o servidor pediu e depois
-respondeu normalmente, a ação fica "enviada", e o detalhe diz "antes pediu ... e o MCP-CLARO recusou". O detalhe
-usa só essas palavras (para um pedido pelo fio antigo, "algo fora do padrão 2026-07-28"), nunca o texto, o link ou
-os campos que o servidor mandou. A linha do fim no extrato guarda as categorias (`dados.pedidos`), para a tela do
-ADMIN mostrar os pedidos recusados. Um link pedido pelo código antigo do protocolo (-32042) deixa a ação "não
-confirmada". Isso vale igual para sistemas próprios.
+**Pedidos do servidor no meio da ação.** Se o servidor pede, no meio da ação, dados por formulário, que a pessoa abra
+um link, uma resposta da IA do aplicativo, a lista de pastas do aplicativo ou uma nova volta, o MCP-CLARO não
+repassa. Se o pedido é a própria resposta, a ação fica "sistema pediu dados". Se o servidor pediu e depois respondeu
+normalmente, a ação fica "enviada", e o detalhe diz "antes pediu ... e o MCP-CLARO recusou". O detalhe usa só essas
+palavras (para um pedido pelo fio antigo, "algo fora do padrão 2026-07-28"), nunca o texto, o link ou os campos que o
+servidor mandou. A linha do fim no extrato guarda as categorias (`dados.pedidos`), também quando a ação fica "não
+confirmada" ou "não saiu" depois do pedido, para a tela do ADMIN mostrar os pedidos recusados. Um link pedido pelo
+código antigo do protocolo (-32042) deixa a ação "não confirmada". Isso vale igual para sistemas próprios.
 
 **O que fica guardado e o que volta ao aplicativo.** O resultado fica guardado com a máscara dos campos pessoais e
 sem o `_meta` do servidor: o único `_meta` guardado é a conta de partes sem texto que a leitura com medida tirou.
@@ -327,6 +334,14 @@ respondia, confira com o fornecedor antes.
 leitura volta com a recusa, as duas com a linha `sala_fora` no extrato. Os sistemas próprios seguem como sempre. A
 conferência do mudou-parou não conta essa rodada contra os servidores de terceiros. Quando a sala volta, a pessoa
 pode pedir de novo.
+
+**"A sala de visitas estava cheia."** Todas as 32 vagas da sala ficaram ocupadas por mais de 2 segundos, em geral por
+servidores de terceiros lentos. A ação vira "não saiu", e a pessoa pode pedir de novo. Como a sala fora, a
+conferência do mudou-parou não conta essa rodada contra o servidor. A sala cheia soma o contador `sala_sem_vaga` nas
+medições (`medicoes.minuto`), com `onde=acao` na ação, `onde=leitura` na leitura, `onde=declaracoes` na conferência
+e na leitura das ferramentas pelo ADMIN, e `onde=sondagem` na conferência da versão. Se o contador sobe com
+`onde=declaracoes` a cada rodada, há conferências de terceiros que não estão sendo feitas: confira os servidores
+lentos.
 
 ## O que nunca acontece
 

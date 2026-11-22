@@ -7,7 +7,10 @@ mais uma folga (a sala ainda confere o endereco e espera o terceiro). Classifica
 - pedido que o escritor de JSON nao consegue montar (argumentos com 256 niveis ou mais, um dentro do outro):
   ``nao_enviado`` (``PEDIDO_FUNDO_DEMAIS``), antes de abrir conexao com a sala;
 - qualquer outra falha, prazo, status que nao seja 200 ou corpo fora do contrato: ``duvida``;
-- 200 com corpo do contrato: a classificacao que a sala deu.
+- 200 com corpo do contrato: a classificacao que a sala deu. A sala cheia responde assim, na hora em que desiste
+  da vaga (``visitas.app.PRAZO_VAGA``): ``nao_enviado`` com ``sala_sem_vaga``, sem nada ir a um filho, e nao uma
+  espera que come o prazo do despachante e vira ``duvida``. Na listagem, a sala cheia com o cabecalho que so o
+  processo pai escreve (``CABECALHO_DA_SALA``) levanta ``SalaSemVaga``; sem o cabecalho, ``FalhaNaSala``.
 
 Com endereco https, o contexto TLS e obrigatorio (so a autoridade da sala, com o certificado de cliente do
 despachante): quem monta e o despachante, a partir dos parametros.
@@ -22,8 +25,9 @@ import anyio
 import httpx2
 from pydantic import SecretStr, ValidationError
 
-from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, TETO_RESPOSTA_PADRAO, Resposta, Segredo, Sondagem
+from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, TETO_RESPOSTA_PADRAO, Listagem, Resposta, Segredo, Sondagem
 from mcp_claro.ligacao.sala_contrato import (
+    CABECALHO_DA_SALA,
     MOTIVO_PEDIDO_FORA,
     PEDIDO_FORA_DO_CONTRATO,
     ROTA_CHAMAR,
@@ -36,7 +40,7 @@ from mcp_claro.ligacao.sala_contrato import (
     PedidoListar,
     PedidoSondar,
     ler_resposta_chamar,
-    ler_resposta_listar,
+    ler_resposta_listagem,
     ler_resposta_sondar,
     resposta_sala_fora,
     sondagem_sala_fora,
@@ -74,8 +78,9 @@ class ClienteSala:
             trust_env=False,
         )
 
-    async def _postar(self, rota: str, corpo: bytes, prazo: float) -> tuple[int, bytes] | None:
-        """(status, corpo) da sala; None quando a conexao nao se fez (nada foi enviado); (0, b"") na duvida."""
+    async def _postar(self, rota: str, corpo: bytes, prazo: float) -> tuple[int, bytes, str | None] | None:
+        """(status, corpo, marca) da sala; None quando a conexao nao se fez (nada foi enviado); (0, b"", None) na
+        duvida. ``marca``: o ``CABECALHO_DA_SALA``, que so o processo pai escreve (sala cheia)."""
         try:
             with anyio.fail_after(prazo + 5):
                 async with (
@@ -89,13 +94,13 @@ class ClienteSala:
                     async for pedaco in resposta.aiter_bytes():
                         lidos += len(pedaco)
                         if lidos > TETO_SALTO:
-                            return 0, b""  # resposta grande demais: duvida
+                            return 0, b"", None  # resposta grande demais: duvida
                         partes.append(pedaco)
-                    return resposta.status_code, b"".join(partes)
+                    return resposta.status_code, b"".join(partes), resposta.headers.get(CABECALHO_DA_SALA)
         except _ANTES_DE_ENVIAR:
             return None
         except Exception:  # noqa: BLE001 - depois de conectar, toda falha e duvida: a sala pode ter chamado
-            return 0, b""
+            return 0, b"", None
 
     async def chamar_ferramenta(
         self,
@@ -132,11 +137,11 @@ class ClienteSala:
             # O escritor do pydantic para em 256 niveis (PydanticSerializationError, um ValueError): nada saiu.
             return Resposta("nao_enviado", excecao=PEDIDO_FUNDO_DEMAIS)
         saida = await self._postar(ROTA_CHAMAR, corpo, prazo + self._folga)
-        return resposta_sala_fora() if saida is None else ler_resposta_chamar(*saida)
+        return resposta_sala_fora() if saida is None else ler_resposta_chamar(saida[0], saida[1])
 
-    async def listar_ferramentas(
-        self, endereco: str, segredo: Segredo, discover_json: str | None
-    ) -> list[dict[str, Any]]:
+    async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
+        """A listagem pela sala, com o que o terceiro pediu no meio (``RespostaListar.pedidos``, conferido). A sala
+        cheia, dita pelo pai (com ``CABECALHO_DA_SALA``), levanta ``SalaSemVaga``."""
         chave = await segredo()
         try:
             pedido = PedidoListar(
@@ -147,7 +152,13 @@ class ClienteSala:
         saida = await self._postar(ROTA_LISTAR, pedido.para_json(), self._prazo_listar)
         if saida is None:
             raise FalhaNaSala("nao_enviado", SALA_FORA)
-        return ler_resposta_listar(*saida)
+        status, corpo, marca = saida
+        return ler_resposta_listagem(status, corpo, marca=marca)
+
+    async def listar_ferramentas(
+        self, endereco: str, segredo: Segredo, discover_json: str | None
+    ) -> list[dict[str, Any]]:
+        return (await self.listar(endereco, segredo, discover_json)).ferramentas
 
     async def sondar(self, endereco: str, segredo: Segredo, *, prazo: float = 10.0) -> Sondagem:
         chave = await segredo()
@@ -156,4 +167,4 @@ class ClienteSala:
         except ValidationError:
             return Sondagem("inalcancavel", MOTIVO_PEDIDO_FORA, excecao=PEDIDO_FORA_DO_CONTRATO)
         saida = await self._postar(ROTA_SONDAR, pedido.para_json(), prazo + self._folga)
-        return sondagem_sala_fora() if saida is None else ler_resposta_sondar(*saida)
+        return sondagem_sala_fora() if saida is None else ler_resposta_sondar(saida[0], saida[1])

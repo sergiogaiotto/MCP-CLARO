@@ -67,7 +67,7 @@ from mcp_claro.despachante.cifra_origem import ContextoSemSistema
 from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente, ponto
 from mcp_claro.ligacao.ponto import Ligacao, linha_da_sala, pedidos_da_resposta, pedidos_legiveis
-from mcp_claro.ligacao.sala_contrato import PEDIDO_FORA_DO_CONTRATO, SALA_FORA
+from mcp_claro.ligacao.sala_contrato import PEDIDO_FORA_DO_CONTRATO, SALA_FORA, SALA_SEM_VAGA
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios, estado, estranhos
@@ -114,6 +114,8 @@ _NAO_ENVIADO: Final[dict[str, str]] = {
         "o pedido tem niveis demais, um dentro do outro, para o MCP-CLARO escrever; o pedido nao chegou ao sistema"
     ),
     PEDIDO_FORA_DO_CONTRATO: "o pedido nao cabe no contrato da sala de visitas; o pedido nao chegou ao sistema",
+    # Contrato K7: as vagas da sala (de todos os terceiros juntos) ocupadas por mais que o prazo da vaga.
+    SALA_SEM_VAGA: "a sala de visitas estava cheia; nada saiu",
 }
 """Desfecho de "nao saiu" por ``Resposta.excecao``; as outras ficam com "o pedido nao chegou ao sistema"."""
 RESULTADO_FUNDO_DEMAIS: Final = (
@@ -751,7 +753,12 @@ class PortaDeSaida:
 
     async def _registrar_sala(self, op: Operacao, sistema: Sistema, resposta: cliente.Resposta) -> None:
         """Linha do extrato (e contador) do que a sala barrou num terceiro, antes da linha do fim do envio. A acao
-        nao saiu de qualquer jeito: se o banco falhar aqui, so a linha fica faltando (o log diz o tipo do erro)."""
+        nao saiu de qualquer jeito: se o banco falhar aqui, so a linha fica faltando (o log diz o tipo do erro).
+
+        A sala cheia (``sala_sem_vaga``) so conta (``sala_sem_vaga{onde="acao"}``): ela nao tem linha propria no
+        extrato, e o motivo vai na linha ``acao_nao_saiu`` do fim."""
+        if sistema.de_terceiro and resposta.tipo == "nao_enviado" and resposta.excecao == SALA_SEM_VAGA:
+            CONTADORES.somar(SALA_SEM_VAGA, onde="acao")
         tipo = linha_da_sala(resposta, sistema)
         if tipo is None:
             return

@@ -177,6 +177,14 @@ async def test_duble_mal_intencionado_le_le_dado_pessoal_e_a_acao_dentro_do_limi
     vitrine = json.dumps([t.model_dump(by_alias=True, mode="json") for t in await gw.listar()], ensure_ascii=False)
     assert gw.terceiro.vitrine["ler_avisos"] in vitrine
     assert mal.INSTRUCAO not in vitrine
+    # Nem a descoberta da entrada: as ``instructions`` e o nome do servidor do fornecedor nao chegam ao aplicativo.
+    descoberta = await gw.descoberta()
+    assert descoberta["server_info"] is not None, descoberta
+    assert descoberta["server_info"]["name"] == "mcp-claro", descoberta
+    assert VERSAO_MCP in descoberta["discover"]["supportedVersions"]
+    texto_da_descoberta = json.dumps(descoberta, ensure_ascii=False)
+    for do_fornecedor in (mal.INSTRUCAO, "Instrucoes do fornecedor", "fornecedor-mal-intencionado", "6.6.6"):
+        assert do_fornecedor not in texto_da_descoberta, do_fornecedor
 
     # 1) A IA le o terceiro (pela sala): a instrucao chega so dentro da marca.
     lido = await gw.chamar(gw.terceiro, "ler_avisos", {"loja": "centro"})
@@ -303,17 +311,44 @@ async def nada_se_repete(gw: Gateway, op: Operacao, recado: str) -> None:
     assert "acao_enviada" not in tipos
 
 
-@pytest.mark.parametrize("modo", ["sem_resposta", "meio_do_corpo", "engolir"])
-async def test_resposta_perdida_entre_o_despachante_e_a_sala_nao_repete(gw: Gateway, modo: Modo) -> None:
+async def _perdida_na_sala(gw: Gateway, modo: Modo) -> None:
     corte = gw.corte_sala
     assert corte is not None
+    # Com ``filhos-http``, quem esta atras do cortador e a sala de verdade (``SalaContada``); com ``processo``, nao.
+    sala_de_verdade = gw.sala_de_verdade
+    assert (sala_de_verdade is not None) == (gw.sala == "filhos-http"), gw.sala
     recado = f"perdida na sala {modo} {gw.sufixo}"
     op = await pedir_confirmar_e_perder(gw, corte, recado, modo)
     # A sala chamou o terceiro (uma conexao, um pedido de ferramenta) e respondeu; a resposta da sala se perdeu.
     assert sum(CHAMADA_NO_TERCEIRO in pedido for pedido in gw.corte_terceiro.pedidos) == 1
     assert sum(CHAMADA_NA_SALA in pedido for pedido in corte.pedidos) == 1
+    if sala_de_verdade is not None:
+        # O pedido que o cortador viu chegou ao pai de verdade, e um processo filho o atendeu (chamou o terceiro e
+        # escreveu a resposta): o corte foi depois do filho, na volta ao despachante.
+        assert sala_de_verdade.desfechos(recado) == ["filho"], sala_de_verdade.atendidas
     await nada_se_repete(gw, op, recado)
     assert corte.cortes == 1
+    if sala_de_verdade is not None:
+        # Nada se repetiu pelo pai de verdade: a mesma acao nao foi a nenhum outro filho; as outras acoes, sim.
+        assert sala_de_verdade.desfechos(recado) == ["filho"], sala_de_verdade.atendidas
+        for marcador in (f"marcador 1 {gw.sufixo}", f"marcador 2 {gw.sufixo}"):
+            assert sala_de_verdade.desfechos(marcador) == ["filho"], sala_de_verdade.atendidas
+
+
+@pytest.mark.parametrize("modo", ["sem_resposta", "meio_do_corpo", "engolir"])
+async def test_resposta_perdida_entre_o_despachante_e_a_sala_nao_repete(gw: Gateway, modo: Modo) -> None:
+    await _perdida_na_sala(gw, modo)
+
+
+@pytest.mark.parametrize("modo", ["sem_resposta", "meio_do_corpo", "engolir"])
+async def test_resposta_perdida_entre_o_despachante_e_a_sala_de_verdade_nao_repete(
+    banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch, modo: Modo
+) -> None:
+    """O mesmo corte na frente do pai de verdade (um filho por chamada), sem TLS para o cortador ver o pedido: o
+    filho chamou o terceiro e a resposta da sala se perdeu no caminho ao despachante."""
+    async with g9b.subir(banco_migrado, monkeypatch, sala="filhos-http") as gw:
+        assert gw.sala == "filhos-http"
+        await _perdida_na_sala(gw, modo)
 
 
 @pytest.mark.parametrize(

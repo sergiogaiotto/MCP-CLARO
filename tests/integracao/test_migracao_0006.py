@@ -321,9 +321,8 @@ async def test_migracao_sobre_dados_da_fase_2(banco_0005: tuple[Parametros, Asyn
     await fazer(engine, "UPDATE sistemas SET situacao = 'pendente' WHERE id = :i", papel=ENTRADA, i=ids[0])
     await fazer(engine, "UPDATE sistemas SET situacao = 'recusado' WHERE id = :i", papel=DESPACHANTE, i=ids[1])
     await fazer(engine, "UPDATE sistemas SET situacao = 'ativo' WHERE id = :i", papel=DESPACHANTE, i=ids[1])
-    await fazer(
-        engine, "UPDATE sistemas SET endereco = 'http://outro.teste/mcp' WHERE id = :i", papel=ENTRADA, i=ids[2]
-    )
+    # O endereco pelo dono: a guarda e a mesma para todos, e a 0006 tira da entrada o UPDATE de endereco (K6).
+    await fazer(engine, "UPDATE sistemas SET endereco = 'http://outro.teste/mcp' WHERE id = :i", i=ids[2])
     situacoes = await fazer(engine, "SELECT array_agg(situacao ORDER BY nome) FROM sistemas WHERE nome LIKE 'buraco-%'")
     assert situacoes == ["pendente", "ativo", "pendente"]
 
@@ -373,9 +372,7 @@ async def test_migracao_sobre_dados_da_fase_2(banco_0005: tuple[Parametros, Asyn
         papel=DESPACHANTE,
         i=quarentena,
     )
-    await fazer(
-        engine, "UPDATE sistemas SET endereco = 'http://novo.teste/mcp' WHERE id = :i", papel=ENTRADA, i=quarentena
-    )
+    await fazer(engine, "UPDATE sistemas SET endereco = 'http://novo.teste/mcp' WHERE id = :i", i=quarentena)
     assert await fazer(engine, "SELECT situacao FROM sistemas WHERE id = :i", i=quarentena) == "quarentena"
 
 
@@ -919,17 +916,143 @@ async def test_ficha_nasce_com_o_retrato_dos_sinais_e_ele_nao_muda(dono: AsyncEn
 # --- PEDIDOS --------------------------------------------------------------------------------------------------
 
 
-async def test_indice_dos_pedidos_barrados(dono: AsyncEngine) -> None:
-    definicao_indice = await fazer(
-        dono, "SELECT indexdef FROM pg_indexes WHERE indexname = 'extrato_pedido_barrado_idx'"
-    )
-    assert "(sistema_id, criado_em DESC)" in definicao_indice
-    for tipo in ("leitura_sistema_pediu_dados", "programa_leitura_sistema_pediu_dados", "acao_sistema_pediu_dados"):
-        assert f"'{tipo}'" in definicao_indice
-    particoes = await fazer(
-        dono, "SELECT count(*) FROM pg_inherits WHERE inhparent = 'extrato_pedido_barrado_idx'::regclass"
-    )
-    assert particoes >= 4  # o mes passado, o atual e os proximos (0001)
+def _nos_do_plano(plano: Any) -> list[tuple[str, str | None, str | None]]:
+    """(tipo do no, indice, tabela) de cada no do plano em JSON, sem recursao."""
+    saida: list[tuple[str, str | None, str | None]] = []
+    pilha = [plano]
+    while pilha:
+        atual = pilha.pop()
+        if isinstance(atual, dict):
+            if "Node Type" in atual:
+                saida.append((str(atual["Node Type"]), atual.get("Index Name"), atual.get("Relation Name")))
+            pilha.extend(atual.values())
+        elif isinstance(atual, list):
+            pilha.extend(atual)
+    return saida
+
+
+async def _filhos_do_indice(dono: AsyncEngine, indice: str) -> set[str]:
+    """Os indices das particoes (um por particao do extrato) que o indice do pai ``indice`` criou."""
+    return {
+        str(nome)
+        for (nome,) in await linhas(
+            dono,
+            "SELECT f.relname FROM pg_inherits h JOIN pg_class f ON f.oid = h.inhrelid"
+            " WHERE h.inhparent = CAST(:i AS regclass)",
+            i=indice,
+        )
+    }
+
+
+async def _plano(dono: AsyncEngine, sql: str, params: dict[str, Any], *, generico: bool) -> Any:
+    """O plano da consulta como ``mcp_claro_entrada`` (o papel das telas), sem leitura sequencial: so os indices
+    que cabem no predicado sao escolhidos. ``generico``: o plano guardado que o asyncpg usa depois de algumas
+    execucoes (``PREPARE`` com ``plan_cache_mode = force_generic_plan``), em que o valor dos parametros nao e
+    conhecido."""
+    async with dono.connect() as c:
+        transacao = await c.begin()
+        try:
+            await como(c, ENTRADA)
+            await c.execute(text("SET LOCAL enable_seqscan = off"))
+            if not generico:
+                return (await c.execute(text("EXPLAIN (FORMAT JSON) " + sql), params)).scalar_one()
+            nomes = list(params)
+            preparada = sql
+            for i, nome in enumerate(nomes, 1):
+                preparada = re.sub(rf":{nome}\b", f"${i}", preparada)
+            await c.execute(text("SET LOCAL plan_cache_mode = force_generic_plan"))
+            nome_plano = f"r6b_{uuid.uuid4().hex[:8]}"
+            await c.exec_driver_sql(f"PREPARE {nome_plano} AS {preparada}")
+            valores = ", ".join(_literal(params[n]) for n in nomes)
+            plano = (await c.exec_driver_sql(f"EXPLAIN (FORMAT JSON) EXECUTE {nome_plano} ({valores})")).scalar_one()
+            await c.exec_driver_sql(f"DEALLOCATE {nome_plano}")
+            return json.loads(plano) if isinstance(plano, str) else plano
+        finally:
+            await transacao.rollback()
+
+
+def _literal(valor: Any) -> str:
+    if isinstance(valor, int):
+        return str(valor)
+    if isinstance(valor, list):
+        return "ARRAY[" + ", ".join(_literal(v) for v in valor) + "]::text[]"
+    texto = str(valor)
+    assert re.fullmatch(r"[0-9a-z_-]+", texto), texto
+    return f"'{texto}'"
+
+
+async def test_indices_dos_pedidos_barrados_e_da_quarentena_dizem_o_que_as_telas_contam(dono: AsyncEngine) -> None:
+    """R6b-4: o predicado de cada indice e o da consulta da tela (as constantes de ``consultas_terceiros``)."""
+    from mcp_claro.telas import consultas_terceiros as ct
+
+    pedidos = await fazer(dono, "SELECT indexdef FROM pg_indexes WHERE indexname = 'extrato_pedido_barrado_idx'")
+    quarentena = await fazer(dono, "SELECT indexdef FROM pg_indexes WHERE indexname = 'extrato_quarentena_idx'")
+    for definicao_indice in (pedidos, quarentena):
+        assert "(sistema_id, criado_em DESC)" in definicao_indice
+    citados = set(re.findall(r"'([a-z_]+)'::text", pedidos)) - {"pedidos", "array"}
+    assert citados == {*ct.TIPOS_PEDIDO_BARRADO, *ct.TIPOS_FIM_COM_PEDIDOS}
+    assert "jsonb_typeof((dados -> 'pedidos'::text)) = 'array'::text" in pedidos
+    assert "(dados -> 'pedidos'::text) <> '[]'::jsonb" in pedidos
+    assert set(re.findall(r"'([a-z_]+)'::text", quarentena)) == set(ct.TIPOS_QUARENTENA)
+    for indice in ("extrato_pedido_barrado_idx", "extrato_quarentena_idx"):
+        assert len(await _filhos_do_indice(dono, indice)) >= 4  # o mes passado, o atual e os proximos (0001)
+
+
+@pytest.mark.parametrize("generico", [False, True], ids=["plano_na_hora", "plano_guardado"])
+async def test_a_tela_dos_pedidos_e_a_ultima_quarentena_usam_os_indices_da_0006(
+    dono: AsyncEngine, generico: bool
+) -> None:
+    """R6b-4: as consultas da ficha de um terceiro (``pedidos_recusados`` e ``ultima_quarentena``) leem pelos indices
+    da 0006, inclusive no plano guardado (sem o valor dos parametros), e nunca a particao inteira."""
+    from mcp_claro.telas import consultas_terceiros as ct
+
+    async with dono.begin() as c:
+        alvo = await cadastrar_terceiro(c)
+        outro = await cadastrar_terceiro(c)
+        for sistema_id in (alvo, outro):
+            for tipo, dados in [
+                ("leitura_feita", {}),
+                ("acao_enviada", {"pedidos": []}),
+                ("acao_nao_saiu", {}),
+                ("acao_nao_confirmada", {"pedidos": ["link"]}),
+                ("leitura_sistema_pediu_dados", {"pedidos": ["link"]}),
+                ("sistema_em_quarentena", {"ferramentas": []}),
+            ]:
+                await c.execute(
+                    text(
+                        "SELECT extrato_registrar('despachante', :t, 'frase', NULL, NULL, NULL, :s, NULL,"
+                        " CAST(:d AS jsonb), NULL)"
+                    ),
+                    {"t": tipo, "s": sistema_id, "d": json.dumps(dados)},
+                )
+    consultas: list[tuple[str, Any]] = [
+        ("extrato_pedido_barrado_idx", lambda: ("SELECT count(*)" + ct._SQL_PEDIDOS, ct.DIAS_PEDIDOS)),
+        ("extrato_quarentena_idx", lambda: (ct.SQL_ULTIMA_QUARENTENA, ct.DIAS_QUARENTENA)),
+    ]
+    for indice, consulta in consultas:
+        sql, dias = consulta()
+        params: dict[str, Any] = {"s": str(alvo), "dias": dias}
+        if ":tipos" in sql:  # a consulta de antes da R6b-4, com os tipos por parametro
+            params = params | {"tipos": list(ct.TIPOS_PEDIDO_BARRADO)}
+        filhos = await _filhos_do_indice(dono, indice)
+        nos = _nos_do_plano(await _plano(dono, sql, params, generico=generico))
+        usados = [nome for _, nome, _ in nos if nome is not None]
+        assert usados, f"{indice}: nenhum indice no plano {nos}"
+        assert all(nome in filhos for nome in usados), f"a consulta nao usa so o indice {indice}: {nos}"
+        assert not [no for no in nos if "Seq Scan" in no[0]], f"a consulta le a particao inteira: {nos}"
+    # As consultas de verdade, como a entrada: so as linhas do sistema, as de pedido barrado e a quarentena.
+    async with dono.connect() as c:
+        transacao = await c.begin()
+        try:
+            await como(c, ENTRADA)
+            recusados = await ct.pedidos_recusados(c, alvo)
+            ultima = await ct.ultima_quarentena(c, alvo)
+        finally:
+            await transacao.rollback()
+    assert recusados.contagem == 2
+    assert {linha.tipo for linha in recusados.linhas} == {"acao_nao_confirmada", "leitura_sistema_pediu_dados"}
+    assert ultima is not None
+    assert ultima.tipo == "sistema_em_quarentena"
 
 
 # --- GUARDA_SISTEMAS ------------------------------------------------------------------------------------------
@@ -950,11 +1073,12 @@ async def test_terceiro_endereco_e_autorizacao_so_mudam_de_vazio_para_um_valor(d
     """Critica M1: mudar o destino de um terceiro mandaria as chaves guardadas a outro lugar."""
     revisao = await revisao_vigente(dono, cena.terceiro_id)
     fixo = "o endereco e a autorizacao nao mudam depois de preenchidos"
-    for papel in (None, ENTRADA):
+    # O dono esbarra na guarda; a entrada, antes dela, no GRANT (a 0006 tira o UPDATE de endereco, contrato K6).
+    for papel, esperado in ((None, fixo), (ENTRADA, SEM_PERMISSAO)):
         await recusado(
             dono,
             "UPDATE sistemas SET endereco = 'https://outro.teste/mcp' WHERE id = :s",
-            fixo,
+            esperado,
             papel=papel,
             s=cena.terceiro_id,
         )
@@ -999,9 +1123,8 @@ async def test_terceiro_endereco_e_autorizacao_so_mudam_de_vazio_para_um_valor(d
 
 
 async def test_proprio_com_endereco_novo_volta_a_pendente_e_apaga_a_sondagem(dono: AsyncEngine, cena: Cena) -> None:
-    await fazer(
-        dono, "UPDATE sistemas SET endereco = 'http://novo.teste/mcp' WHERE id = :s", papel=ENTRADA, s=cena.proprio_id
-    )
+    # Pelo dono (a equipe, no banco): a entrada nao muda mais o endereco (contrato K6).
+    await fazer(dono, "UPDATE sistemas SET endereco = 'http://novo.teste/mcp' WHERE id = :s", s=cena.proprio_id)
     r = await linha(
         dono,
         "SELECT situacao, versao_mcp, sondagem, sondagem_desfecho, versoes_anunciadas FROM sistemas WHERE id = :s",
@@ -1017,9 +1140,8 @@ async def test_terceiro_com_tipo_de_chave_novo_volta_a_pendente_e_perde_a_revisa
     await fazer(
         dono, "UPDATE sistemas SET conferencias_sem_resposta = 1 WHERE id = :s", papel=ROTINAS, s=cena.terceiro_id
     )
-    await fazer(
-        dono, "UPDATE sistemas SET tipo_chave = 'compartilhada' WHERE id = :s", papel=ENTRADA, s=cena.terceiro_id
-    )
+    # Pelo dono (a equipe, no banco): a entrada nao muda mais o tipo de chave (contrato K6).
+    await fazer(dono, "UPDATE sistemas SET tipo_chave = 'compartilhada' WHERE id = :s", s=cena.terceiro_id)
     r = await linha(
         dono,
         "SELECT situacao, versao_mcp, sondagem_desfecho, revisao_servidor_id, conferencias_sem_resposta FROM sistemas"
@@ -1117,18 +1239,24 @@ async def test_tres_saidas_indevidas_da_quarentena_fechadas(dono: AsyncEngine, c
         v=VERSAO_MCP,
         s=cena.terceiro_id,
     )
-    # Endereco novo: num terceiro, recusado (M1); num proprio em quarentena, continua em quarentena.
+    # Endereco novo: num terceiro, recusado (M1, pelo dono, que a guarda recusa; a entrada nem tem o GRANT, K6); num
+    # proprio em quarentena, continua em quarentena.
     await recusado(
         dono,
         "UPDATE sistemas SET endereco = 'https://x.teste/mcp' WHERE id = :s",
         "nao mudam depois de preenchidos",
+        s=cena.terceiro_id,
+    )
+    await recusado(
+        dono,
+        "UPDATE sistemas SET endereco = 'https://x.teste/mcp' WHERE id = :s",
+        SEM_PERMISSAO,
         papel=ENTRADA,
         s=cena.terceiro_id,
     )
     await fazer(dono, "UPDATE sistemas SET situacao = 'quarentena' WHERE id = :s", s=cena.proprio_id)
-    await fazer(
-        dono, "UPDATE sistemas SET endereco = 'http://x.teste/mcp' WHERE id = :s", papel=ENTRADA, s=cena.proprio_id
-    )
+    # O endereco de um proprio, pelo dono: a entrada nao o muda mais (contrato K6).
+    await fazer(dono, "UPDATE sistemas SET endereco = 'http://x.teste/mcp' WHERE id = :s", s=cena.proprio_id)
     assert tuple(await linha(dono, "SELECT situacao, versao_mcp FROM sistemas WHERE id = :s", s=cena.proprio_id)) == (
         "quarentena",
         None,
@@ -1138,14 +1266,12 @@ async def test_tres_saidas_indevidas_da_quarentena_fechadas(dono: AsyncEngine, c
     await fazer(
         dono,
         "UPDATE sistemas SET endereco = 'http://y.teste/mcp', situacao = 'pendente' WHERE id = :s",
-        papel=ENTRADA,
         s=cena.proprio_id,
     )
     assert await fazer(dono, "SELECT situacao FROM sistemas WHERE id = :s", s=cena.proprio_id) == "quarentena"
     await fazer(
         dono,
         "UPDATE sistemas SET endereco = 'http://z.teste/mcp', situacao = 'desativado' WHERE id = :s",
-        papel=ENTRADA,
         s=cena.proprio_id,
     )
     r = await linha(dono, "SELECT situacao, endereco, versao_mcp FROM sistemas WHERE id = :s", s=cena.proprio_id)
@@ -1361,11 +1487,12 @@ async def test_terceiro_so_com_chave_por_pessoa_ou_compartilhada(dono: AsyncEngi
         papel=ENTRADA,
         n=f"t-{uuid.uuid4().hex[:8]}",
     )
+    # Mudar o tipo de chave e com a equipe, no banco (a entrada nao tem o UPDATE, contrato K6): o CHECK vale ate
+    # para o dono.
     await recusado(
         dono,
         "UPDATE sistemas SET tipo_chave = 'programa' WHERE id = :s",
         "sistemas_chave_de_terceiro",
-        papel=ENTRADA,
         s=cena.terceiro_id,
     )
     for tipo in ("compartilhada", "por_pessoa"):
@@ -1377,7 +1504,7 @@ async def test_terceiro_so_com_chave_por_pessoa_ou_compartilhada(dono: AsyncEngi
             n=f"t-{uuid.uuid4().hex[:8]}",
             t=tipo,
         )
-    await fazer(dono, "UPDATE sistemas SET tipo_chave = 'programa' WHERE id = :s", papel=ENTRADA, s=cena.proprio_id)
+    await fazer(dono, "UPDATE sistemas SET tipo_chave = 'programa' WHERE id = :s", s=cena.proprio_id)
 
 
 # --- VERSAO ---------------------------------------------------------------------------------------------------
@@ -1719,6 +1846,11 @@ GRANTS: list[tuple[str, str, str | None, str, bool]] = [
     ],
     (E, "sistemas", "origem", "INSERT", True),
     (E, "sistemas", "revisao_servidor_id", "INSERT", False),
+    # Contrato K6 (R6b-6): a entrada so com o que o codigo usa em sistemas.
+    *[(E, "sistemas", col, "UPDATE", False) for col in ("nome", "endereco", "tipo_chave")],
+    (E, "sistemas", "autorizacao", "INSERT", False),
+    *[(E, "sistemas", col, "UPDATE", True) for col in ("situacao", "motivo", "autorizacao", "atualizado_em")],
+    *[(E, "sistemas", col, "INSERT", True) for col in ("nome", "endereco", "tipo_chave")],
     (E, "sinais", None, "SELECT", True),
     (E, "sinais", None, "INSERT", True),
     (E, "sinais", None, "UPDATE", False),
@@ -2052,17 +2184,13 @@ RETRATO_DE_COLUNA: Final = {
     ("mcp_claro_entrada", "limites", "usados_hoje", "UPDATE"),
     ("mcp_claro_entrada", "limites", "valido_ate", "UPDATE"),
     ("mcp_claro_entrada", "sistemas", "atualizado_em", "UPDATE"),
-    ("mcp_claro_entrada", "sistemas", "autorizacao", "INSERT"),
     ("mcp_claro_entrada", "sistemas", "autorizacao", "UPDATE"),
     ("mcp_claro_entrada", "sistemas", "endereco", "INSERT"),
-    ("mcp_claro_entrada", "sistemas", "endereco", "UPDATE"),
     ("mcp_claro_entrada", "sistemas", "motivo", "UPDATE"),
     ("mcp_claro_entrada", "sistemas", "nome", "INSERT"),
-    ("mcp_claro_entrada", "sistemas", "nome", "UPDATE"),
     ("mcp_claro_entrada", "sistemas", "origem", "INSERT"),
     ("mcp_claro_entrada", "sistemas", "situacao", "UPDATE"),
     ("mcp_claro_entrada", "sistemas", "tipo_chave", "INSERT"),
-    ("mcp_claro_entrada", "sistemas", "tipo_chave", "UPDATE"),
     ("mcp_claro_rotinas", "ferramentas_revisadas", "motivo", "UPDATE"),
     ("mcp_claro_rotinas", "ferramentas_revisadas", "situacao", "UPDATE"),
     ("mcp_claro_rotinas", "fichas", "avisada_em", "UPDATE"),

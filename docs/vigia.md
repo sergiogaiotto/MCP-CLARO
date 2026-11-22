@@ -176,6 +176,13 @@ Os segredos ficam em `.segredos/vigia/`, só nessa máquina:
 
 Abra a porta 9445 no firewall só para o endereço da máquina principal.
 
+**Parâmetros do gateway na segunda máquina.** A partida do vigia e a do `mcp-claro migrar-vigia` conferem os mesmos
+parâmetros que as outras peças do gateway, sem saber o papel. Isso inclui a sala de visitas da Fase 3
+(`VISITS_INTERNAL_URL`). Toda peça confere este valor na partida, menos a própria sala. Em piloto e produção, ponha
+o mesmo `VISITS_INTERNAL_URL` em todos os papéis, também no vigia da segunda máquina e nos comandos `migrar`,
+`migrar-vigia` e `conferir`. O vigia não fala com a sala, mas sem o valor ele não sobe. O
+`docker/vigia/compose.vigia.yml` do repositório está em `APP_ENV: teste` e não precisa dele.
+
 ## Parâmetros
 
 Parâmetros que já existiam: `PATROL_INTERVAL_SECONDS`, `PATROL_FAILS_TO_CLOSE`, `PATROL_AUTOCLOSE_ENABLED`,
@@ -210,3 +217,4 @@ com o valor inicial enquanto não entram em `config/settings.py`.
 | `WATCH_CONTINUITY_TOKEN_FILE` | caminho | nenhum | vigia e despachante | Menos de 32 caracteres |
 | `WATCH_CONTINUITY_URL` | URL | nenhum | despachante | Fora de `https://` em piloto e produção |
 | `WATCH_CONTINUITY_CA_FILE` | caminho | nenhum | despachante | |
+| `VISITS_INTERNAL_URL` | URL | nenhum | despachante; a partida de todo papel, menos a sala, confere | Vazio ou fora de `https://` em piloto e produção; em qualquer ambiente, um valor que não seja só o esquema (`http://` ou `https://`), o nome e a porta da sala |

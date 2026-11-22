@@ -49,6 +49,9 @@ FASE3 = {
         "programa": "Robo",
         "responsavel": "Rui",
     },
+    # Contrato K4 (R6e-2): pedido barrado fora de uma chamada, sem pessoa e sem ferramenta.
+    "declaracoes_sistema_pediu_dados": {"sistema": "Fornecedor CRM", "pedidos": "algo fora do padrao 2026-07-28"},
+    "sondagem_sistema_pediu_dados": {"sistema": "Fornecedor CRM", "pedidos": "dados por formulario"},
     "tres_sinais": {"protocolo": "CLR-2026-00000001", "de_fora": "ler_email", "privado": "ver_cadastro"},
     "limite_suspenso": {"ferramenta": "enviar_x", "motivo": "o servidor entrou em quarentena (mudou, parou)"},
     "sala_desvio_recusado": {"sistema": "Fornecedor CRM"},
@@ -106,6 +109,14 @@ TEXTOS_FASE3 = {
     "programa_leitura_sistema_pediu_dados": (
         "O sistema Fornecedor CRM pediu um link no meio da leitura em x, pelo programa Robo, responsavel Rui; o"
         " MCP-CLARO recusou e nao repassou o pedido."
+    ),
+    "declaracoes_sistema_pediu_dados": (
+        "O sistema Fornecedor CRM pediu algo fora do padrao 2026-07-28 no meio da leitura das ferramentas; o MCP-CLARO"
+        " recusou e nao repassou o pedido."
+    ),
+    "sondagem_sistema_pediu_dados": (
+        "O sistema Fornecedor CRM pediu dados por formulario no meio da sondagem de versao; o MCP-CLARO recusou e nao"
+        " repassou o pedido."
     ),
     "tres_sinais": (
         "Alerta dos tres sinais no protocolo CLR-2026-00000001: o aplicativo leu texto de fora em ler_email e viu"

@@ -29,24 +29,29 @@ import re
 import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx2
 import mcp_types as types
 import pytest
 
+from exemplos import terceiro_provas
 from mcp_claro import __version__
-from mcp_claro.cadastro import esquema
+from mcp_claro.cadastro import esquema, repositorio
 from mcp_claro.cadastro.modelos import FIM_DA_DESCRICAO_TERCEIRO, FerramentaVitrine, Sistema
 from mcp_claro.cadastro.quarentena import MOTIVO_PARADA
 from mcp_claro.config import politica
 from mcp_claro.config.settings import Parametros
+from mcp_claro.despachante import app as despachante_app
 from mcp_claro.despachante import autorizacao, renovacao, servico
 from mcp_claro.entrada import argumentos, servidor
 from mcp_claro.extrato.frases import AVISOS_ADMIN
 from mcp_claro.ligacao import cliente, ponto, sala_cliente, sala_contrato
 from mcp_claro.logs import LOGGERS_DO_KIT
+from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import programas, sinais
 from mcp_claro.rotinas import despachante as rotinas_despachante
 from mcp_claro.rotinas import mudou_parou
@@ -57,6 +62,7 @@ from mcp_claro.telas import autorizar, paginas
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 from mcp_claro.visitas import app as sala
 from mcp_claro.visitas import filho
+from tests.cifra_falsa import CifraFalsa
 
 RAIZ = Path(__file__).resolve().parents[2]
 DOCS = RAIZ / "docs"
@@ -282,7 +288,6 @@ FRASES: tuple[tuple[str, str], ...] = (
     ("saida.md", ponto.FORA_DO_PADRAO),
     *(("decisoes.md", legivel) for legivel in sorted(set(ponto.PEDIDOS_LEGIVEIS.values()))),
     *(("saida.md", legivel) for legivel in sorted(set(ponto.PEDIDOS_LEGIVEIS.values()))),
-    *(("decisoes.md", aviso.assunto) for aviso in AVISOS_ADMIN.values()),
     *(("decisoes.md", f"`{evento}`") for evento in AVISOS_ADMIN),
 )
 
@@ -290,6 +295,15 @@ FRASES: tuple[tuple[str, str], ...] = (
 @pytest.mark.parametrize(("nome", "frase"), FRASES, ids=[f"{n}:{f[:50]}" for n, f in FRASES])
 def test_as_frases_citadas_sao_as_do_codigo(nome: str, frase: str) -> None:
     assert tem(nome, frase, acento=False), frase
+
+
+@pytest.mark.parametrize("evento", sorted(AVISOS_ADMIN))
+def test_o_assunto_de_cada_aviso_e_citado_como_o_email_leva(evento: str) -> None:
+    # R6d-3: o assunto, letra por letra (sem acento, como o e-mail e o webhook levam), entre crases e junto do evento:
+    # um filtro de e-mail montado pelo documento acha o aviso.
+    quarentena = junto(secao(ler("decisoes.md"), "### Quarentena e mudou-parou"))
+    assert f"`{evento}` (`{AVISOS_ADMIN[evento].assunto}`)" in quarentena
+    assert "cada um com o assunto que o e-mail leva (o assunto vai sem acento):" in quarentena
 
 
 def test_a_mensagem_da_conclusao_sem_a_chave_e_a_do_despachante() -> None:
@@ -1115,19 +1129,413 @@ def test_a_sala_fora_nao_conta_rodada_do_mudou_parou_como_os_documentos_dizem(mo
     # ... e o mudou-parou nao soma nem zera a contagem com ela; o servidor que nao entregou (502) soma uma rodada.
     assert _rodada(monkeypatch, sala_fora) == []
     assert _rodada(monkeypatch, nao_entregou) == ["somou"]
+    # K5: a falha nossa no banco ou no pool do despachante (503 `conferencia_nao_feita`) nao conta; um 500 sem motivo
+    # nosso conta.
+    nossa = _declaracoes_com(503, {"motivo": "conferencia_nao_feita", "mensagem": "x"})
+    assert isinstance(nossa, mudou_parou.ConferenciaNaoFeita)
+    assert _rodada(monkeypatch, nossa) == []
+    sem_motivo = _declaracoes_com(500, {})
+    assert not isinstance(sem_motivo, mudou_parou.ConferenciaNaoFeita)
+    assert _rodada(monkeypatch, sem_motivo) == ["somou"]
     # Documentos.
     assert tem("saida.md", "A conferência do mudou-parou não conta essa rodada contra os servidores de terceiros.")
     assert tem(
         "decisoes.md",
         "Na leitura das declarações (revisão e mudou-parou), com a sala de visitas fora, a resposta do despachante"
-        " é 503 `sala_fora`.",
+        " é 503 `sala_fora`;",
     )
     assert tem("decisoes.md", 'As rotinas não contam essas rodadas como "sem resposta".')
     assert tem(
         "decisoes.md",
         "Uma rodada que o MCP-CLARO não conseguiu fazer não conta nem zera: o despachante fora do ar (sem conexão, 503"
-        " ou 404 dele), a sala de visitas fora e a chave das declarações que o cofre não abriu. Conta qualquer outra"
-        " falha: o servidor que não entregou as declarações (502), um 500 ou o prazo de leitura.",
+        " ou 404 dele), a sala de visitas fora, a sala de visitas cheia dita pelo processo pai dela (503 com o motivo"
+        " `sala_sem_vaga`), a chave das declarações que o cofre não abriu e uma falha do MCP-CLARO no banco ou no"
+        " grupo de conexões do despachante durante a conferência (503 com o motivo `conferencia_nao_feita`). Conta"
+        " qualquer outra falha: o servidor que não entregou as declarações (502, também quando ele declarou o que o"
+        " banco não guarda e quando o corpo de sala cheia vem sem o cabeçalho do processo pai), um erro 500 do"
+        " despachante sem motivo nosso ou o prazo de leitura.",
+    )
+
+
+class _SalaQueNaoEnviou:
+    """A ligacao pela sala de visitas que nao mandou nada ao terceiro: a listagem volta "nao enviado" com ``excecao``
+    (``SalaFora``, ou ``sala_sem_vaga`` da sala cheia, contrato K7)."""
+
+    def __init__(self, excecao: str) -> None:
+        self.excecao = excecao
+
+    async def listar(self, *_: object) -> object:
+        raise sala_contrato.FalhaNaSala("nao_enviado", self.excecao)
+
+
+def _listar_pela_sala(monkeypatch: pytest.MonkeyPatch, excecao: str) -> Exception:
+    """``Despachante._listar`` de um terceiro, com a sala que responde "nao enviado" com ``excecao``: o erro que sai."""
+    linhas: list[str | None] = []
+
+    async def registrar_sala(_self: object, _c: object, _sistema: object, linha: str | None) -> str | None:
+        linhas.append(linha)
+        return linha
+
+    @contextlib.asynccontextmanager
+    async def begin() -> AsyncIterator[None]:
+        yield None
+
+    monkeypatch.setattr(servico.Despachante, "_registrar_sala", registrar_sala)
+    despachante: Any = object.__new__(servico.Despachante)
+    despachante.ligacao = lambda _sistema: _SalaQueNaoEnviou(excecao)
+    despachante.engine = SimpleNamespace(begin=begin)
+    sistema = SimpleNamespace(
+        id=uuid.uuid4(), nome="terceiro-x", endereco="https://x.exemplo/mcp", origem="terceiro", de_terceiro=True
+    )
+
+    async def listar() -> Exception:
+        try:
+            await despachante._listar(sistema, None, None)
+        except Exception as erro:  # o teste olha o tipo do erro
+            return erro
+        raise AssertionError("a listagem pela sala que nao enviou nada nao levantou")
+
+    erro = asyncio.run(listar())
+    # A sala fora grava a linha `sala_fora`; a sala cheia nao tem linha da sala.
+    assert linhas == ([ponto.LINHA_SALA_FORA] if excecao == sala_contrato.SALA_FORA else [])
+    return erro
+
+
+class _FilhoQueEscreveu:
+    """O filho da sala que ja chamou o terceiro e escreveu a resposta: o pai so o encerra no fim."""
+
+    def encerrar(self) -> None:
+        return None
+
+
+class _ConexaoDoDespachante:
+    """A leitura do sistema e da sondagem em ``ler_declaracoes`` (o sistema vem de ``repositorio.sistema_por_id``)."""
+
+    async def execute(self, *_: object) -> _ConexaoDoDespachante:
+        return self
+
+    def scalar_one_or_none(self) -> None:
+        return None  # sem sondagem guardada
+
+
+class _BancoDoDespachante:
+    """O banco do despachante na leitura das declaracoes com a sala cheia: so leitura, nada a gravar."""
+
+    @contextlib.asynccontextmanager
+    async def connect(self) -> AsyncIterator[_ConexaoDoDespachante]:
+        yield _ConexaoDoDespachante()
+
+    @contextlib.asynccontextmanager
+    async def begin(self) -> AsyncIterator[None]:
+        raise AssertionError("a sala cheia nao grava nada no banco (nada saiu, nada foi pedido)")
+        yield None  # pragma: no cover
+
+
+def _sala_sem_vaga_nas_declaracoes() -> int:
+    """Quanto o contador ``sala_sem_vaga{onde=declaracoes}`` tem agora (sem tirar nada dele)."""
+    medidas, recusas = CONTADORES.retirar()
+    CONTADORES.devolver(medidas, recusas)
+    alvo = json.dumps({"onde": "declaracoes"}, sort_keys=True, ensure_ascii=False)
+    return sum(n for (_, nome, r), n in medidas.items() if nome == sala_contrato.SALA_SEM_VAGA and r == alvo)
+
+
+@dataclass
+class _Caminho:
+    """O que se viu em cada ponto do caminho da leitura das declaracoes com a sala cheia."""
+
+    sala: httpx2.Response  # a resposta crua da sala ao despachante
+    despachante: httpx2.Response  # a resposta de ``POST /interno/declaracoes``
+    rotinas: Exception  # o erro que o cliente das rotinas levantou
+    rodada: list[str]  # o que a rodada do mudou-parou mexeu na contagem de rodadas sem resposta
+    contou: int  # quanto ``sala_sem_vaga{onde=declaracoes}`` somou numa leitura
+
+
+def _declaracoes_com_a_sala_cheia(monkeypatch: pytest.MonkeyPatch, *, escrita_pelo_filho: bool) -> _Caminho:
+    """A leitura das declaracoes de um terceiro pelo caminho de verdade, com a sala cheia, sem banco.
+
+    A sala e a de verdade (``visitas.app``: o processo pai, com uma vaga so e ela tomada; nenhum filho nasce). Com
+    ``escrita_pelo_filho``, a vaga existe e o "filho" (um terceiro que o tomou) escreve o mesmo corpo de sala cheia: o
+    pai devolve o que ele escreveu, sem ler. Dali em diante, tudo e o codigo de verdade: o cliente da sala do
+    despachante (``ClienteSala``, montado pela partida do despachante), ``Despachante.ler_declaracoes`` e
+    ``_listar``, a rota ``/interno/declaracoes``, o cliente das rotinas e a rodada do mudou-parou. Do banco, so a
+    leitura do sistema e a chave (trocadas aqui); a sala cheia nao grava nada."""
+    p = Parametros(
+        APP_ENV="teste",
+        VISITS_INTERNAL_URL="http://visitas.teste:9446",
+        DISPATCHER_INTERNAL_URL="http://despachante.teste:9443",
+    )
+    visitas = sala.Sala(p, prontos=0, max_chamadas=1, prazo_vaga=0.05)
+    if escrita_pelo_filho:
+
+        async def pegar(filhos: list[Any]) -> None:
+            filhos.append(_FilhoQueEscreveu())
+
+        async def entregar_e_receber(_filhos: object, _rota: str, _corpo: bytes) -> bytes:
+            return b"200" + sala._SEM_VAGA[sala_contrato.ROTA_LISTAR]
+
+        monkeypatch.setattr(visitas, "_pegar", pegar)
+        monkeypatch.setattr(visitas, "_entregar_e_receber", entregar_e_receber)
+    app_sala = sala.criar_app_visitas(p, sala=visitas)
+
+    def http_da_sala(_self: object, prazo: float) -> httpx2.AsyncClient:
+        return httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app_sala), timeout=prazo)
+
+    monkeypatch.setattr(sala_cliente.ClienteSala, "_http", http_da_sala)
+    terceiro = Sistema(
+        uuid.uuid4(), "terceiro-y", "https://y.exemplo.teste/mcp", "terceiro", "compartilhada", 1, "ativo", VERSAO_MCP
+    )
+
+    async def sistema_por_id(_c: object, sistema_id: uuid.UUID) -> Sistema | None:
+        return terceiro if sistema_id == terceiro.id else None
+
+    async def abrir(_c: object, _cifra: object, *, sistema_id: uuid.UUID, tipo: str) -> str:
+        return "chave-de-y"
+
+    monkeypatch.setattr(servico.repositorio, "sistema_por_id", sistema_por_id)
+    monkeypatch.setattr(servico.chaves, "abrir", abrir)
+    app_despachante = despachante_app.criar_app_despachante(p, cast(Any, _BancoDoDespachante()), CifraFalsa())
+    assert isinstance(app_despachante.state.despachante.sala, sala_cliente.ClienteSala)
+    mexidas: list[str] = []
+
+    async def somou(*_: object, **__: object) -> None:
+        mexidas.append("somou")
+
+    async def zerou(*_: object, **__: object) -> None:
+        mexidas.append("zerou")
+
+    monkeypatch.setattr(mudou_parou, "_sem_resposta_de_terceiro", somou)
+    monkeypatch.setattr(mudou_parou, "_zerar_sem_resposta", zerou)
+
+    async def caminho() -> _Caminho:
+        pedido = sala_contrato.PedidoListar(endereco=terceiro.endereco).para_json()
+        async with visitas.ligada():
+            if not escrita_pelo_filho:
+                assert visitas._vagas is not None
+                await visitas._vagas.acquire()  # a unica vaga, tomada por um terceiro lento
+            async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app_sala)) as http:
+                da_sala = await http.post("http://visitas.teste:9446" + sala_contrato.ROTA_LISTAR, content=pedido)
+            antes = _sala_sem_vaga_nas_declaracoes()
+            async with httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app_despachante)) as http:
+                do_despachante = await http.post(
+                    "http://despachante.teste:9443/interno/declaracoes", json={"sistema_id": str(terceiro.id)}
+                )
+            contou = _sala_sem_vaga_nas_declaracoes() - antes
+            cliente_rotinas = rotinas_despachante.ClienteDespachante(
+                p, http=httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app_despachante))
+            )
+            try:
+                try:
+                    await cliente_rotinas.declaracoes(terceiro.id)
+                except Exception as erro:  # o teste olha o tipo do erro
+                    das_rotinas: Exception = erro
+                else:
+                    raise AssertionError("as rotinas leram as declaracoes com a sala cheia")
+                await mudou_parou.conferir_terceiro(
+                    cast(Any, _Banco()),
+                    cliente_rotinas,
+                    terceiro.id,
+                    terceiro.nome,
+                    uuid.uuid4(),
+                    (),
+                    mudou_parou.ResultadoMudouParou(),
+                    intervalo=900.0,
+                )
+            finally:
+                await cliente_rotinas.fechar()
+        return _Caminho(da_sala, do_despachante, das_rotinas, mexidas, contou)
+
+    return asyncio.run(caminho())
+
+
+def test_a_sala_cheia_dita_pelo_pai_nao_conta_rodada_e_o_corpo_sem_a_marca_conta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Codigo, pelo caminho de verdade. A sala cheia dita pelo processo pai: o cabecalho que so ele escreve, 503
+    # `sala_sem_vaga` no despachante, falha do MCP-CLARO nas rotinas, e a rodada nao conta nem zera.
+    pai = _declaracoes_com_a_sala_cheia(monkeypatch, escrita_pelo_filho=False)
+    assert pai.sala.status_code == 200
+    assert pai.sala.headers.get(sala_contrato.CABECALHO_DA_SALA) == sala_contrato.SALA_SEM_VAGA == "sala_sem_vaga"
+    assert sala_contrato.CABECALHO_DA_SALA == "mcp-claro-sala"
+    assert pai.sala.content == sala._SEM_VAGA[sala_contrato.ROTA_LISTAR]
+    assert pai.despachante.status_code == 503
+    assert pai.despachante.json()["motivo"] == "sala_sem_vaga"
+    assert isinstance(pai.rotinas, mudou_parou.ConferenciaNaoFeita)
+    assert pai.rodada == []
+    assert pai.contou == 1
+    monkeypatch.undo()
+    # O mesmo corpo escrito por um filho (tomado pelo terceiro), sem o cabecalho: o servidor que nao entregou, 502
+    # `declaracoes_indisponiveis`, e a rodada conta (A5). A sala nao estava cheia, e o contador nao soma.
+    filho_tomado = _declaracoes_com_a_sala_cheia(monkeypatch, escrita_pelo_filho=True)
+    assert filho_tomado.sala.status_code == 200
+    assert sala_contrato.CABECALHO_DA_SALA not in filho_tomado.sala.headers
+    assert filho_tomado.sala.content == pai.sala.content
+    assert filho_tomado.despachante.status_code == 502
+    assert filho_tomado.despachante.json()["motivo"] == "declaracoes_indisponiveis"
+    assert not isinstance(filho_tomado.rotinas, mudou_parou.ConferenciaNaoFeita)
+    assert filho_tomado.rodada == ["somou"]
+    assert filho_tomado.contou == 0
+    # A conclusao da revisao do servidor recusa com `sem_resposta` nos dois casos (a sala cheia dita pelo pai e uma
+    # DeclaracoesIndisponiveis tambem).
+    assert issubclass(servico.DeclaracoesNaoConferidas, servico.DeclaracoesIndisponiveis)
+    revisar = inspect.getsource(servico.Despachante.revisar_servidor)
+    assert (
+        "ferramentas = await self._listar(sistema, segredo, comeco.sondagem)\n        except"
+        ' DeclaracoesIndisponiveis:\n            raise await recusar(\n                "sem_resposta",'
+    ) in revisar
+    # Na leitura, a frase legivel da sala cheia.
+    terceiro = SimpleNamespace(nome="SERVIDOR-X", de_terceiro=True, origem="terceiro")
+    falha = servico._falha(cliente.Resposta("nao_enviado", excecao=sala_contrato.SALA_SEM_VAGA), cast(Any, terceiro))
+    assert falha["content"][0]["text"] == (
+        "A sala de visitas estava cheia; nada foi enviado ao servidor de terceiros SERVIDOR-X. Tente de novo em"
+        " instantes."
+    )
+    # O contador `sala_sem_vaga`, com os quatro `onde` que os documentos citam.
+    fontes = inspect.getsource(servico) + inspect.getsource(porta)
+    ondes = set(re.findall(r'SALA_SEM_VAGA, (?:onde="(\w+)"|\{"onde": "(\w+)"\})', fontes))
+    assert {a or b for a, b in ondes} == {"acao", "leitura", "declaracoes", "sondagem"}
+    # Documentos.
+    contrato = junto(secao(ler("decisoes.md"), "### Sala de visitas: o contrato entre o despachante e a sala"))
+    assert (
+        "Na leitura das declarações (revisão do servidor e mudou-parou), a sala cheia é falha do MCP-CLARO, como a sala"
+        " fora: o despachante responde 503 com o motivo `sala_sem_vaga`, a conclusão da revisão é recusada com o"
+        " motivo `sem_resposta`, e o mudou-parou não conta a rodada. Só vale a sala cheia dita pelo processo pai da"
+        " sala: só ele põe na resposta o cabeçalho `mcp-claro-sala: sala_sem_vaga`, e o filho escreve só o status e o"
+        " corpo. O mesmo corpo de sala cheia sem o cabeçalho, que um filho tomado pelo terceiro poderia escrever,"
+        " continua contando como o servidor que não entregou (502 `declaracoes_indisponiveis`), para ele não fugir da"
+        " quarentena por não responder (A5)."
+    ) in contrato
+    assert (
+        'na leitura, o aplicativo recebe o erro legível "A sala de visitas estava cheia; nada foi enviado ao servidor'
+        ' de terceiros", com o nome do servidor e o pedido para tentar de novo em instantes.'
+    ) in contrato
+    assert (
+        "O contador `sala_sem_vaga` soma com `onde=acao` na ação, `onde=leitura` na leitura, `onde=declaracoes` na"
+        " leitura das declarações e `onde=sondagem` na conferência da versão. O que fica: com a sala cheia em toda"
+        ' rodada, nenhuma conferência de terceiro é feita (veja "Riscos aceitos da Fase 3").'
+    ) in contrato
+    for prova in (
+        "`tests/unidade/test_r6e_sala_cheia_marcada.py`",
+        "`tests/integracao/test_r6e_sala_cheia.py`",
+        "`tests/unidade/test_docs_fase3_g8a.py::test_a_sala_cheia_dita_pelo_pai_nao_conta_rodada_e_o_corpo_sem_a_marca_conta`",
+    ):
+        assert prova in contrato, prova
+    quarentena = junto(secao(ler("decisoes.md"), "### Quarentena e mudou-parou"))
+    assert (
+        "a sala de visitas fora, a sala de visitas cheia dita pelo processo pai dela (503 com o motivo"
+        " `sala_sem_vaga`), a chave das declarações que o cofre não abriu"
+    ) in quarentena
+    assert (
+        "Conta qualquer outra falha: o servidor que não entregou as declarações (502, também quando ele declarou o que"
+        " o banco não guarda e quando o corpo de sala cheia vem sem o cabeçalho do processo pai), um erro 500 do"
+        " despachante sem motivo nosso ou o prazo de leitura."
+    ) in quarentena
+    assert (
+        "com a sala de visitas fora, a resposta do despachante é 503 `sala_fora`; com a sala cheia dita pelo processo"
+        " pai dela, 503 `sala_sem_vaga`."
+    ) in quarentena
+    assert (
+        "vale também para o endereço de terceiro que não é público e para o corpo de sala cheia sem o cabeçalho do"
+        ' processo pai ("Sala cheia: nada sai, sem dúvida", acima).'
+    ) in quarentena
+    assert "também com a sala de visitas cheia" not in quarentena
+    assert "e para a sala de visitas cheia" not in quarentena
+    riscos = _riscos()
+    assert "Sala cheia na conferência leva à quarentena." not in riscos
+    assert riscos["Sala cheia em toda conferência."] == (
+        "- **Sala cheia em toda conferência.** Se as 32 vagas da sala ficarem ocupadas por mais de 2 s na hora de cada"
+        " rodada do mudou-parou, nenhuma conferência de terceiro é feita, e um servidor que mudou só é visto quando a"
+        " sala esvazia. Isso vale também para o terceiro lento que ocupa as vagas: enquanto a sala estiver cheia, a"
+        " mudança dele não é vista; a vitrine continua só com o que foi revisado. O contador `sala_sem_vaga` (com"
+        " `onde=declaracoes`) mostra; a equipe que opera o gateway confere. Só a sala cheia dita pelo processo pai não"
+        " conta: o mesmo corpo escrito por um filho tomado conta como o servidor que não entregou (decisão do"
+        " coordenador, na revisão cruzada)."
+    )
+    assert tem(
+        "saida.md",
+        "Como a sala fora, a conferência do mudou-parou não conta essa rodada contra o servidor. A sala cheia soma o"
+        " contador `sala_sem_vaga` nas medições (`medicoes.minuto`), com `onde=acao` na ação, `onde=leitura` na"
+        " leitura, `onde=declaracoes` na conferência e na leitura das ferramentas pelo ADMIN, e `onde=sondagem` na"
+        " conferência da versão. Se o contador sobe com `onde=declaracoes` a cada rodada, há conferências de terceiros"
+        " que não estão sendo feitas: confira os servidores lentos.",
+    )
+    assert not tem("saida.md", "conta essa rodada como sem resposta")
+    # O contador soma um por servidor que achou a sala cheia (acima, uma leitura soma 1), e nao um por rodada: subir
+    # a cada rodada mostra que ha conferencias nao feitas, e nao que nenhuma foi feita.
+    assert not tem("saida.md", "nenhuma conferência de terceiro está sendo feita")
+    # O texto que dizia o contrario (a sala cheia contava rodada) saiu de todos os documentos.
+    for nome in ("decisoes.md", "saida.md", "modelo-de-ameacas.md", "simulado-dia-ruim.md", "terceiros.md"):
+        texto = junto(ler(nome))
+        for velho in (
+            "a sala cheia conta como o servidor que não entregou",
+            "conta a rodada como sem resposta",
+            "também pode vir da sala de visitas cheia",
+            "podem levar outro terceiro à quarentena",
+        ):
+            assert velho not in texto, (nome, velho)
+
+
+def test_o_terceiro_lento_que_ocupa_as_vagas_tambem_escapa_da_propria_conferencia(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A vaga da sala e de todos os terceiros juntos, e a leitura das declaracoes nao tem vaga propria: a chamada
+    lenta de um terceiro, que toma a unica vaga, faz a leitura das declaracoes dele mesmo voltar com a sala cheia
+    dita pelo pai (o cabecalho), que o mudou-parou nao conta (teste acima). Quando a chamada acaba, a leitura
+    seguinte vai a um filho. Enquanto isso, a vitrine do terceiro mostra so o que a revisao vigente publicou."""
+    p = Parametros(APP_ENV="teste", VISITS_INTERNAL_URL="http://visitas.teste:9446")
+    visitas = sala.Sala(p, prontos=0, max_chamadas=1, prazo_vaga=0.05)
+    endereco = "https://y.exemplo.teste/mcp"
+    entregues: list[str] = []
+
+    async def pegar(filhos: list[Any]) -> None:
+        filhos.append(_FilhoQueEscreveu())
+
+    async def caminho() -> tuple[httpx2.Response, httpx2.Response, sala.Atendimento]:
+        na_vaga, solta = asyncio.Event(), asyncio.Event()
+
+        async def entregar_e_receber(_filhos: object, rota: str, _corpo: bytes) -> bytes:
+            entregues.append(rota)
+            if rota == sala_contrato.ROTA_CHAMAR:
+                na_vaga.set()
+                await solta.wait()  # o terceiro lento: o filho ainda espera a resposta dele
+            return b"200{}"
+
+        monkeypatch.setattr(visitas, "_pegar", pegar)
+        monkeypatch.setattr(visitas, "_entregar_e_receber", entregar_e_receber)
+        app_sala = sala.criar_app_visitas(p, sala=visitas)
+        chamar = sala_contrato.PedidoChamar(endereco=endereco, nome="consultar", argumentos={}).para_json()
+        listar = sala_contrato.PedidoListar(endereco=endereco).para_json()
+        url = "http://visitas.teste:9446" + sala_contrato.ROTA_LISTAR
+        async with visitas.ligada(), httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app_sala)) as http:
+            lenta = asyncio.create_task(visitas.atender(sala_contrato.ROTA_CHAMAR, chamar))
+            await asyncio.wait_for(na_vaga.wait(), 5)
+            cheia = await http.post(url, content=listar)  # a conferencia do mesmo terceiro, com a vaga tomada
+            solta.set()
+            chamada = await asyncio.wait_for(lenta, 5)
+            vazia = await http.post(url, content=listar)  # a sala esvaziou
+        return cheia, vazia, chamada
+
+    cheia, vazia, chamada = asyncio.run(caminho())
+    assert cheia.status_code == 200
+    assert cheia.headers.get(sala_contrato.CABECALHO_DA_SALA) == sala_contrato.SALA_SEM_VAGA
+    assert cheia.content == sala._SEM_VAGA[sala_contrato.ROTA_LISTAR]
+    assert chamada.desfecho == "filho"
+    assert vazia.status_code == 200
+    assert sala_contrato.CABECALHO_DA_SALA not in vazia.headers
+    assert entregues == [sala_contrato.ROTA_CHAMAR, sala_contrato.ROTA_LISTAR]
+    # A vitrine de um terceiro: so as ferramentas publicadas na revisao vigente, com a definicao que a revisao gravou.
+    assert "f.id = ANY (rs.publicadas) AND f.definicao_declarada IS NOT NULL" in repositorio._SQL_VITRINE
+    assert "JOIN ferramentas_revisadas f ON" in repositorio._SQL_VITRINE
+    # Documentos.
+    lento = (
+        "Isso vale também para o terceiro lento que ocupa as vagas: enquanto a sala estiver cheia, a mudança dele não é"
+        " vista; a vitrine continua só com o que foi revisado."
+    )
+    assert lento in _riscos()["Sala cheia em toda conferência."]
+    assert lento in junto(secao(ler("modelo-de-ameacas.md"), "### Isolamento dos processos da sala"))
+    assert tem(
+        "modelo-de-ameacas.md",
+        "- Sala cheia em toda conferência: enquanto durar, nenhuma conferência de terceiro é feita, nem a do terceiro"
+        " lento que ocupa as vagas (risco aceito,",
     )
 
 
@@ -1193,11 +1601,188 @@ def test_o_que_a_porta_de_saida_diz_da_quarentena_e_do_alerta_e_o_que_o_codigo_f
     )
 
 
+def _testes_do_arquivo(caminho: Path) -> list[str]:
+    """Os nomes dos testes de um arquivo, pela arvore do codigo (``def`` e ``async def`` no modulo)."""
+    return [
+        no.name
+        for no in ast.parse(caminho.read_text(encoding="utf-8")).body
+        if isinstance(no, ast.FunctionDef | ast.AsyncFunctionDef) and no.name.startswith("test_")
+    ]
+
+
+# Guardas das fontes dos testes, nao provas: nao precisam aparecer no andamento.
+_GUARDAS_DAS_FONTES = frozenset({"test_fontes_das_provas_sem_caractere_escondido_cru"})
+_ETAPA_6 = ("test_fase3_provas_de_saida.py", "test_fase3_ensaios.py")
+
+
 def test_o_andamento_diz_o_que_falta_na_fase_3() -> None:
-    assert tem(
-        "andamento.md",
-        "Falta a etapa 6: as provas de saída de ponta a ponta, os ensaios antes de ligar e uma revisão cruzada.",
+    fase3 = junto(secao(ler("andamento.md"), "## Fase 3: servidores de terceiros"))
+    assert "Falta terminar a revisão cruzada da etapa 6, com os achados corrigidos." in fase3
+    velhas = (
+        "Falta a etapa 6",
+        "A fazer na etapa 6",
+        "Falta a prova de ponta a ponta",
+        "Falta repetir pelo gateway",
+        "Falta gravar cada byte",
+        "Ainda falta, na etapa 6",
+        "como em toda fase",
     )
+    assert [v for v in velhas if v in fase3] == []
+    # Cada teste das provas de saida e dos ensaios da etapa 6, tirado do arquivo, aparece citado no andamento.
+    for arquivo in _ETAPA_6:
+        nomes = [n for n in _testes_do_arquivo(RAIZ / "tests/integracao" / arquivo) if n not in _GUARDAS_DAS_FONTES]
+        assert nomes, arquivo
+        faltam = [n for n in nomes if f"`{arquivo}::{n}`" not in fase3 and f"({arquivo}::{n})" not in fase3]
+        assert faltam == [], f"{arquivo}: o andamento nao cita {faltam}"
+
+
+def _provas_de_saida() -> list[tuple[str, str]]:
+    """As linhas (prova, situacao) da tabela "Provas de saída do plano" do andamento."""
+    texto = secao(ler("andamento.md"), "## Fase 3: servidores de terceiros")
+    _, _, depois = texto.partition("Provas de saída do plano, por partes e pelo gateway inteiro (etapa 6):\n")
+    linhas = [x for x in depois.strip().splitlines()]
+    tabela = linhas[: next(i for i, x in enumerate(linhas) if not x.startswith("|"))]
+    assert tabela[:2] == ["| Prova de saída | Situação |", "| --- | --- |"], tabela[:2]
+    return [cast(tuple[str, str], tuple(c.strip() for c in x.strip("|").split(" | "))) for x in tabela[2:]]
+
+
+def test_a_tabela_das_provas_de_saida_diz_o_que_a_etapa_6_fez() -> None:
+    provas = _provas_de_saida()
+    assert len(provas) == 7
+    feitas = set(_testes_do_arquivo(RAIZ / "tests/integracao/test_fase3_provas_de_saida.py")) - _GUARDAS_DAS_FONTES
+    citadas: set[str] = set()
+    for prova, situacao in provas:
+        assert situacao.startswith("Feito "), prova
+        assert not re.search(r"\b(Falta|A fazer)\b", situacao), prova
+        nomes = set(re.findall(r"test_fase3_provas_de_saida\.py::(test_\w+)", situacao))
+        assert len(nomes) == 1, prova
+        citadas |= nomes
+    assert citadas == feitas
+    # A linha 2 cita tambem o isolamento com a entrada, as rotinas e o login no ar (R6d-1 e R6d-2).
+    _, sala_isolada = provas[1]
+    assert (
+        "`test_fase3_ensaios.py::test_de_dentro_da_sala_entrada_rotinas_login_no_ar_nao_alcancaveis_por_nome_nem_por_ip`"
+        in sala_isolada
+    )
+    assert (
+        "`test_sala_isolada.py` (o banco e o cofre, pelo nome e pelo IP, os metadados das nuvens e os IPs privados da"
+        " rede `saida_visitas`, a cada mudança)"
+    ) in sala_isolada
+
+
+def _fonte_do_teste(arquivo: str, nome: str) -> str:
+    """O codigo de um teste da etapa 6, pela arvore do arquivo, numa linha so por trecho (sem quebras)."""
+    caminho = RAIZ / "tests/integracao" / arquivo
+    texto = caminho.read_text(encoding="utf-8")
+    (no,) = [
+        n for n in ast.parse(texto).body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef) and n.name == nome
+    ]
+    trecho = ast.get_source_segment(texto, no)
+    assert trecho is not None
+    return junto(trecho)
+
+
+def test_o_andamento_diz_o_que_cada_prova_da_etapa_6_confere_hoje() -> None:
+    """O que o andamento diz de cada prova e o que o codigo do teste confere hoje (o R6c reforcou as provas 1, 4, 6
+    e 7 e os ensaios): se o teste deixar de conferir, este falha ate o andamento mudar junto."""
+    provas = dict(_provas_de_saida())
+    saida = "test_fase3_provas_de_saida.py"
+    # Prova 1: uma conclusao so com uma tira a outra da vitrine, e a seguinte, com as duas, a traz de volta.
+    um = _fonte_do_teste(
+        saida, "test_cada_terceiro_na_vitrine_tem_a_revisao_do_servidor_vigente_registrada_em_todo_o_percurso"
+    )
+    assert 'assert (await admin.concluir(sistema_id, "consultar_pedido")).status_code == 303' in um
+    assert 'assert vistas[("ana", app.client_id)] == [pedido_vitrine]' in um
+    assert 'assert (await admin.concluir(sistema_id, "consultar_pedido", "consultar_entrega")).status_code == 303' in um
+    assert (
+        "No percurso, uma conclusão que deixa de fora uma ferramenta já revisada a tira da vitrine, e a conclusão"
+        " seguinte, com as duas, a traz de volta."
+    ) in provas["Cada servidor de terceiros revisado e registrado"]
+    # Prova 4: um aviso so, por e-mail, sem o texto do fornecedor, e nada repetido na rodada seguinte.
+    quatro = _fonte_do_teste(
+        saida, "test_mudanca_so_de_texto_em_terceiro_leva_o_servidor_inteiro_a_quarentena_pela_sala"
+    )
+    assert "(aviso,) = await _avisos_de_quarentena(gw, sistema_id)" in quatro
+    assert 'assert (aviso.canal, aviso.destino) == ("email", g9.ADMIN_EMAIL)' in quatro
+    assert 'for do_fornecedor in ("Consulta a situacao", "consultar_pedido", "consultar_entrega"):' in quatro
+    assert 'assert len(await gw.extrato(sistema_id=sistema_id, tipo="sistema_em_quarentena")) == 1' in quatro
+    assert "assert await _avisos_de_quarentena(gw, sistema_id) == [aviso]" in quatro
+    assert (
+        "um aviso só ao ADMIN, por e-mail, sem o texto do fornecedor nem o nome das ferramentas no servidor, e a rodada"
+        " seguinte não repete nem a linha do extrato nem o aviso"
+    ) in provas["Mudança só de texto num servidor de teste leva à quarentena"]
+    # Prova 2: chaves por pessoa da Ana e da Bia num terceiro, compartilhada e de programa em proprios.
+    dois = _fonte_do_teste(
+        saida, "test_sala_isolada_o_terceiro_recebe_so_o_pedido_sem_chave_alheia_cracha_rastro_nem_resultado_alheio"
+    )
+    for trecho in ('(s_terceiro, ana, "ana_t")', '(s_terceiro, bia, "bia_t")'):
+        assert trecho in dois, trecho
+    assert 'tipo_chave="compartilhada"' in dois
+    assert 'tipo_chave="programa"' in dois
+    assert "com chaves por pessoa da Ana e da Bia, compartilhada e de programa em próprios" in junto(
+        provas["Sala de visitas isolada: o servidor não alcança chaves nem dados de outros sistemas"]
+    )
+    # Prova 5: o limite criado pela tela de limites (gw.limite), com passkey.
+    cinco = _fonte_do_teste(saida, "test_tres_sinais_suspendem_o_limite_e_a_ficha_mostra_o_motivo")
+    assert 'limite = await gw.limite(ana, app, s_caixa, "enviar_mensagem"' in cinco
+    assert "com o limite criado na tela de limites, com passkey" in junto(
+        provas["Três sinais juntos suspendem o limite por aproximação, e a ficha mostra o motivo"]
+    )
+    # Prova 6: nada do pedido fica guardado na operacao.
+    seis = _fonte_do_teste(saida, "test_pedido_de_senha_vindo_do_terceiro_nao_chega_a_pessoa")
+    assert 'await falante.modo("senha_no_texto")' in seis
+    assert "assert any(AVISO_A4 in html for html in paginas)" in seis
+    assert "também para o texto comum com senha e link (crítica A4)" in junto(
+        provas["Pedido de senha vindo do servidor não chega à pessoa"]
+    )
+    assert "assert op_acao.resultado is None" in seis
+    assert (
+        "Nada do pedido (mensagem, link ou campos) fica guardado na operação."
+        in (provas["Pedido de senha vindo do servidor não chega à pessoa"])
+    )
+    # Prova 7: o _meta com exatamente as nossas chaves; o terceiro forja chaves do nosso prefixo que nao escrevemos.
+    sete = _fonte_do_teste(
+        saida, "test_resposta_de_terceiro_chega_inteira_dentro_da_marca_com_erro_e_dados_estruturados"
+    )
+    assert "_nada_do_sistema_fora_dos_blocos(r, nome, META_ACAO)" in sete
+    assert "_nada_do_sistema_fora_dos_blocos(consulta, nome, META_CONSULTA)" in sete
+    fonte_saida = (RAIZ / "tests/integracao" / saida).read_text(encoding="utf-8")
+    assert "assert set(meta) == {PREFIXO_META + k for k in chaves}, meta" in fonte_saida
+    assert "for chave, forjado in tp.FORJADO.items():" in fonte_saida
+    forjadas = {k for k in terceiro_provas.FORJADO if k.startswith(PREFIXO_META)}
+    assert {PREFIXO_META + "motivo", PREFIXO_META + "protocolo", PREFIXO_META + "estado"} <= forjadas
+    assert (
+        "O `_meta` que chega ao aplicativo tem só as chaves que o MCP-CLARO escreve: as chaves com o nosso prefixo que"
+        " o terceiro forja não passam."
+    ) in provas["Nova (D31): a resposta de um terceiro chega inteira dentro da marca, e nada passa fora dela"]
+    # Ensaios: a descoberta sem as instrucoes nem o nome do fornecedor, e a resposta perdida tambem na frente do
+    # processo pai de verdade da sala.
+    ensaios = "test_fase3_ensaios.py"
+    duble = _fonte_do_teste(
+        ensaios, "test_duble_mal_intencionado_le_le_dado_pessoal_e_a_acao_dentro_do_limite_vai_para_a_ficha"
+    )
+    assert "descoberta = await gw.descoberta()" in duble
+    assert (
+        'for do_fornecedor in (mal.INSTRUCAO, "Instrucoes do fornecedor", "fornecedor-mal-intencionado", "6.6.6"):'
+        in (duble)
+    )
+    de_verdade = _fonte_do_teste(ensaios, "test_resposta_perdida_entre_o_despachante_e_a_sala_de_verdade_nao_repete")
+    assert 'sala="filhos-http"' in de_verdade  # o pai de verdade (apoio_g9b), um filho por chamada
+    assert "_perdida_na_sala(gw" in de_verdade
+    # E a prova de que o pai de verdade atendeu: com ``filhos-http``, a sala atras do cortador e a de verdade, e um
+    # filho atendeu o pedido cuja resposta se perdeu (sem isto, o parametro so diria qual sala subiu).
+    perdida = _fonte_do_teste(ensaios, "_perdida_na_sala")
+    assert 'assert (sala_de_verdade is not None) == (gw.sala == "filhos-http")' in perdida
+    assert 'assert sala_de_verdade.desfechos(recado) == ["filho"]' in perdida
+    fase3 = junto(secao(ler("andamento.md"), "## Fase 3: servidores de terceiros"))
+    assert (
+        "que confere também que nem as instruções nem o nome do servidor do fornecedor chegam ao aplicativo na"
+        " descoberta)"
+    ) in fase3
+    assert (
+        "entre o despachante e a sala (a sala em processo e o processo pai de verdade, com um filho por chamada) e"
+        " entre a sala e o terceiro"
+    ) in fase3
 
 
 def test_a_janela_de_dns_nao_promete_e_lembra_a_troca_de_chave() -> None:

@@ -10,7 +10,8 @@
 - os filhos nascem numa thread da sala que vive tanto quanto ela (``PR_SET_PDEATHSIG`` vale pela thread); o filho
   isolado tem ``PR_SET_PDEATHSIG`` com ``SIGKILL``, e fechar a sala mata o que ainda vive;
 - o ambiente que vale e o da sala; enderecos locais so em desenvolvimento;
-- partida: sem ``DATABASE_*``, ``DB_*``, ``VAULT_*`` nem outro segredo, e so com mTLS.
+- partida: sem ``DATABASE_*``, ``DB_*``, ``VAULT_*`` nem outro segredo, so com mTLS e com ``APP_ENV`` escrito no
+  ambiente (contrato K8; a recusa sem ele fica em ``test_r6e_ambiente_sala.py``).
 """
 
 from __future__ import annotations
@@ -760,7 +761,7 @@ def test_partida_da_sala_recusa_banco_e_cofre(certificados: Certificados, nome: 
 
 @pytest.mark.parametrize("nome", ["SMTP_PASSWORD_FILE", "WEBHOOK_SECRET_FILE", "VISITS_CLIENT_KEY_FILE"])
 def test_partida_da_sala_recusa_segredo_que_nao_e_o_certificado_dela(certificados: Certificados, nome: str) -> None:
-    problemas = problemas_da_sala(_com_tls(certificados), {nome: "/run/secrets/x"})
+    problemas = problemas_da_sala(_com_tls(certificados), {nome: "/run/secrets/x", "APP_ENV": "teste"})
     assert problemas == [f"A sala de visitas so recebe o proprio certificado: tire {nome} do ambiente dela."]
 
 
@@ -774,16 +775,17 @@ def test_partida_da_sala_aceita_o_proprio_certificado_e_exige_mtls(certificados:
     assert problemas_da_sala(_com_tls(certificados), ambiente) == []
     for falta in ("INTERNAL_CERT_FILE", "INTERNAL_KEY_FILE", "INTERNAL_CLIENT_CA_FILE"):
         p = _com_tls(certificados).model_copy(update={falta: None})
-        assert any("so sobe com mTLS" in e for e in problemas_da_sala(p, {}))
+        assert [e for e in problemas_da_sala(p, {"APP_ENV": "teste"}) if "so sobe com mTLS" not in e] == []
+        assert any("so sobe com mTLS" in e for e in problemas_da_sala(p, {"APP_ENV": "teste"}))
     with pytest.raises(ConfiguracaoInvalida, match="so sobe com mTLS"):
-        conferir_sala(Parametros(), {})
+        conferir_sala(Parametros(), {"APP_ENV": "teste"})
 
 
 def test_a_sala_nao_confere_o_que_e_dos_outros_papeis(certificados: Certificados) -> None:
     """Em producao, a partida dos outros papeis pede telas, avisos e vigia; a sala nao tem nada disso."""
     p = _com_tls(certificados).model_copy(update={"APP_ENV": "producao"})
     assert p.problemas() != []
-    assert problemas_da_sala(p, {}) == []
+    assert problemas_da_sala(p, {"APP_ENV": "producao"}) == []
 
 
 @pytest.fixture
@@ -802,6 +804,7 @@ def _ambiente_da_sala(monkeypatch: pytest.MonkeyPatch, c: Certificados) -> None:
     monkeypatch.setenv("INTERNAL_CERT_FILE", str(c.visitas_cert))
     monkeypatch.setenv("INTERNAL_KEY_FILE", str(c.visitas_key))
     monkeypatch.setenv("INTERNAL_CLIENT_CA_FILE", str(c.ca_clientes_visitas))
+    monkeypatch.setenv("APP_ENV", "teste")  # a sala nao sobe sem ele (contrato K8)
 
 
 def test_comando_visitas_sobe_o_papel_com_a_porta_da_sala(

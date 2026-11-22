@@ -21,8 +21,15 @@ TIPOS_PEDIDO_BARRADO: Final = (
     "leitura_sistema_pediu_dados",
     "programa_leitura_sistema_pediu_dados",
     "acao_sistema_pediu_dados",
+    "declaracoes_sistema_pediu_dados",
+    "sondagem_sistema_pediu_dados",
 )
-"""Linhas do extrato de pedido barrado (o indice ``extrato_pedido_barrado_idx`` da 0006 cobre estas)."""
+"""Linhas do extrato de pedido barrado: na leitura, na leitura de um programa, na acao que parou e, fora de uma
+chamada (contrato K4, sem pessoa nem ferramenta), na leitura das ferramentas e na sondagem."""
+
+TIPOS_FIM_COM_PEDIDOS: Final = ("acao_enviada", "acao_nao_confirmada", "acao_nao_saiu")
+"""Linhas do fim de uma acao que contam quando trazem ``dados.pedidos`` nao vazio (contrato K9): o sistema pediu
+algo no meio, o MCP-CLARO recusou, e a acao saiu, ficou sem confirmacao ou nao saiu."""
 
 TIPOS_QUARENTENA: Final = (
     "sistema_em_quarentena",
@@ -33,13 +40,24 @@ ULTIMOS_PEDIDOS: Final = 10
 DIAS_QUARENTENA: Final = 90
 """Ate quantos dias para tras a ficha procura a linha da ultima quarentena (o extrato e particionado por data)."""
 
-# Uma acao que saiu tambem pode ter tido pedidos barrados no meio (``acao_enviada`` com ``dados.pedidos``); o
-# indice nao cobre essa linha, por isso o filtro pelos dados.
+# O predicado e o do indice extrato_pedido_barrado_idx da 0006, escrito igual, com os tipos no texto do SQL (as
+# constantes acima) e nunca por parametro: so assim o banco prova que a consulta cabe no indice parcial, tambem no
+# plano guardado do asyncpg (sem o valor dos parametros). Um teste confere que as constantes, este texto e o indice
+# dizem o mesmo; outro confere no EXPLAIN que a consulta le pelo indice.
 _SQL_PEDIDOS: Final = (
     " FROM extrato WHERE sistema_id = :s AND criado_em > now() - make_interval(days => :dias)"
-    " AND (tipo = ANY (CAST(:tipos AS text[]))"
-    " OR (tipo = 'acao_enviada' AND jsonb_typeof(dados -> 'pedidos') = 'array' AND dados -> 'pedidos' <> '[]'))"
+    " AND (tipo IN ('leitura_sistema_pediu_dados', 'programa_leitura_sistema_pediu_dados',"
+    " 'acao_sistema_pediu_dados', 'declaracoes_sistema_pediu_dados', 'sondagem_sistema_pediu_dados')"
+    " OR (tipo IN ('acao_enviada', 'acao_nao_confirmada', 'acao_nao_saiu')"
+    " AND jsonb_typeof(dados -> 'pedidos') = 'array' AND dados -> 'pedidos' <> '[]'::jsonb))"
 )
+
+SQL_ULTIMA_QUARENTENA: Final = (
+    "SELECT criado_em, tipo, dados -> 'ferramentas' AS ferramentas FROM extrato"
+    " WHERE sistema_id = :s AND tipo IN ('sistema_em_quarentena', 'sistema_em_quarentena_sem_resposta')"
+    " AND criado_em > now() - make_interval(days => :dias) ORDER BY criado_em DESC, id DESC LIMIT 1"
+)
+"""A busca da ultima quarentena (``TIPOS_QUARENTENA`` no texto), pelo indice extrato_quarentena_idx da 0006."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +122,11 @@ async def publicadas(c: AsyncConnection, sistema_id: uuid.UUID) -> Sequence[Row[
 
 
 async def pedidos_recusados(c: AsyncConnection, sistema_id: uuid.UUID) -> PedidosRecusados:
-    """Os pedidos que o sistema fez no meio de uma chamada e o MCP-CLARO recusou: contagem dos ultimos 30 dias e as
-    10 ultimas linhas (hora, ferramenta da vitrine, tipo da linha e as categorias do nosso vocabulario). Nada do
-    texto, link ou esquema do servidor: o extrato nao guarda isso."""
-    parametros = {"s": sistema_id, "dias": DIAS_PEDIDOS, "tipos": list(TIPOS_PEDIDO_BARRADO)}
+    """Os pedidos que o sistema fez e o MCP-CLARO recusou: contagem dos ultimos 30 dias e as 10 ultimas linhas (hora,
+    ferramenta da vitrine, tipo da linha e as categorias do nosso vocabulario). Contam as linhas de pedido barrado
+    (``TIPOS_PEDIDO_BARRADO``, tambem as de fora de uma chamada, sem ferramenta) e o fim de toda acao com pedidos
+    (``TIPOS_FIM_COM_PEDIDOS``). Nada do texto, link ou esquema do servidor: o extrato nao guarda isso."""
+    parametros = {"s": sistema_id, "dias": DIAS_PEDIDOS}
     contagem = int((await c.execute(text("SELECT count(*)" + _SQL_PEDIDOS), parametros)).scalar_one())
     linhas = (
         await c.execute(
@@ -125,16 +144,7 @@ async def pedidos_recusados(c: AsyncConnection, sistema_id: uuid.UUID) -> Pedido
 async def ultima_quarentena(c: AsyncConnection, sistema_id: uuid.UUID) -> Row[Any] | None:
     """A linha do extrato da quarentena mais recente do sistema (nos ultimos ``DIAS_QUARENTENA`` dias), com as
     ferramentas que mudaram (``dados.ferramentas``: nome, mudanca e impressoes; nada do texto da definicao)."""
-    return (
-        await c.execute(
-            text(
-                "SELECT criado_em, tipo, dados -> 'ferramentas' AS ferramentas FROM extrato"
-                " WHERE sistema_id = :s AND tipo = ANY (CAST(:tipos AS text[]))"
-                " AND criado_em > now() - make_interval(days => :dias) ORDER BY criado_em DESC, id DESC LIMIT 1"
-            ),
-            {"s": sistema_id, "tipos": list(TIPOS_QUARENTENA), "dias": DIAS_QUARENTENA},
-        )
-    ).first()
+    return (await c.execute(text(SQL_ULTIMA_QUARENTENA), {"s": sistema_id, "dias": DIAS_QUARENTENA})).first()
 
 
 async def revisao_ativa(c: AsyncConnection, sistema_id: uuid.UUID, nome: str) -> Row[Any] | None:

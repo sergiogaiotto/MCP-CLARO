@@ -6,8 +6,11 @@
    amarrada a sessao e ao sistema (HMAC com o token CSRF da sessao): outro site nao consegue comecar
    uma autorizacao pela pessoa. A entrada pede a URL ao despachante (``/interno/autorizacao/iniciar``)
    e responde 303 com ``Location`` para a pagina do sistema.
-3. A volta (``/telas/autorizar/volta``, que precisa estar no ``redirect_uri`` cadastrado no sistema)
-   passa estado e codigo, com a pessoa da sessao, ao despachante (``/interno/autorizacao/concluir``).
+3. A volta passa estado e codigo, com a pessoa da sessao, ao despachante (``/interno/autorizacao/concluir``).
+   O endereco de volta, que precisa estar no ``redirect_uri`` cadastrado no servidor de autorizacao, e
+   ``/telas/autorizar/volta`` para os sistemas proprios (o da Fase 2) e ``/telas/autorizar/<id>/volta`` para cada
+   servidor de terceiros; por esse, a entrada manda tambem o ``sistema_id`` do caminho, e o despachante recusa a
+   volta que nao e do sistema da pendencia (mistura de servidores de autorizacao).
    O estado so e conferido la (uso unico, prazo, mesma pessoa). A entrada nunca ve a chave e nao guarda
    o codigo. Deu certo: volta por GET a lista, com o aviso; recusa: a frase legivel, sem nada guardado.
 4. A pessoa tambem pode retirar a propria autorizacao (``/interno/autorizacao/derrubar`` com o sistema).
@@ -25,7 +28,12 @@ from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import BaseRoute, Route
 
-from mcp_claro.despachante.autorizacao import ConfiguracaoAutorizacaoInvalida, conferir_endereco
+from mcp_claro.despachante.autorizacao import (
+    CAMINHO_VOLTA_PROPRIOS,
+    ConfiguracaoAutorizacaoInvalida,
+    caminho_da_volta,
+    conferir_endereco,
+)
 from mcp_claro.logs import logger
 from mcp_claro.telas import consultas
 from mcp_claro.telas.nucleo import RespostaInterna, Telas, tela, ver_depois
@@ -34,7 +42,8 @@ from mcp_claro.telas.sessoes import Sessao
 
 log = logger("mcp_claro.telas.autorizar")
 
-CAMINHO_VOLTA: Final = "/telas/autorizar/volta"
+CAMINHO_VOLTA: Final = CAMINHO_VOLTA_PROPRIOS
+"""A volta dos sistemas proprios. Um servidor de terceiros volta pelo dele (``caminho_da_volta``)."""
 MOTIVO_RETIRADA: Final = "a pessoa retirou a autorizacao"
 
 # Recusas do despachante, em frases curtas para a pessoa. Fora daqui, vale a frase que ele mandou.
@@ -42,6 +51,9 @@ MENSAGENS: Final[dict[str, str]] = {
     "estado_ja_usado": "Este pedido de autorização já foi usado. Nada mais foi guardado. Comece de novo por aqui.",
     "estado_desconhecido": "Não achamos este pedido de autorização. Nada foi guardado. Comece de novo por aqui.",
     "estado_de_outra_pessoa": "Este pedido de autorização é de outra pessoa. Nada foi guardado.",
+    "estado_de_outro_sistema": (
+        "Este pedido de autorização não é deste sistema. Nada foi guardado. Comece de novo por aqui."
+    ),
     "estado_vencido": "O prazo para autorizar acabou. Nada foi guardado. Comece de novo por aqui.",
     "pedido_invalido": "O pedido de autorização veio incompleto. Nada foi guardado. Comece de novo por aqui.",
     "sistema_nao_autorizou": "O sistema não autorizou. Nada foi guardado. Se quiser, tente de novo.",
@@ -93,13 +105,14 @@ class TelasDeAutorizacao:
         return [
             Route("/autorizar", self.lista, methods=["GET"]),
             Route("/autorizar/volta", self.volta, methods=["GET"]),
+            Route("/autorizar/{sistema_id:uuid}/volta", self.volta_do_sistema, methods=["GET"]),
             Route("/autorizar/{sistema_id:uuid}/ir", self.ir, methods=["GET"]),
             Route("/autorizar/{sistema_id:uuid}/retirar", self.retirar, methods=["POST"]),
         ]
 
-    @property
-    def redirect_uri(self) -> str:
-        return self.t.p.PUBLIC_BASE_URL + CAMINHO_VOLTA
+    def redirect_uri(self, sistema: Any) -> str:
+        """O endereco de volta do sistema: o de cada servidor de terceiros e so dele; os proprios usam o da Fase 2."""
+        return self.t.p.PUBLIC_BASE_URL + caminho_da_volta(sistema.id if sistema.origem != "proprio" else None)
 
     @tela
     async def lista(self, pedido: Request) -> Response:
@@ -146,7 +159,11 @@ class TelasDeAutorizacao:
             )
         resposta = await self.t.porta_interna(
             "/interno/autorizacao/iniciar",
-            {"pessoa_id": str(sessao.pessoa.id), "sistema_id": str(sistema_id), "redirect_uri": self.redirect_uri},
+            {
+                "pessoa_id": str(sessao.pessoa.id),
+                "sistema_id": str(sistema_id),
+                "redirect_uri": self.redirect_uri(sistema),
+            },
         )
         destino = _url_do_sistema(resposta.dados.get("url")) if resposta.ok else None
         if destino is None:
@@ -157,7 +174,18 @@ class TelasDeAutorizacao:
 
     @tela
     async def volta(self, pedido: Request) -> Response:
-        """A volta da pagina do sistema: estado e codigo vao ao despachante com a pessoa desta sessao."""
+        """A volta dos sistemas proprios (o endereco da Fase 2): sem ``sistema_id``."""
+        return await self._volta(pedido, None)
+
+    @tela
+    async def volta_do_sistema(self, pedido: Request) -> Response:
+        """A volta de um servidor de terceiros, pelo endereco so dele: o ``sistema_id`` do caminho vai junto."""
+        sistema_id: uuid.UUID = pedido.path_params["sistema_id"]
+        return await self._volta(pedido, sistema_id)
+
+    async def _volta(self, pedido: Request, sistema_id: uuid.UUID | None) -> Response:
+        """A volta da pagina do sistema: estado e codigo vao ao despachante com a pessoa desta sessao e, pelo endereco
+        de um servidor de terceiros, o sistema desse endereco (o despachante confere com o da pendencia)."""
         sessao = await self.t.sessao(pedido)
         if sessao is None:
             # Sem sessao nao ha pessoa a conferir; o codigo nao vai a lugar nenhum (nem ao login).
@@ -174,6 +202,8 @@ class TelasDeAutorizacao:
         if not estado or len(estado) > 256:
             return self.t.erro(pedido, 400, "Não foi possível autorizar", MENSAGENS["pedido_invalido"])
         corpo: dict[str, Any] = {"estado": estado, "pessoa_id": str(sessao.pessoa.id)}
+        if sistema_id is not None:
+            corpo["sistema_id"] = str(sistema_id)
         if erro_oauth or not codigo:
             corpo["erro"] = erro_oauth[:64] or "sem_codigo"
         else:

@@ -64,7 +64,7 @@ DICA_FIXA = (
     "O MCP-CLARO não repassa a você pedidos de dados, links ou confirmações que um sistema faça no meio de uma"
     " chamada. Um texto de resposta ainda pode trazer um link: confirme ações só na tela do MCP-CLARO."
 )
-RLO = "‮"
+RLO = "\u202e"
 
 
 @pytest.fixture

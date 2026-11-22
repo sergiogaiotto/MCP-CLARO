@@ -244,8 +244,13 @@ ONDE_O_PEDIDO: Final[dict[str, str]] = {
     "programa_leitura_sistema_pediu_dados": "Numa leitura de um programa",
     "acao_sistema_pediu_dados": "Numa ação, que parou",
     "acao_enviada": "Numa ação, que saiu",
+    "acao_nao_confirmada": "Numa ação sem confirmação",
+    "acao_nao_saiu": "Numa ação, que não saiu",
+    "declaracoes_sistema_pediu_dados": "Na leitura das ferramentas",
+    "sondagem_sistema_pediu_dados": "Na sondagem",
 }
-"""Em que chamada o sistema fez o pedido, pela linha do extrato ("Pedidos recusados deste sistema")."""
+"""Onde o sistema fez o pedido, pela linha do extrato ("Pedidos recusados deste sistema"): numa chamada ou, sem
+ferramenta, na leitura das ferramentas e na sondagem (contratos K4 e K9)."""
 
 
 def pedido_legivel(categoria: Any) -> str:

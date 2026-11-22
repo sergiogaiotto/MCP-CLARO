@@ -13,7 +13,13 @@ Classificacao do salto, do lado do despachante (critica B6):
 - 200 com corpo valido: vale a classificacao da sala, que e a do cliente fixado (``resultado``, ``nao_enviado``,
   ``duvida``, ``erro_rpc``, ``recusado_http``), com ``status_http`` e ``pedidos`` do terceiro. Na listagem, a
   recusa pelo status (desvio 3xx, 401, 403) volta como ``recusado_http`` com o ``status_http``, e o despachante
-  a recebe em ``FalhaNaSala.status_http`` (um desvio grava ``sala_desvio_recusado``).
+  a recebe em ``FalhaNaSala.status_http`` (um desvio grava ``sala_desvio_recusado``). O que o terceiro pediu no meio
+  da listagem vem em ``RespostaListar.pedidos`` (contrato K4);
+- sala cheia (contrato K7): o processo pai nao achou vaga a tempo e responde 200 com o "nao enviado" da rota e a
+  excecao ``SALA_SEM_VAGA``, sem nada ir a um filho nem ao terceiro. So o pai poe o cabecalho
+  ``CABECALHO_DA_SALA`` (o filho so escreve o status e o corpo): na listagem, a sala cheia com o cabecalho e
+  ``SalaSemVaga`` (falha nossa, que as rotinas nao contam contra o servidor), e o mesmo corpo sem o cabecalho, que um
+  filho tomado pelo terceiro poderia escrever, continua um ``FalhaNaSala`` que conta (critica A5).
 
 A resposta da sala e conferida como dado nao confiavel: so categorias de pedido, nomes de excecao, versoes e
 motivos do nosso vocabulario passam; o resultado precisa ser um ``CallToolResult`` ou ``InputRequiredResult``, cada
@@ -47,7 +53,7 @@ from pydantic import (
 )
 
 from mcp_claro.ligacao import cliente
-from mcp_claro.ligacao.cliente import Desfecho, Resposta, Sondagem, TipoResultado
+from mcp_claro.ligacao.cliente import Desfecho, Listagem, Resposta, Sondagem, TipoResultado
 from mcp_claro.versao import VERSAO_MCP
 
 VERSAO_CONTRATO: Final = 1
@@ -61,11 +67,25 @@ SALA_FORA = "SalaFora"  # nao deu para conectar na sala: nada foi enviado
 SALA_RESPOSTA_INVALIDA = "SalaRespostaInvalida"  # a sala respondeu fora do contrato: duvida
 PEDIDO_FORA_DO_CONTRATO = "PedidoForaDoContrato"  # a sala recusou o pedido sem chamar o terceiro
 RESPOSTA_FORA_DO_CONTRATO = "RespostaForaDoContrato"  # a resposta do terceiro nao cabe no contrato: duvida
+SALA_SEM_VAGA = "sala_sem_vaga"  # a sala estava cheia (todas as vagas ocupadas): nada foi a um filho
+
+CABECALHO_DA_SALA: Final = "mcp-claro-sala"
+"""Cabecalho que so o processo pai da sala escreve, com o valor ``SALA_SEM_VAGA``, na resposta de sala cheia. O
+filho escreve so o status e o corpo (``visitas.app``), entao nao consegue por este cabecalho: o despachante separa
+a sala cheia de verdade do mesmo corpo escrito por um filho."""
 
 MOTIVO_SALA_FORA = "sala de visitas fora do ar; nada foi enviado"
 MOTIVO_SALA_INVALIDA = "a sala de visitas nao deu uma resposta valida"
 MOTIVO_PEDIDO_FORA = "pedido fora do contrato da sala de visitas; nada foi enviado"
 MOTIVO_RESPOSTA_FORA = "a resposta do servidor de terceiros nao cabe no contrato da sala de visitas"
+MOTIVO_SALA_SEM_VAGA = "a sala de visitas estava cheia; nada foi enviado"
+
+EXCECOES_DA_SALA: Final = frozenset({PEDIDO_FORA_DO_CONTRATO, RESPOSTA_FORA_DO_CONTRATO, SALA_SEM_VAGA})
+"""Nomes de excecao que a propria sala da, e nao o cliente fixado: pedido fora do contrato (nada foi ao terceiro),
+resposta do terceiro que nao cabe no contrato (duvida) e sala cheia (``SALA_SEM_VAGA``: o processo pai nao achou
+vaga a tempo e respondeu "nao enviado", sem mandar nada a um filho). Ficam dentro do contrato na resposta da sala:
+quem os da e a sala que respondeu. So a sala cheia com ``CABECALHO_DA_SALA`` e certamente do pai (``SalaSemVaga``
+na listagem)."""
 
 EXCECOES_DO_DESPACHANTE: Final = frozenset({SALA_FORA, SALA_RESPOSTA_INVALIDA})
 """Nomes de excecao que so o lado do despachante da (``ClienteSala``, ``SemSala`` e os ``ler_resposta_*``): a
@@ -104,7 +124,14 @@ _PEDIDO = re.compile(
     )
 )
 _MOTIVOS_FIXOS = frozenset(
-    {*cliente.MOTIVOS_DA_SONDAGEM, MOTIVO_SALA_FORA, MOTIVO_SALA_INVALIDA, MOTIVO_PEDIDO_FORA, MOTIVO_RESPOSTA_FORA}
+    {
+        *cliente.MOTIVOS_DA_SONDAGEM,
+        MOTIVO_SALA_FORA,
+        MOTIVO_SALA_INVALIDA,
+        MOTIVO_PEDIDO_FORA,
+        MOTIVO_RESPOSTA_FORA,
+        MOTIVO_SALA_SEM_VAGA,
+    }
 )
 _MOTIVOS_COM_STATUS = tuple(
     re.compile(re.escape(m).replace(re.escape("{status}"), "[1-5][0-9]{2}")) for m in cliente.MOTIVOS_COM_STATUS
@@ -240,6 +267,13 @@ class RespostaListar(_Modelo):
     ferramentas: Annotated[list[dict[str, Any]], Field(max_length=TETO_FERRAMENTAS)] = Field(default_factory=list)
     excecao: Excecao = None
     status_http: StatusHttp = ()
+    pedidos: Pedidos = ()
+    """O que o terceiro pediu no meio da listagem (``Listagem.pedidos``), conferido como em ``RespostaChamar``."""
+
+    def para_json(self) -> bytes:
+        # Sem pedidos, o campo nao vai: o corpo e o de antes do campo, e um despachante de uma versao anterior (que
+        # recusa campo a mais) continua lendo a listagem durante a troca de versao.
+        return self.model_dump_json(by_alias=True, exclude={"pedidos"} if not self.pedidos else None).encode()
 
     @model_validator(mode="after")
     def _tipo_combina(self) -> Self:
@@ -300,13 +334,25 @@ class RespostaSondar(_Modelo):
 
 class FalhaNaSala(RuntimeError):
     """A listagem pela sala nao trouxe as declaracoes (``tipo`` diz se algo chegou ao terceiro; ``status_http``,
-    na recusa pelo status, o de cada POST, com o da recusa no fim)."""
+    na recusa pelo status, o de cada POST, com o da recusa no fim; ``pedidos``, o que o terceiro pediu antes de a
+    listagem falhar, conferido como em ``RespostaListar``)."""
 
-    def __init__(self, tipo: str, excecao: str | None, *, status_http: tuple[int, ...] = ()) -> None:
+    def __init__(
+        self, tipo: str, excecao: str | None, *, status_http: tuple[int, ...] = (), pedidos: tuple[str, ...] = ()
+    ) -> None:
         super().__init__(f"listagem pela sala de visitas: {tipo} ({excecao or 'sem detalhe'})")
         self.tipo = tipo
         self.excecao = excecao
         self.status_http = status_http
+        self.pedidos = pedidos
+
+
+class SalaSemVaga(FalhaNaSala):
+    """A listagem nao saiu porque a sala estava cheia, dito pelo processo pai (com ``CABECALHO_DA_SALA``): nada foi
+    a um filho nem ao terceiro. A falha e do MCP-CLARO; o despachante nao a conta contra o servidor."""
+
+    def __init__(self) -> None:
+        super().__init__("nao_enviado", SALA_SEM_VAGA)
 
 
 # Lado do despachante -------------------------------------------------------------------------------------------
@@ -341,22 +387,38 @@ def ler_resposta_sondar(status: int, corpo: bytes) -> Sondagem:
         return Sondagem("inalcancavel", MOTIVO_SALA_INVALIDA, excecao=SALA_RESPOSTA_INVALIDA)
 
 
-def ler_resposta_listar(status: int, corpo: bytes) -> list[dict[str, Any]]:
-    """Resposta da sala a ``/listar``. Levanta ``FalhaNaSala`` se nao veio a lista.
+def ler_resposta_listagem(status: int, corpo: bytes, *, marca: str | None = None) -> Listagem:
+    """Resposta da sala a ``/listar``, com os pedidos do terceiro. Levanta ``FalhaNaSala`` se nao veio a lista.
 
     Cada ferramenta e conferida como ``Tool`` e volta no mesmo formato do cliente local (``model_dump`` por alias,
-    sem nulos): a sala nao entrega ao cadastro nada que o caminho local nao entregaria.
+    sem nulos): a sala nao entrega ao cadastro nada que o caminho local nao entregaria. ``pedidos`` fora do nosso
+    vocabulario e corpo fora do contrato: ``duvida``. Na falha, ``FalhaNaSala.pedidos`` leva o que o terceiro pediu
+    antes.
+
+    ``marca``: o valor de ``CABECALHO_DA_SALA`` na resposta, que so o processo pai escreve. A sala cheia com a marca
+    e ``SalaSemVaga``; sem ela, o mesmo corpo (que um filho poderia escrever) e um ``FalhaNaSala`` comum.
     """
     if status != 200:
         raise FalhaNaSala("duvida", SALA_RESPOSTA_INVALIDA)
     try:
         resposta = RespostaListar.model_validate_json(corpo)
         if resposta.tipo != "resultado":
-            raise FalhaNaSala(resposta.tipo, resposta.excecao, status_http=resposta.status_http)
+            if marca == SALA_SEM_VAGA and (resposta.tipo, resposta.excecao) == ("nao_enviado", SALA_SEM_VAGA):
+                raise SalaSemVaga()
+            raise FalhaNaSala(
+                resposta.tipo, resposta.excecao, status_http=resposta.status_http, pedidos=resposta.pedidos
+            )
         ferramentas = _FERRAMENTAS.validate_python(resposta.ferramentas)
     except ValidationError, ValueError:
         raise FalhaNaSala("duvida", SALA_RESPOSTA_INVALIDA) from None
-    return [t.model_dump(by_alias=True, exclude_none=True, mode="json") for t in ferramentas]
+    return Listagem(
+        [t.model_dump(by_alias=True, exclude_none=True, mode="json") for t in ferramentas], resposta.pedidos
+    )
+
+
+def ler_resposta_listar(status: int, corpo: bytes) -> list[dict[str, Any]]:
+    """So a lista de ``ler_resposta_listagem``. Levanta ``FalhaNaSala`` se nao veio a lista."""
+    return ler_resposta_listagem(status, corpo).ferramentas
 
 
 # Lado da sala ---------------------------------------------------------------------------------------------------
@@ -375,6 +437,16 @@ def _no_contrato(montar: Callable[[], _Modelo], reserva: _Modelo) -> bytes:
     if len(corpo) > TETO_SALTO:
         return reserva.para_json()
     return corpo
+
+
+def _reserva_listar(pedidos: tuple[str, ...]) -> RespostaListar:
+    """A reserva da listagem (``duvida`` com ``RespostaForaDoContrato``), com os pedidos do terceiro: a lista que nao
+    cabe no contrato nao apaga o que ele pediu. Os pedidos vem do nosso vocabulario (``cliente.pedidos_do_sistema``);
+    se ainda assim nao couberem, a reserva vai sem eles, sempre valida."""
+    try:
+        return RespostaListar(tipo="duvida", excecao=RESPOSTA_FORA_DO_CONTRATO, pedidos=pedidos)
+    except ValueError:
+        return RespostaListar(tipo="duvida", excecao=RESPOSTA_FORA_DO_CONTRATO)
 
 
 async def atender(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: bool = False) -> tuple[int, bytes]:
@@ -409,23 +481,33 @@ async def atender(rota: str, corpo: bytes, *, ambiente: str, liberar_locais: boo
             pl = PedidoListar.model_validate_json(corpo)
         except ValidationError, ValueError:
             return 200, RespostaListar(tipo="nao_enviado", excecao=PEDIDO_FORA_DO_CONTRATO).para_json()
-        reserva_listar = RespostaListar(tipo="duvida", excecao=RESPOSTA_FORA_DO_CONTRATO)
         try:
-            ferramentas = await cliente.listar_ferramentas(pl.endereco, pl.segredo, pl.discover_json, **regras)
+            listagem = await cliente.listar(pl.endereco, pl.segredo, pl.discover_json, **regras)
         except cliente.EnderecoRecusado:
             return 200, RespostaListar(tipo="nao_enviado", excecao=cliente.ENDERECO_RECUSADO).para_json()
         except cliente.ListagemRecusada as erro:
-            status = erro.status_http  # do terceiro: o modelo confere (fora de 100 a 599, a reserva)
+            status, pedidos = erro.status_http, erro.pedidos  # do terceiro: o modelo confere (senao, a reserva)
             return 200, _no_contrato(
-                lambda: RespostaListar(tipo="recusado_http", excecao=cliente.LISTAGEM_RECUSADA, status_http=status),
-                reserva_listar,
+                lambda: RespostaListar(
+                    tipo="recusado_http", excecao=cliente.LISTAGEM_RECUSADA, status_http=status, pedidos=pedidos
+                ),
+                _reserva_listar(pedidos),
+            )
+        except cliente.ListagemFalhou as erro:
+            # O terceiro pediu algo e depois a listagem falhou: a classificacao de sempre, com os pedidos.
+            nome, pedidos = erro.falha, erro.pedidos
+            return 200, _no_contrato(
+                lambda: RespostaListar(tipo="duvida", excecao=nome, pedidos=pedidos), _reserva_listar(pedidos)
             )
         except OSError:
             return 200, RespostaListar(tipo="nao_enviado", excecao=cliente.NOME_NAO_RESOLVIDO).para_json()
         except Exception as erro:  # noqa: BLE001 - a listagem que falha volta como classificacao, nunca como 500
             nome = type(erro).__name__
-            return 200, _no_contrato(lambda: RespostaListar(tipo="duvida", excecao=nome), reserva_listar)
-        return 200, _no_contrato(lambda: RespostaListar(tipo="resultado", ferramentas=ferramentas), reserva_listar)
+            return 200, _no_contrato(lambda: RespostaListar(tipo="duvida", excecao=nome), _reserva_listar(()))
+        return 200, _no_contrato(
+            lambda: RespostaListar(tipo="resultado", ferramentas=listagem.ferramentas, pedidos=listagem.pedidos),
+            _reserva_listar(listagem.pedidos),
+        )
     if rota == ROTA_SONDAR:
         try:
             ps = PedidoSondar.model_validate_json(corpo)

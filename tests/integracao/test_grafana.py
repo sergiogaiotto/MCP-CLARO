@@ -31,7 +31,6 @@ from urllib.parse import urlsplit
 import asyncpg
 import httpx2
 import pytest
-import uvicorn
 import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -40,6 +39,7 @@ from starlette.routing import Route
 
 from mcp_claro.avisos.grafana import ler_alertas, senha_confere
 from mcp_claro.config.settings import Parametros
+from tests.apoio import porta_livre, servidor, soltar
 from tests.conftest import RAIZ
 from tests.integracao.test_continuidade import dsn, executar, migrar, parametros_do_banco
 
@@ -59,12 +59,6 @@ REGRAS = {
     "mcp-claro-recusas-chamada-subindo",
     "mcp-claro-leituras-pararam",
 }
-
-
-def porta_livre() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 # --- Certificados de teste: autoridade interna, autoridade de clientes das rotinas e os certificados ----
@@ -203,8 +197,8 @@ async def popular(p: Parametros) -> None:
 @dataclass
 class Grafana:
     url: str
-    senha_admin: str
-    senha_webhook: str
+    senha_admin: str = field(repr=False)  # nunca na saida de falha do pytest
+    senha_webhook: str = field(repr=False)
     certificados: Certificados
     porta_webhook: int
     porta: int
@@ -277,6 +271,9 @@ def grafana(banco_migrado: Parametros) -> Iterator[Grafana]:
     for arquivo in segredos.iterdir():
         arquivo.chmod(0o644)
 
+    # As duas portas ficam reservadas (presas e fechadas) desde ja: a do Grafana ate logo antes de o conteiner subir
+    # (quem abre e ele), a do receptor ate ``receptor_das_rotinas`` escutar nela. Outra sessao de testes na mesma
+    # maquina nao as toma enquanto o Grafana fica saudavel (ate 3 minutos).
     porta, porta_webhook = porta_livre(), porta_livre()
     container = nucleo.DockerContainer(IMAGEM)
     for chave, valor in {
@@ -303,12 +300,14 @@ def grafana(banco_migrado: Parametros) -> Iterator[Grafana]:
         cap_drop=["ALL"],
         security_opt=["no-new-privileges:true"],
     )
+    soltar(porta)  # o Grafana (rede do hospedeiro) abre a porta dele
     container.start()
     url = f"https://127.0.0.1:{porta}"
     try:
         _esperar_saude(url, certificados.ca_interna, container)
         yield Grafana(url, senha_admin, senha_webhook, certificados, porta_webhook, porta, container, medicoes)
     finally:
+        soltar(porta_webhook)  # se nenhum receptor subiu nela, a reserva sai aqui
         container.stop()
         shutil.rmtree(pasta, ignore_errors=True)
         asyncio.run(
@@ -531,31 +530,34 @@ async def receptor_das_rotinas(g: Grafana) -> AsyncIterator[list[dict[str, Any]]
         return JSONResponse({"aceitos": len(alertas_lidos)})
 
     app = Starlette(routes=[Route("/interno/alertas-grafana", alertas, methods=["POST"])])
-    config = uvicorn.Config(
+    # Na porta que o Grafana conhece (reservada pelo fixture): escuta no proprio socket da reserva, e o bloco so
+    # comeca com o receptor no ar.
+    async with servidor(
         app,
-        host="127.0.0.1",
-        port=g.porta_webhook,
-        log_level="warning",
-        lifespan="off",
+        g.porta_webhook,
         ssl_certfile=str(g.certificados.rotinas_cert),
         ssl_keyfile=str(g.certificados.rotinas_chave),
         ssl_ca_certs=str(g.certificados.ca_clientes),
         ssl_cert_reqs=ssl.CERT_REQUIRED,
-    )
-    srv = uvicorn.Server(config)
-    tarefa = asyncio.create_task(srv.serve())
-    for _ in range(200):
-        if srv.started:
-            break
-        await asyncio.sleep(0.02)
-    try:
+    ):
         yield recebidos
-    finally:
-        srv.should_exit = True
-        await tarefa
+
+
+def _outra_sessao_abre(porta: int) -> bool:
+    """Outra sessao de testes na mesma maquina (um uvicorn, com ``SO_REUSEADDR``) consegue abrir ``porta``?"""
+    with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", porta))
+        except OSError:
+            return False
+    return True
 
 
 async def test_webhook_chega_as_rotinas_com_certificado_e_senha(grafana: Grafana) -> None:
+    # A porta do receptor ficou reservada desde o fixture, enquanto o Grafana subia: outra sessao de testes nao a
+    # toma nesse meio tempo (o Grafana manda os alertas para ela), e o receptor sobe nela logo abaixo.
+    assert not _outra_sessao_abre(grafana.porta_webhook)
     caminho = "/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers"
     async with grafana.cliente() as c:
         receptores = (await c.get(caminho)).json()["items"]

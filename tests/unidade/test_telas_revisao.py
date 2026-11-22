@@ -32,10 +32,10 @@ from tests.unidade.test_telas_acoes_paginas import AGORA, _escolha, _ficha, oper
 @pytest.mark.parametrize(
     ("bruto", "marcado"),
     [
-        ("12345‮6789", "12345[U+202E]6789"),
-        ("⁦conta⁩", "[U+2066]conta[U+2069]"),
+        ("12345\u202e6789", "12345[U+202E]6789"),
+        ("\u2066conta\u2069", "[U+2066]conta[U+2069]"),
         ("equipe​", "equipe[U+200B]"),
-        ("a‍b‎c‏", "a[U+200D]b[U+200E]c[U+200F]"),
+        ("a\u200db\u200ec\u200f", "a[U+200D]b[U+200E]c[U+200F]"),
         ("tab\taqui\r", "tab[U+0009]aqui[U+000D]"),
         ("linha outra ", "linha[U+2028]outra[U+2029]"),
         ("hi­fen", "hi[U+00AD]fen"),
@@ -50,26 +50,26 @@ def test_escondidos_viram_marca_visivel(bruto: str, marcado: str) -> None:
 
 
 def test_escondidos_nas_chaves_nos_valores_e_dentro_de_listas() -> None:
-    argumentos = {"con‮ta": "1‮2", "lista": ["x⁧y", {"k​": "v"}], "n": 3}
+    argumentos = {"con\u202eta": "1\u202e2", "lista": ["x\u2067y", {"k​": "v"}], "n": 3}
     assert acoes.argumentos_legiveis(argumentos) == [
         ("con[U+202E]ta", "1[U+202E]2"),
         ("lista", '["x[U+2067]y", {"k[U+200B]": "v"}]'),
         ("n", "3"),
     ]
     assert acoes.tem_escondidos(argumentos)
-    assert acoes.tem_escondidos({"a": [{"b": "‭"}]})
+    assert acoes.tem_escondidos({"a": [{"b": "\u202d"}]})
     assert not acoes.tem_escondidos({"a": "limpo", "b": [1, "dois"], "c": None})
-    assert acoes.linhas_do_aplicativo("Pode‮ ir\nfeito") == ["Pode[U+202E] ir", "feito"]
+    assert acoes.linhas_do_aplicativo("Pode\u202e ir\nfeito") == ["Pode[U+202E] ir", "feito"]
     assert acoes.linhas_do_aplicativo(None) == []
 
 
 def test_ficha_mostra_as_marcas_e_avisa_em_destaque() -> None:
-    op = operacao(argumentos={"conta": "12345‮6789"}, aplicativo_diz="Confira⁦ a conta")
+    op = operacao(argumentos={"conta": "12345\u202e6789"}, aplicativo_diz="Confira\u2066 a conta")
     a = acoes.montar(op, AGORA)
     assert a.escondidos
     assert a.diz_escondidos
     html = _ficha(op)
-    for ch in ("‮", "⁦"):
+    for ch in ("\u202e", "\u2066"):
         assert ch not in html  # nada de escondido chega ao HTML
     assert '<dt><bdi>conta</bdi></dt><dd class="dado"><bdi>12345[U+202E]6789</bdi></dd>' in html
     assert "Atenção: este pedido tem caracteres escondidos." in html

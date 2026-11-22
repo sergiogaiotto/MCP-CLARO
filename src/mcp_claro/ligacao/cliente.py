@@ -45,7 +45,7 @@ import socket
 import ssl
 import urllib.parse
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 import anyio
@@ -174,11 +174,24 @@ class EnderecoRecusado(ValueError):
 class ListagemRecusada(Exception):
     """O sistema recusou a listagem pelo status HTTP (desvio 3xx que o MCP-CLARO nao segue, 401 ou 403).
 
-    ``status_http`` e o de cada POST da listagem, com o da recusa no fim; a mensagem so leva o numero."""
+    ``status_http`` e o de cada POST da listagem, com o da recusa no fim; a mensagem so leva o numero. ``pedidos``:
+    o que o sistema pediu antes da recusa (numa pagina anterior), no nosso vocabulario."""
 
-    def __init__(self, status_http: tuple[int, ...]) -> None:
+    def __init__(self, status_http: tuple[int, ...], *, pedidos: tuple[str, ...] = ()) -> None:
         super().__init__(f"listagem recusada pelo sistema (HTTP {status_http[-1] if status_http else '?'})")
         self.status_http = status_http
+        self.pedidos = pedidos
+
+
+class ListagemFalhou(Exception):
+    """A listagem falhou depois de o sistema pedir algo no meio dela (``pedidos``, no nosso vocabulario): o pedido
+    barrado nao se perde com a falha. ``falha`` e o nome da excecao que derrubou a listagem (a de origem fica em
+    ``__cause__``). Sem pedido, a falha sobe como veio, como antes."""
+
+    def __init__(self, falha: str, pedidos: tuple[str, ...]) -> None:
+        super().__init__(f"listagem falhou ({falha}) depois de o sistema pedir algo no meio")
+        self.falha = falha
+        self.pedidos = pedidos
 
 
 class _CorpoVigiado(httpx2.AsyncByteStream):
@@ -642,6 +655,15 @@ class Resposta:
     pedidos: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class Listagem:
+    """O que o sistema declara hoje (``ferramentas``) e o que ele pediu no meio da listagem (``pedidos``): so as
+    categorias do nosso vocabulario, como em ``Resposta.pedidos``, nunca texto, link ou nome de campo do sistema."""
+
+    ferramentas: list[dict[str, Any]]
+    pedidos: tuple[str, ...] = ()
+
+
 def pedidos_do_sistema(
     resultado: types.CallToolResult | types.InputRequiredResult | None,
     erro: types.ErrorData | None,
@@ -763,6 +785,10 @@ async def sondar(
 
     So ``aceito`` vem de um ``DiscoverResult`` valido com a versao. So ``versao`` e veredito de versao antiga:
     erro JSON-RPC do proprio servidor (400 do kit 1.x, -32022, -32601), 405, ou ``DiscoverResult`` sem a versao.
+
+    O desfecho e decidido dentro da sessao, como sempre; ``Sondagem.pedidos`` e lido depois de ela fechar: o kit
+    responde a um pedido do sistema numa tarefa a parte, e a resposta dele (barrada) pode sair so quando a sessao
+    fecha, depois do resultado.
     """
     if terceiro:
         recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais)
@@ -786,21 +812,31 @@ async def sondar(
                     try:
                         bruto = await sessao.send_discover(VERSAO_MCP)
                     except MCPError as erro:
-                        return _sondagem_com_erro(tentativa, erro)
-                    return _sondagem_com_resultado(tentativa, bruto, terceiro=terceiro)
+                        sondagem = _sondagem_com_erro(tentativa, erro)
+                    else:
+                        sondagem = _sondagem_com_resultado(tentativa, bruto, terceiro=terceiro)
     except TimeoutError:
-        return Sondagem("inalcancavel", MOTIVO_PRAZO, status_http=tuple(tentativa.status_http))
+        # O pedido barrado antes do prazo nao se perde (a sessao ja fechou: a Tentativa esta completa).
+        pedidos = pedidos_do_sistema(None, None, tentativa.pedidos_barrados)
+        return Sondagem("inalcancavel", MOTIVO_PRAZO, status_http=tuple(tentativa.status_http), pedidos=pedidos)
     except Exception as erro:  # noqa: BLE001 - a sondagem nunca derruba o cadastro: falha fora do protocolo
         status_http = tuple(tentativa.status_http)
         por_status = _desfecho_por_status(status_http[-1]) if status_http else None
         desfecho, motivo = por_status or ("inalcancavel", MOTIVO_INALCANCAVEL)
-        return Sondagem(desfecho, motivo, status_http=status_http, excecao=tentativa.excecao or type(erro).__name__)
+        return Sondagem(
+            desfecho,
+            motivo,
+            status_http=status_http,
+            excecao=tentativa.excecao or type(erro).__name__,
+            pedidos=pedidos_do_sistema(None, None, tentativa.pedidos_barrados),
+        )
     finally:
         otel_context.detach(vazio)
         _TENTATIVA.reset(marca)
+    return replace(sondagem, pedidos=pedidos_do_sistema(None, None, tentativa.pedidos_barrados))
 
 
-async def listar_ferramentas(
+async def listar(
     endereco: str,
     segredo: Segredo,
     discover_json: str | None,
@@ -808,13 +844,21 @@ async def listar_ferramentas(
     terceiro: bool = False,
     ambiente: str = "producao",
     liberar_locais: bool = False,
-) -> list[dict[str, Any]]:
-    """Lista o que o sistema declara hoje (para revisao e mudou-parou). Uma pagina por POST, ate 50.
+) -> Listagem:
+    """Lista o que o sistema declara hoje (para revisao e mudou-parou) e o que ele pediu no meio. Uma pagina por
+    POST, ate 50.
 
     Num terceiro, endereco fora do combinado levanta ``EnderecoRecusado`` (nome que nao resolve, ``OSError``; a
     conferencia do nome tem o prazo fixo ``PRAZO_CONEXAO`` e, esgotado, levanta ``TimeoutError``, que e ``OSError``).
     Listagem que falha com o ultimo status de recusa (``recusado_por_status``: desvio 3xx nao seguido, 401 ou 403)
-    levanta ``ListagemRecusada`` com o ``status_http``, a partir do erro do kit; as outras falhas sobem como vieram.
+    levanta ``ListagemRecusada`` com o ``status_http``, a partir do erro do kit. As outras falhas sobem como vieram,
+    salvo quando o sistema pediu algo antes de falhar: ``ListagemFalhou``, com os pedidos.
+
+    ``Listagem.pedidos``: o que a barreira de pedidos segurou (a resposta do kit a um pedido do sistema pelo fio
+    antigo), no nosso vocabulario (``pedidos_do_sistema``). E lido depois de a sessao fechar: o kit responde ao
+    pedido numa tarefa a parte, e a resposta (barrada) pode sair so quando a sessao fecha. Na falha, a sessao ja
+    fechou quando a excecao chega aqui, e os pedidos vao na excecao (``ListagemRecusada.pedidos``,
+    ``ListagemFalhou.pedidos``).
     """
     if terceiro:
         with anyio.fail_after(PRAZO_CONEXAO):
@@ -844,13 +888,32 @@ async def listar_ferramentas(
     except Exception as erro:
         # O kit so diz "Redirect ... not followed" ou um ExceptionGroup; o status da recusa fica na Tentativa.
         status = tuple(tentativa.status_http)
+        pedidos = pedidos_do_sistema(None, None, tentativa.pedidos_barrados)
         if status and recusado_por_status(status[-1]):
-            raise ListagemRecusada(status) from erro
+            raise ListagemRecusada(status, pedidos=pedidos) from erro
+        if pedidos:
+            raise ListagemFalhou(type(erro).__name__, pedidos) from erro
         raise
     finally:
         otel_context.detach(vazio)
         _TENTATIVA.reset(marca)
-    return ferramentas
+    return Listagem(ferramentas, pedidos_do_sistema(None, None, tentativa.pedidos_barrados))
+
+
+async def listar_ferramentas(
+    endereco: str,
+    segredo: Segredo,
+    discover_json: str | None,
+    *,
+    terceiro: bool = False,
+    ambiente: str = "producao",
+    liberar_locais: bool = False,
+) -> list[dict[str, Any]]:
+    """So a lista de ``listar`` (o que o sistema declara hoje), como antes da Fase 3, para quem nao usa os pedidos."""
+    listagem = await listar(
+        endereco, segredo, discover_json, terceiro=terceiro, ambiente=ambiente, liberar_locais=liberar_locais
+    )
+    return listagem.ferramentas
 
 
 def _pedido_que_sai(nome: str, argumentos: dict[str, Any], meta: dict[str, Any] | None) -> types.CallToolRequest | None:
@@ -893,6 +956,11 @@ async def chamar_ferramenta(
     fio antigo). Num terceiro, ``traceparent`` e recusado e o endereco e conferido antes de abrir conexao. Pedido que
     o kit nao consegue escrever (argumentos fundos demais) e ``nao_enviado`` com ``PEDIDO_FUNDO_DEMAIS``, antes de
     qualquer rede.
+
+    A classificacao e decidida dentro da sessao; os pedidos, depois de ela fechar: o kit responde a um pedido do
+    sistema pelo fio antigo numa tarefa a parte, e, com o pedido e o resultado no mesmo corpo, a resposta do kit (que
+    a barreira segura e conta) so sai quando a sessao fecha. Lidos antes, os pedidos vinham vazios, e a leitura
+    passava o resultado como se nada tivesse sido pedido (D12).
     """
     if terceiro and traceparent:
         raise ValueError("rastro nunca vai a servidor de terceiros")
@@ -922,16 +990,18 @@ async def chamar_ferramenta(
             ClientSession(leitura, escrita, client_info=_IDENTIDADE_TERCEIRO if terceiro else _IDENTIDADE) as sessao,
         ):
             sessao.adopt(_discover(discover_json))
+            visto: types.CallToolResult | types.InputRequiredResult | None = None
             try:
-                resultado = await sessao.send_request(pedido, _RESULTADO_CHAMADA, request_read_timeout_seconds=prazo)
+                visto = await sessao.send_request(pedido, _RESULTADO_CHAMADA, request_read_timeout_seconds=prazo)
             except MCPError as erro:
-                return _resposta_com_erro(tentativa, erro)
-            pedidos = pedidos_do_sistema(resultado, None, tentativa.pedidos_barrados)
-            status = tuple(tentativa.status_http)
-            if tentativa.pedidos_a_mais:
-                # Um segundo pedido nesta chamada (volta nova do kit, desvio seguido) nao saiu: sem certeza.
-                return Resposta("duvida", status_http=status, excecao=PEDIDO_A_MAIS, pedidos=pedidos)
-            return Resposta("resultado", resultado=resultado, status_http=status, pedidos=pedidos)
+                resposta = _resposta_com_erro(tentativa, erro)
+            else:
+                status = tuple(tentativa.status_http)
+                if tentativa.pedidos_a_mais:
+                    # Um segundo pedido nesta chamada (volta nova do kit, desvio seguido) nao saiu: sem certeza.
+                    resposta = Resposta("duvida", status_http=status, excecao=PEDIDO_A_MAIS)
+                else:
+                    resposta = Resposta("resultado", resultado=visto, status_http=status)
     except Exception as erro:  # noqa: BLE001 - toda falha fora do protocolo vira classificacao, nunca reenvio
         status = tuple(tentativa.status_http)
         pedidos = pedidos_do_sistema(None, None, tentativa.pedidos_barrados)
@@ -946,6 +1016,7 @@ async def chamar_ferramenta(
     finally:
         otel_context.detach(vazio)
         _TENTATIVA.reset(marca)
+    return replace(resposta, pedidos=pedidos_do_sistema(visto, resposta.erro, tentativa.pedidos_barrados))
 
 
 def recusado_por_status(status: int) -> bool:

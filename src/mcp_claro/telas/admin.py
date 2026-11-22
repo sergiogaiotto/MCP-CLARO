@@ -109,6 +109,9 @@ NOME_LONGO_DEMAIS: Final = (
 )
 """Recusa da revisao de uma ferramenta de terceiro com nome mais longo que ``TETO_NOME_FERRAMENTA``. Sem revisao, ela
 nunca vira caixa na conclusao: o teto do formulario dela conta nomes de ate ``TETO_NOME_FERRAMENTA`` letras."""
+FERRAMENTA_MUDOU: Final = "A ferramenta mudou depois que esta página abriu. Confira a definição nova e revise de novo."
+"""A revisao pela tela recusa (409) quando a impressao que a pagina mostrou (``impressao_vista``) nao e mais a da
+ultima leitura: uma leitura das declaracoes no meio gravou outra definicao. Nada e gravado (R6b-3)."""
 _BYTES_POR_LETRA: Final = 12
 """No formulario, cada byte de uma letra fora de A-Z, 0-9 e ``_.-`` vira ``%XX``: uma letra de 4 bytes em UTF-8 vira
 12."""
@@ -272,22 +275,37 @@ def desfecho_no_extrato(resposta: dict[str, Any]) -> str:
     return DESFECHOS_NO_EXTRATO["versao"]
 
 
-# Falha ao ler as declaracoes (``/interno/declaracoes``): 503 com motivo quando a falha e do MCP-CLARO.
-DECLARACOES_NOSSAS: Final = frozenset({"sala_fora", "chave_indisponivel"})
+# Falha ao ler as declaracoes (``/interno/declaracoes``): 503 com motivo quando a falha e do MCP-CLARO
+# (``despachante.app``: ``DeclaracoesNaoConferidas`` e ``CONFERENCIA_NAO_FEITA``), cada motivo com a sua frase; o
+# 502 ``declaracoes_indisponiveis`` (o servidor nao entregou) e o resto ficam com a frase comum (chave ``""``).
 DECLARACOES_FALHA: Final[dict[str, tuple[str, str]]] = {
     "sala_fora": (
         "A sala de visitas não está disponível",
         "A sala de visitas não está disponível agora. Nada foi pedido ao servidor. Tente de novo daqui a pouco.",
     ),
+    # A sala cheia dita pelo processo pai dela (contrato K7): nada foi a um filho nem ao servidor.
+    "sala_sem_vaga": (
+        "A sala de visitas estava cheia",
+        "Todas as vagas da sala de visitas estavam ocupadas. Nada foi pedido ao servidor. Tente de novo daqui a pouco.",
+    ),
     "chave_indisponivel": (
         "O cofre não abriu a chave",
         "Não deu para abrir no cofre a chave de leitura das declarações. Tente de novo daqui a pouco.",
+    ),
+    # O banco ou o grupo de conexoes do despachante falhou (contrato K5). Pode ter sido antes ou depois de pedir a
+    # lista ao servidor: a frase nao diz que nada foi pedido.
+    "conferencia_nao_feita": (
+        "O MCP-CLARO não conseguiu usar o banco de dados",
+        "O MCP-CLARO não conseguiu usar o próprio banco de dados agora. A falha é do MCP-CLARO, não do servidor."
+        " Tente de novo daqui a pouco.",
     ),
     "": (
         "Não conseguimos ler",
         "O despachante não conseguiu ler as ferramentas deste sistema. Confira a chave e tente de novo.",
     ),
 }
+DECLARACOES_NOSSAS: Final = frozenset(DECLARACOES_FALHA) - {""}
+"""Os motivos de falha do MCP-CLARO, que a tela responde com 503 (e nunca com "Confira a chave")."""
 
 
 def _problemas(ferramentas: Any) -> list[tuple[str, str]]:
@@ -324,9 +342,11 @@ def _descricoes_gravadas(esquema_entrada: Any) -> dict[str, str]:
 
 
 def _previa_de_terceiro(entrada: dict[str, Any], descricoes: dict[str, str]) -> tuple[str | None, str | None]:
-    """ "O que o aplicativo vai ver": o esquema limpo, com as descricoes do ADMIN. Antes, ``conferir_documento``,
-    que nao usa recursao e para no teto: um esquema enorme ou fundo demais mostra a frase, nunca trava a tela.
-    Devolve (previa, frase da recusa)."""
+    """ "O que o aplicativo vai ver": o esquema limpo, com as descricoes do ADMIN, sem o ``$schema`` da raiz e com
+    nomes neutros nas definicoes (``esquema.nomes_neutros``: os mesmos nomes que a revisao grava e a vitrine mostra,
+    qualquer que seja a ordem das chaves, porque a conta segue a ordem do banco). Antes, ``conferir_documento``, que
+    nao usa recursao e para no teto: um esquema enorme ou fundo demais mostra a frase, nunca trava a tela. Devolve
+    (previa, frase da recusa)."""
     try:
         esquema.conferir_documento(entrada)
         limpo = esquema.limpar_textos(entrada)
@@ -335,6 +355,10 @@ def _previa_de_terceiro(entrada: dict[str, Any], descricoes: dict[str, str]) -> 
     # Campo que nao existe ou descricao longa: a previa fica sem as descricoes, e a revisao recusa com a frase.
     with contextlib.suppress(ValueError):
         limpo = esquema.com_descricoes(limpo, descricoes)
+    try:
+        limpo = esquema.nomes_neutros(limpo)
+    except EsquemaInvalido as erro:
+        return None, frase_do_esquema(erro)
     return _json_legivel(limpo), None
 
 
@@ -884,6 +908,7 @@ class TelasDoAdmin:
         *,
         erros: list[str] | None = None,
         valores: dict[str, Any] | None = None,
+        status: int | None = None,
     ) -> Response:
         async with self.t.engine.connect() as c:
             vista = await consultas.ferramenta_vista(c, sistema.id, nome)
@@ -948,6 +973,8 @@ class TelasDoAdmin:
                 "terceiro": terceiro,
                 "nome": nome,
                 "definicao": definicao,
+                # O formulario devolve a impressao do que esta pagina mostrou: a revisao so grava essa definicao.
+                "impressao_vista": str(vista.impressao),
                 "esquema_entrada": _json_legivel(entrada),
                 "previa": previa,
                 "recusa_previa": recusa_previa,
@@ -963,7 +990,7 @@ class TelasDoAdmin:
                 "valores": valores,
                 "erros": erros or [],
             },
-            status=400 if erros else 200,
+            status=status or (400 if erros else 200),
         )
 
     @tela
@@ -1027,10 +1054,19 @@ class TelasDoAdmin:
             "texto_de_fora": texto_de_fora,
             "descricoes": descricoes,
         }
+        vista_na_pagina = f.texto("impressao_vista")
+        if vista_na_pagina and vista_na_pagina != str(vista.impressao):
+            # Uma leitura das declaracoes gravou outra definicao depois que a pagina abriu: o ADMIN nao a viu. A
+            # pagina volta com a definicao nova (e a impressao dela); sem o campo (formulario antigo), segue.
+            log.info("telas_revisao_ferramenta_mudou")
+            return await self._pagina_ferramenta(
+                pedido, sistema, nome, erros=[FERRAMENTA_MUDOU, *erros], valores=valores, status=409
+            )
         if erros:
             return await self._pagina_ferramenta(pedido, sistema, nome, erros=erros, valores=valores)
         try:
             async with self.t.engine.begin() as c:
+                # A definicao gravada e a comparada acima (a da pagina, quando ela mandou a impressao).
                 ferramenta_id = await repositorio.revisar_ferramenta(
                     c,
                     sistema_id=sistema.id,

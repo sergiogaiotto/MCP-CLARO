@@ -21,7 +21,6 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx2
 import jwt
 import pytest
-import uvicorn
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -32,7 +31,7 @@ from mcp_claro.entrada import app as entrada_app
 from mcp_claro.entrada.cracha import ChavesPublicas, Cracha, VerificadorCracha
 from mcp_claro.entrada.fechamentos import rotas_fechamentos
 from mcp_claro.entrada.servidor import PedidoLeitura
-from tests.apoio import porta_livre, servidor
+from tests.apoio import porta_livre, servidor, servidor_paravel
 from tests.idp_falso import IdpFalso
 
 PUBLICO = "https://mcp-claro.teste"
@@ -121,27 +120,6 @@ class Entrada:
 
 async def _nada() -> None:
     return None
-
-
-@contextlib.asynccontextmanager
-async def servidor_paravel(app: Any, porta: int) -> AsyncIterator[tuple[str, Callable[[], Awaitable[None]]]]:
-    """Como ``tests.apoio.servidor``, mas devolve tambem como parar o servidor no meio do teste."""
-    config = uvicorn.Config(app, host="127.0.0.1", port=porta, log_level="warning", lifespan="on")
-    srv = uvicorn.Server(config)
-    tarefa = asyncio.create_task(srv.serve())
-    for _ in range(200):
-        if srv.started:
-            break
-        await asyncio.sleep(0.02)
-
-    async def parar() -> None:
-        srv.should_exit = True
-        await tarefa
-
-    try:
-        yield f"http://127.0.0.1:{porta}", parar
-    finally:
-        await parar()
 
 
 def parametros_entrada(banco: Parametros, idp: IdpFalso, porta_idp: int) -> Parametros:

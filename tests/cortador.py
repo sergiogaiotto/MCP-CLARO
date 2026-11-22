@@ -12,9 +12,9 @@ cada conexao nova, lido na hora em que ela chega:
   repassa nenhum byte dela. Com ``segurar``, a conexao fica aberta e muda, e quem pediu so desiste pelo
   prazo dele; sem ``segurar``, a conexao e fechada.
 
-``so_se_tiver`` limita os cortes as conexoes cujo pedido traz aqueles bytes (por exemplo, ``b"tools/call"``),
-e ``maximo_de_cortes`` limita quantos cortes acontecem; o resto passa inteiro. Para escolher o pedido certo,
-quem pede nao deve reaproveitar a conexao (uma conexao por pedido).
+Nos tres modos de corte, ``so_se_tiver`` limita os cortes as conexoes cujo pedido traz aqueles bytes (por exemplo,
+``b"tools/call"``), e ``maximo_de_cortes`` limita quantos cortes acontecem; o resto passa inteiro. Para escolher o
+pedido certo, quem pede nao deve reaproveitar a conexao (uma conexao por pedido).
 
 Nos modos de corte, quem respondeu ja executou quando a resposta comeca: o corte acontece depois do efeito.
 """
@@ -108,25 +108,24 @@ class Cortador:
         try:
             if modo == "inteiro":
                 await self._repassar(up_leitor, escritor)
-            elif modo == "engolir":
-                primeiro = await up_leitor.read(65536)
-                # A resposta so comeca depois de o pedido chegar inteiro: aqui ja da para saber qual e.
-                if primeiro and self._corta(bytes(recebido)):
-                    self.cortes += 1
-                    self.engolidas.append(await self._resposta_inteira(up_leitor, primeiro))
-                    if self.segurar:
-                        await envio  # muda: so termina quando quem pediu desiste e fecha a conexao
-                        self.desistencias += 1
-                else:
-                    escritor.write(primeiro)
-                    await escritor.drain()
-                    await self._repassar(up_leitor, escritor)
-            elif modo == "sem_resposta":
-                await up_leitor.read(1)  # o sistema comecou a responder: ja executou
-                self.cortes += 1
-            else:
-                await self._metade_do_corpo(up_leitor, escritor)
-                self.cortes += 1
+                return
+            # O sistema comecou a responder: ja executou. A resposta so comeca depois de o pedido chegar inteiro:
+            # aqui ja da para saber qual e, e decidir o corte (em todos os modos de corte).
+            primeiro = await up_leitor.read(65536)
+            if not (primeiro and self._corta(bytes(recebido))):
+                escritor.write(primeiro)
+                await escritor.drain()
+                await self._repassar(up_leitor, escritor)
+                return
+            self.cortes += 1  # antes de qualquer espera: outra conexao ja ve a conta certa
+            if modo == "engolir":
+                self.engolidas.append(await self._resposta_inteira(up_leitor, primeiro))
+                if self.segurar:
+                    await envio  # muda: so termina quando quem pediu desiste e fecha a conexao
+                    self.desistencias += 1
+            elif modo == "meio_do_corpo":
+                await self._metade_do_corpo(up_leitor, escritor, primeiro)
+            # sem_resposta: a conexao com quem pediu fecha sem nenhum byte da resposta
         except ConnectionError, OSError:
             pass
         finally:
@@ -189,8 +188,9 @@ class Cortador:
                 pass
         return bytes(bruto)
 
-    async def _metade_do_corpo(self, up_leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter) -> None:
-        bruto = bytearray()
+    @staticmethod
+    async def _metade_do_corpo(up_leitor: asyncio.StreamReader, escritor: asyncio.StreamWriter, inicio: bytes) -> None:
+        bruto = bytearray(inicio)
         while b"\r\n\r\n" not in bruto:
             pedaco = await up_leitor.read(65536)
             if not pedaco:

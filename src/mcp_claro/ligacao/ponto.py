@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
 from mcp_claro.ligacao import cliente
-from mcp_claro.ligacao.cliente import ENDERECO_RECUSADO, TETO_RESPOSTA_PADRAO, Resposta, Segredo, Sondagem
+from mcp_claro.ligacao.cliente import ENDERECO_RECUSADO, TETO_RESPOSTA_PADRAO, Listagem, Resposta, Segredo, Sondagem
 from mcp_claro.ligacao.sala_contrato import SALA_FORA, FalhaNaSala, resposta_sala_fora, sondagem_sala_fora
 
 
@@ -44,6 +44,10 @@ class Ligacao(Protocol):
         esquema_declarado: dict[str, Any] | None = None,
         teto_resposta: int = TETO_RESPOSTA_PADRAO,
     ) -> Resposta: ...
+
+    async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
+        """O que o sistema declara e o que ele pediu no meio da listagem (o despachante grava os pedidos)."""
+        ...
 
     async def listar_ferramentas(
         self, endereco: str, segredo: Segredo, discover_json: str | None
@@ -93,10 +97,8 @@ class ClienteLocal:
             liberar_locais=self.liberar_locais,
         )
 
-    async def listar_ferramentas(
-        self, endereco: str, segredo: Segredo, discover_json: str | None
-    ) -> list[dict[str, Any]]:
-        return await cliente.listar_ferramentas(
+    async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
+        return await cliente.listar(
             endereco,
             segredo,
             discover_json,
@@ -104,6 +106,11 @@ class ClienteLocal:
             ambiente=self.ambiente,
             liberar_locais=self.liberar_locais,
         )
+
+    async def listar_ferramentas(
+        self, endereco: str, segredo: Segredo, discover_json: str | None
+    ) -> list[dict[str, Any]]:
+        return (await self.listar(endereco, segredo, discover_json)).ferramentas
 
     async def sondar(self, endereco: str, segredo: Segredo, *, prazo: float = 10.0) -> Sondagem:
         return await cliente.sondar(
@@ -135,6 +142,9 @@ class SemSala:
         teto_resposta: int = TETO_RESPOSTA_PADRAO,
     ) -> Resposta:
         return resposta_sala_fora()
+
+    async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
+        raise FalhaNaSala("nao_enviado", SALA_FORA)
 
     async def listar_ferramentas(
         self, endereco: str, segredo: Segredo, discover_json: str | None

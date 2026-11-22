@@ -40,8 +40,9 @@ servidor "falante" (`uv run python -m exemplos.terceiro_falante --porta 9105`). 
 
 Isto depende de ambiente. Em piloto e produção, a sala de visitas só chama endereço `https://` da internet. Em
 desenvolvimento e teste, ela aceita também `http://`. Só com `APP_ENV=desenvolvimento` ela aceita um endereço local,
-como o de um dublê na mesma máquina. No Compose de teste (`APP_ENV=teste`), a sala e o muro dela recusam endereço
-local: o dublê precisa estar num endereço público da internet (com `http://` ou `https://`).
+como o de um dublê na mesma máquina. A sala recusa subir sem `APP_ENV` escrito no ambiente dela: sem ele, ela subiria
+como desenvolvimento e aceitaria endereços locais. No Compose de teste (`APP_ENV=teste`), a sala e o muro dela
+recusam endereço local: o dublê precisa estar num endereço público da internet (com `http://` ou `https://`).
 
 ### 9. Servidor de terceiros que muda
 
@@ -107,7 +108,10 @@ local: o dublê precisa estar num endereço público da internet (com `http://` 
   eles. Se a chave da pessoa estiver na hora de renovar, a renovação ainda vai do despachante ao endereço de troca
   de chave do terceiro, como sempre. A leitura volta com "A sala de visitas nao esta disponivel; nada foi enviado ao
   servidor de terceiros" e o nome do servidor. Uma ação vira "não saiu", porque nada saiu, e um pedido igual depois
-  é uma ação nova. O mudou-parou não conta essa rodada contra o servidor. Os sistemas próprios seguem normais.
+  é uma ação nova. O mudou-parou não conta essa rodada contra o servidor. Os sistemas próprios seguem normais. Com a
+  sala no ar, mas cheia (as 32 vagas ocupadas por mais de 2 segundos), a ação também vira "não saiu", e o
+  mudou-parou também não conta a rodada contra o servidor. Com a sala cheia em toda rodada, nenhuma conferência de
+  terceiro é feita ([decisões, "Riscos aceitos da Fase 3"](decisoes.md#riscos-aceitos-da-fase-3)).
 - **O que esperamos do aplicativo:** que diga à pessoa que o servidor está fora agora, sem repetir em laço.
 - **O que a pessoa vê:** na tela da ação: "A sala de visitas, por onde o MCP-CLARO fala com servidores de terceiros,
   não estava disponível. Nada saiu."

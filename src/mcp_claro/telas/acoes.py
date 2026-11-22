@@ -325,6 +325,10 @@ _EXPLICACOES: Final[dict[str, str]] = {
     "a sala de visitas nao esta disponivel; o pedido nao chegou ao servidor de terceiros": (
         "A sala de visitas, por onde o MCP-CLARO fala com servidores de terceiros, não estava disponível. Nada saiu."
     ),
+    "a sala de visitas estava cheia; nada saiu": (
+        "A sala de visitas, por onde o MCP-CLARO fala com servidores de terceiros, estava cheia: muitas chamadas ao"
+        " mesmo tempo. Nada saiu. Peça de novo em instantes, se ainda precisar."
+    ),
 }
 # O pedido barrado (``saida.despachante._classificar``): ou e o fim inteiro (estado "o sistema pediu mais dados"),
 # ou vem depois do fim, como um rabo: "; antes pediu X e o MCP-CLARO recusou" numa acao enviada (com ou sem
@@ -366,6 +370,7 @@ def detalhe_do_desfecho(desfecho: str | None) -> tuple[str, str]:
 _NAO_CHEGOU: Final[frozenset[str]] = frozenset(
     {
         "a sala de visitas nao esta disponivel; o pedido nao chegou ao servidor de terceiros",
+        "a sala de visitas estava cheia; nada saiu",
         "o endereco do servidor de terceiros nao e publico ou nao usa https; o pedido nao chegou ao sistema",
         "o pedido tem niveis demais, um dentro do outro, para o MCP-CLARO escrever; o pedido nao chegou ao sistema",
         "o pedido nao cabe no contrato da sala de visitas; o pedido nao chegou ao sistema",

@@ -5,7 +5,10 @@
 - com a chave da Fase 3 desligada, so pessoa de teste autoriza um terceiro;
 - a troca do codigo e a renovacao, que ficam no despachante, passam o ``token_endpoint`` pela mesma conferencia do
   endereco combinado da sala (https e IP publico): recusado, nada vai ao servidor de autorizacao e o extrato ganha
-  ``sala_endereco_recusado``.
+  ``sala_endereco_recusado``;
+- o endereco de volta de um terceiro e so dele (``/telas/autorizar/<id>/volta``), e quem conclui manda o
+  ``sistema_id`` desse endereco (R6a-1; a mistura de servidores de autorizacao fica em
+  ``test_r6a_mistura_autorizacao.py``).
 """
 
 from __future__ import annotations
@@ -39,7 +42,10 @@ from tests.integracao.test_autorizacao import OAuthFalso
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
-VOLTA = "https://mcp-claro.teste/telas/autorizacao/volta"
+
+def volta(sistema_id: uuid.UUID) -> str:
+    """O endereco de volta de um servidor de terceiros, como as telas mandam: so dele."""
+    return f"https://mcp-claro.teste{autorizacao.caminho_da_volta(sistema_id)}"
 
 
 @dataclass
@@ -119,19 +125,23 @@ async def test_com_a_chave_desligada_so_pessoa_de_teste_autoriza_terceiro(cena: 
     real, de_teste = await cena.pessoa(teste=False), await cena.pessoa(teste=True)
     async with cena.desp_db.begin() as c:
         with pytest.raises(autorizacao.AutorizacaoRecusada) as recusa:
-            await autorizacao.iniciar_autorizacao(c, cena.cifra, real, sistema_id, VOLTA, papel="despachante")
+            await autorizacao.iniciar_autorizacao(
+                c, cena.cifra, real, sistema_id, volta(sistema_id), papel="despachante"
+            )
     assert recusa.value.motivo == "terceiros_desligados"
     async with cena.desp_db.begin() as c:
-        assert await autorizacao.iniciar_autorizacao(c, cena.cifra, de_teste, sistema_id, VOLTA, papel="despachante")
         assert await autorizacao.iniciar_autorizacao(
-            c, cena.cifra, real, sistema_id, VOLTA, papel="despachante", terceiros_ligados=True
+            c, cena.cifra, de_teste, sistema_id, volta(sistema_id), papel="despachante"
+        )
+        assert await autorizacao.iniciar_autorizacao(
+            c, cena.cifra, real, sistema_id, volta(sistema_id), papel="despachante", terceiros_ligados=True
         )
 
 
 async def test_rota_de_iniciar_aplica_a_chave_da_fase_3(cena: Cena) -> None:
     sistema_id = await cena.terceiro()
     real = await cena.pessoa(teste=False)
-    corpo = {"pessoa_id": str(real), "sistema_id": str(sistema_id), "redirect_uri": VOLTA}
+    corpo = {"pessoa_id": str(real), "sistema_id": str(sistema_id), "redirect_uri": volta(sistema_id)}
     for ligados, esperado in ((False, 403), (True, 200)):
         rotas = autorizacao.rotas_autorizacao(cena.desp_db, cena.cifra, terceiros_ligados=ligados)
         transporte = httpx2.ASGITransport(app=Starlette(routes=rotas))
@@ -145,7 +155,13 @@ async def _codigo(
 ) -> tuple[str, str]:
     async with cena.desp_db.begin() as c:
         url = await autorizacao.iniciar_autorizacao(
-            c, cena.cifra, pessoa_id, sistema_id, VOLTA, papel="despachante", terceiros_ligados=terceiros_ligados
+            c,
+            cena.cifra,
+            pessoa_id,
+            sistema_id,
+            volta(sistema_id),
+            papel="despachante",
+            terceiros_ligados=terceiros_ligados,
         )
     async with httpx2.AsyncClient(follow_redirects=False) as http:
         r = await http.get(url + "&" + urlencode({"usuario": "ana"}))
@@ -161,7 +177,13 @@ async def test_troca_do_codigo_de_terceiro_passa_pela_conferencia_do_endereco(ce
     # Em teste, o token_endpoint em 127.0.0.1 nao e publico: sem a liberacao dos testes, nada sai.
     with pytest.raises(autorizacao.AutorizacaoRecusada) as recusa:
         await autorizacao.concluir_autorizacao(
-            cena.desp_db, cena.cifra, estado=estado, pessoa_id=pessoa, codigo=codigo, ambiente="teste"
+            cena.desp_db,
+            cena.cifra,
+            estado=estado,
+            pessoa_id=pessoa,
+            codigo=codigo,
+            ambiente="teste",
+            sistema_id=sistema_id,
         )
     assert recusa.value.motivo == autorizacao.ENDERECO_RECUSADO
     assert "nao e publico ou nao usa https" in recusa.value.mensagem
@@ -172,7 +194,14 @@ async def test_troca_do_codigo_de_terceiro_passa_pela_conferencia_do_endereco(ce
     # Com a liberacao dos testes (so em desenvolvimento e teste), a troca sai e guarda a chave.
     estado, codigo = await _codigo(cena, pessoa, sistema_id)
     feita = await autorizacao.concluir_autorizacao(
-        cena.desp_db, cena.cifra, estado=estado, pessoa_id=pessoa, codigo=codigo, ambiente="teste", liberar_locais=True
+        cena.desp_db,
+        cena.cifra,
+        estado=estado,
+        pessoa_id=pessoa,
+        codigo=codigo,
+        ambiente="teste",
+        liberar_locais=True,
+        sistema_id=sistema_id,
     )
     assert feita.sistema_id == sistema_id
     assert cena.oauth.contagem["codigo"] == antes + 1
@@ -187,6 +216,7 @@ async def test_troca_do_codigo_de_terceiro_passa_pela_conferencia_do_endereco(ce
             codigo=codigo,
             ambiente="producao",
             liberar_locais=True,
+            sistema_id=sistema_id,
         )
     assert cena.oauth.contagem["codigo"] == antes + 1
 
@@ -236,6 +266,7 @@ async def test_concluir_com_a_chave_desligada_recusa_pessoa_real(cena: Cena) -> 
             codigo=codigo,
             ambiente="teste",
             liberar_locais=True,
+            sistema_id=sistema_id,
         )
     assert recusa.value.motivo == "terceiros_desligados"
     assert cena.oauth.contagem["codigo"] == antes
@@ -248,7 +279,8 @@ async def test_concluir_com_a_chave_desligada_recusa_pessoa_real(cena: Cena) -> 
         transporte = httpx2.ASGITransport(app=Starlette(routes=rotas))
         async with httpx2.AsyncClient(transport=transporte, base_url="http://despachante") as http:
             r = await http.post(
-                "/interno/autorizacao/concluir", json={"estado": estado, "pessoa_id": str(real), "codigo": codigo}
+                "/interno/autorizacao/concluir",
+                json={"estado": estado, "pessoa_id": str(real), "codigo": codigo, "sistema_id": str(sistema_id)},
             )
         assert r.status_code == status, r.text
         assert r.json().get("motivo") == motivo
@@ -266,7 +298,8 @@ async def test_rota_de_concluir_confere_o_endereco_pelo_ambiente(cena: Cena) -> 
         transporte = httpx2.ASGITransport(app=Starlette(routes=rotas))
         async with httpx2.AsyncClient(transport=transporte, base_url="http://despachante") as http:
             r = await http.post(
-                "/interno/autorizacao/concluir", json={"estado": estado, "pessoa_id": str(pessoa), "codigo": codigo}
+                "/interno/autorizacao/concluir",
+                json={"estado": estado, "pessoa_id": str(pessoa), "codigo": codigo, "sistema_id": str(sistema_id)},
             )
         assert r.status_code == status, r.text
         assert r.json().get("motivo") == motivo
@@ -294,15 +327,15 @@ async def test_app_liga_as_rotas_de_autorizacao_ao_ambiente_e_a_chave_da_fase_3(
 ) -> None:
     sistema_id = await cena.terceiro()
     real, de_teste = await cena.pessoa(teste=False), await cena.pessoa(teste=True)
-    inicio = {"sistema_id": str(sistema_id), "redirect_uri": VOLTA}
+    inicio = {"sistema_id": str(sistema_id), "redirect_uri": volta(sistema_id)}
     antes = cena.oauth.contagem["codigo"]
     # Em teste, com a liberacao dos testes: a troca sai; a pessoa real nao comeca (chave desligada).
     em_teste = _app(cena, ambiente="teste")
     r = await _pelo_app(em_teste, "/interno/autorizacao/iniciar", inicio | {"pessoa_id": str(real)})
     assert (r.status_code, r.json()["motivo"]) == (403, "terceiros_desligados")
     estado, codigo = await _codigo(cena, de_teste, sistema_id)
-    volta = {"estado": estado, "pessoa_id": str(de_teste), "codigo": codigo}
-    r = await _pelo_app(em_teste, "/interno/autorizacao/concluir", volta)
+    corpo = {"estado": estado, "pessoa_id": str(de_teste), "codigo": codigo, "sistema_id": str(sistema_id)}
+    r = await _pelo_app(em_teste, "/interno/autorizacao/concluir", corpo)
     assert r.status_code == 200, r.text
     assert cena.oauth.contagem["codigo"] == antes + 1
     # A partida ainda recusa a chave da Fase 3 (D6) e a producao sem a sala: so para ver a fiacao, sem a conferencia.
@@ -313,7 +346,9 @@ async def test_app_liga_as_rotas_de_autorizacao_ao_ambiente_e_a_chave_da_fase_3(
     em_producao = _app(cena, ambiente="producao")
     estado, codigo = await _codigo(cena, de_teste, sistema_id)
     r = await _pelo_app(
-        em_producao, "/interno/autorizacao/concluir", {"estado": estado, "pessoa_id": str(de_teste), "codigo": codigo}
+        em_producao,
+        "/interno/autorizacao/concluir",
+        {"estado": estado, "pessoa_id": str(de_teste), "codigo": codigo, "sistema_id": str(sistema_id)},
     )
     assert (r.status_code, r.json()["motivo"]) == (403, autorizacao.ENDERECO_RECUSADO)
     assert cena.oauth.contagem["codigo"] == antes + 1
@@ -325,7 +360,13 @@ async def test_endereco_de_troca_que_nao_resolve_e_indisponivel_nao_recusado(cen
     estado, codigo = await _codigo(cena, pessoa, sistema_id)
     with pytest.raises(autorizacao.AutorizacaoRecusada) as recusa:
         await autorizacao.concluir_autorizacao(
-            cena.desp_db, cena.cifra, estado=estado, pessoa_id=pessoa, codigo=codigo, ambiente="teste"
+            cena.desp_db,
+            cena.cifra,
+            estado=estado,
+            pessoa_id=pessoa,
+            codigo=codigo,
+            ambiente="teste",
+            sistema_id=sistema_id,
         )
     assert recusa.value.motivo == "sistema_indisponivel"
     assert "sala_endereco_recusado" not in await g.tipos_no_extrato(cena.dono, sistema_id)

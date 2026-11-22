@@ -33,7 +33,7 @@ from tests.unidade.test_despachante_classifica import FERRAMENTA_T, OP, porta
 from tests.unidade.test_telas_acoes_paginas import AGORA, operacao
 from tests.unidade.test_telas_acoes_paginas import _ficha as render_ficha
 
-RLO = "‮"
+RLO = "\u202e"
 NOME = f"fornecedor{RLO}x"
 MARCADO = "fornecedor[U+202E]x"
 NO_BDI = f"<bdi>{MARCADO}</bdi>"

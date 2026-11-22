@@ -106,10 +106,15 @@ def _texto_visivel(html: str) -> str:
 # --- Acento e promessa ---------------------------------------------------------------------------------------------
 
 
+# Rotulos fixados pelo contrato K9 da revisao cruzada (R6b-5): a palavra "sondagem" nao tem acento, e aqui e o nome
+# do passo que a ficha do sistema mostra.
+FIXADOS: frozenset[str] = frozenset({paginas.ONDE_O_PEDIDO["sondagem_sistema_pediu_dados"]})
+
+
 @pytest.mark.parametrize("texto", _textos_de_tela())
 def test_texto_de_tela_novo_tem_acento_e_nao_promete(texto: str) -> None:
     sem_campos = re.sub(r"\{[a-z_]+\}", "", texto)  # {versoes} e o nome do campo, nao texto
-    assert not SEM_ACENTO.search(sem_campos), texto
+    assert texto in FIXADOS or not SEM_ACENTO.search(sem_campos), texto
     assert not PROMESSA.search(texto), texto
     assert texto == texto.strip()
     assert texto
@@ -401,4 +406,12 @@ def test_textos_novos_do_retoque() -> None:
 def test_onde_o_pedido_cobre_toda_linha_de_pedido_barrado() -> None:
     from mcp_claro.telas import consultas_terceiros
 
-    assert set(paginas.ONDE_O_PEDIDO) == {*consultas_terceiros.TIPOS_PEDIDO_BARRADO, "acao_enviada"}
+    # Toda linha que "Pedidos recusados deste sistema" conta tem rotulo (contratos K4 e K9).
+    assert set(paginas.ONDE_O_PEDIDO) == {
+        *consultas_terceiros.TIPOS_PEDIDO_BARRADO,
+        *consultas_terceiros.TIPOS_FIM_COM_PEDIDOS,
+    }
+    assert paginas.ONDE_O_PEDIDO["declaracoes_sistema_pediu_dados"] == "Na leitura das ferramentas"
+    assert paginas.ONDE_O_PEDIDO["sondagem_sistema_pediu_dados"] == "Na sondagem"
+    assert paginas.ONDE_O_PEDIDO["acao_nao_confirmada"] == "Numa ação sem confirmação"
+    assert paginas.ONDE_O_PEDIDO["acao_nao_saiu"] == "Numa ação, que não saiu"

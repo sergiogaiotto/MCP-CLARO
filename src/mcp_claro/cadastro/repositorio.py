@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from mcp_claro.cadastro.esquema import com_descricoes, conferir_terceiro, limpar_textos, para_conferir
+from mcp_claro.cadastro.esquema import com_descricoes, conferir_terceiro, limpar_textos, nomes_neutros, para_conferir
 from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, ORIGENS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
 from mcp_claro.entrada.argumentos import conferir_esquema
@@ -326,8 +326,9 @@ async def revisar_ferramenta(
     ``$schema`` fora da raiz, referencia que nao seja ``#/$defs/<nome>`` ou ``#/definitions/<nome>``, esquema em
     ciclo e esquema grande ou fundo demais, contando todas as definicoes e seguindo as referencias a partir da
     raiz e de cada definicao (citada ou nao), ``enum`` com mais de 1000 valores e esquema limpo com mais de 256 KiB
-    (``esquema.conferir_terceiro``). A ``impressao`` e sempre a da definicao declarada, e ``definicao_declarada``
-    fica guardada para o antes e depois.
+    (``esquema.conferir_terceiro``). Depois das conferencias, o esquema gravado perde o ``$schema`` da raiz e as
+    definicoes ganham nomes neutros (``esquema.nomes_neutros``, contrato K3), com o mesmo veredito. A ``impressao``
+    e sempre a da definicao declarada, e ``definicao_declarada`` fica guardada para o antes e depois.
     """
     declarada_entrada = esquema_entrada or dict(definicao_declarada.get("inputSchema") or {})
     # Antes do banco, como nas Fases 1 e 2: esquema invalido e campo de destinatario fora dele. Limpar e por as
@@ -357,6 +358,9 @@ async def revisar_ferramenta(
     if de_terceiro:
         conferir_terceiro(esquema)
         conferir_esquema(para_conferir(esquema))  # a copia da entrada tambem e um esquema valido
+        # Depois de todas as conferencias (o que e recusado nao muda): sem o $schema da raiz e com nomes neutros nas
+        # definicoes (contrato K3), que sao texto livre do fornecedor.
+        esquema = nomes_neutros(esquema)
     nome = str(definicao_declarada["name"])
     await c.execute(
         text(

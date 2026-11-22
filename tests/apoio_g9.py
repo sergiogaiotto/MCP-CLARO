@@ -6,7 +6,7 @@ Cada ``Gateway`` sobe de verdade, num teste:
 - o provedor OIDC falso (``tests/idp_oidc_falso.py``): o cracha do aplicativo e o login das telas;
 - a sala de visitas de verdade (``visitas.app.Sala``: um processo filho por chamada, mTLS com os certificados de
   ``tests/apoio_visitas.gerar_certificados``), em desenvolvimento para aceitar o endereco local dos terceiros de
-  teste. Com ``sala="processo"``, a sala sem os filhos (``apoio_g3a.sala_em_processo``), o mesmo contrato;
+  teste;
 - o despachante de verdade (``criar_app_despachante``), com ``VISITS_INTERNAL_URL`` apontando para a sala e sem o
   cliente local de teste: todo pedido a um terceiro passa pela sala, como no piloto;
 - a entrada de verdade (``criar_app_entrada``), com as telas da pessoa e do ADMIN.
@@ -23,8 +23,12 @@ guarda chaves, conclui a revisao do servidor e cria modelos pelas telas, com CSR
 pela tela de ordens e cria os limites pela tela de limites, com a passkey do autenticador de software de teste
 (``tests/autenticador_falso.py``, como em ``test_telas_acoes``).
 
-Ficam pelo banco, gravados pelo dono das tabelas (ou pelo usuario do despachante), so o que nenhuma tela faz:
+Ficam pelo banco, gravados pelo dono das tabelas (ou pelo usuario da entrada ou do despachante), so o que nenhuma
+tela faz, ou o que uma tela faria do mesmo jeito:
 
+- a pessoa nasce por ``repositorio.pessoa_no_login``, pelo usuario da entrada (``Gateway.pessoa``): e a mesma
+  funcao que o primeiro login das telas chama, so que antes de a pessoa entrar. Depois ela entra pelas telas
+  (``Gateway.entrar``), com o mesmo emissor e o mesmo sujeito, e o login acha a linha;
 - o papel de ADMIN da pessoa (nenhuma tela o da; a instalacao o grava no banco);
 - a chave da pessoa num sistema de chave por pessoa: ela nasce da autorizacao da pessoa no sistema (OAuth), que pede
   um servidor de autorizacao para cada sistema de teste. A tela e a troca do codigo tem prova propria
@@ -200,15 +204,12 @@ class Gateway:
             ).one()
         return Aplicativo(uuid.UUID(str(linha.id)), client_id, str(linha.nome))
 
-    async def pessoa(self, apelido: str, nome: str | None = None, *, teste: bool = False) -> Pessoa:
-        """Uma pessoa que ja entrou uma vez (o primeiro login cria a linha). ``teste=False``: pessoa real, que so
-        ve terceiros com a chave da Fase 3 ligada."""
+    async def pessoa(self, apelido: str, nome: str | None = None) -> Pessoa:
+        """Uma pessoa real (nao de teste), criada como o primeiro login a cria (``repositorio.pessoa_no_login``,
+        pelo usuario da entrada). A chave da Fase 3 fica ligada nestas provas: ela ve terceiros."""
         sujeito = f"g9-{apelido}-{self.sufixo}"
         async with self.entrada_db.begin() as c:
             linha = await repositorio.pessoa_no_login(c, self.idp.emissor, sujeito, nome or apelido.capitalize())
-        if teste:
-            async with self.dono.begin() as c:
-                await c.execute(text("UPDATE pessoas SET teste = true WHERE id = :p"), {"p": linha.id})
         pessoa = Pessoa(apelido, sujeito, linha.id)
         self.pessoas[apelido] = pessoa
         return pessoa
@@ -661,13 +662,10 @@ def _parametros(
         "FEATURE_PHASE3_THIRD_PARTY": True,
         "RESPONSE_MAX_WAIT_SECONDS": 30,
         "OUTBOX_SWEEP_SECONDS": 1,
+        "VISITS_CA_FILE": str(certs.ca_visitas),
+        "VISITS_CLIENT_CERT_FILE": str(certs.despachante_cert),
+        "VISITS_CLIENT_KEY_FILE": str(certs.despachante_key),
     }
-    if certs is not None:
-        valores |= {
-            "VISITS_CA_FILE": str(certs.ca_visitas),
-            "VISITS_CLIENT_CERT_FILE": str(certs.despachante_cert),
-            "VISITS_CLIENT_KEY_FILE": str(certs.despachante_key),
-        }
     return Parametros(**(valores | dict(extra)))
 
 
@@ -712,14 +710,14 @@ async def _sala_de_verdade(certs: Any, porta: int, rotas: list[str]) -> AsyncIte
 
 @contextlib.asynccontextmanager
 async def subir_gateway(
-    banco: Parametros, pasta: Path, *, sala: str = "real", extra: Mapping[str, Any] | None = None
+    banco: Parametros, pasta: Path, *, extra: Mapping[str, Any] | None = None
 ) -> AsyncIterator[Gateway]:
     """O gateway inteiro (veja o comeco do modulo). ``pasta``: onde gravar os certificados da sala."""
     sufixo = uuid.uuid4().hex[:8]
     porta_idp, porta_desp, porta_sala = porta_livre(), porta_livre(), porta_livre()
     idp = IdpOidcFalso(emissor=f"http://127.0.0.1:{porta_idp}/realms/mcp-claro", segredo=None)
-    certs = apoio_visitas.gerar_certificados(pasta) if sala == "real" else None
-    url_sala = f"https://localhost:{porta_sala}" if certs is not None else f"http://127.0.0.1:{porta_sala}"
+    certs = apoio_visitas.gerar_certificados(pasta)
+    url_sala = f"https://localhost:{porta_sala}"
     p = _parametros(banco, idp, porta_idp, porta_desp, url_sala, certs, extra or {})
     dono = criar_engine(p, pool_size=3, max_overflow=3)
     entrada_db = g.engine_do_papel(p, "mcp_claro_entrada")
@@ -737,10 +735,7 @@ async def subir_gateway(
     try:
         async with contextlib.AsyncExitStack() as pilha:
             await pilha.enter_async_context(servidor(idp.app(), porta_idp))
-            if certs is not None:
-                await pilha.enter_async_context(_sala_de_verdade(certs, porta_sala, pela_sala))
-            else:
-                await pilha.enter_async_context(servidor(_ContaSala(g.sala_em_processo(), pela_sala), porta_sala))
+            await pilha.enter_async_context(_sala_de_verdade(certs, porta_sala, pela_sala))
             url_desp = await pilha.enter_async_context(servidor(app_desp, porta_desp))
             url_entrada = await pilha.enter_async_context(servidor(app_entrada))
             await g.abrir_a_saida(dono)

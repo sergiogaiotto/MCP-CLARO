@@ -24,8 +24,16 @@ Fase 3 (servidores de terceiros):
 - resultado fundo demais (partes demais umas dentro das outras) vira erro nosso legivel, nunca erro interno;
 - a revisao do servidor (``revisar_servidor``) le o servidor de novo, com a chave de leitura das declaracoes
   guardada, e so publica o que foi revisto e nao mudou;
-- nas declaracoes, a falha que e do MCP-CLARO (sala de visitas fora, cofre que nao abre a chave) e
-  ``DeclaracoesNaoConferidas``, com motivo proprio: as rotinas nao a contam como "sem resposta" do servidor;
+- nas declaracoes, a falha que e do MCP-CLARO (sala de visitas fora, sala cheia dita pelo processo pai dela, cofre
+  que nao abre a chave) e ``DeclaracoesNaoConferidas``, com motivo proprio: as rotinas nao a contam como "sem
+  resposta" do servidor (a falha nossa no banco ou no grupo de conexoes sobe como veio, e a porta interna a responde
+  com 503 ``conferencia_nao_feita``, contrato K5). O que o servidor declarou e o banco nao guarda (nome longo demais,
+  texto que o banco nao escreve, erro de dado do banco ao gravar) conta contra o servidor
+  (``DeclaracoesIndisponiveis``). ``ferramentas_vistas`` e gravada em ordem fixa (pelo nome): duas leituras ao mesmo
+  tempo travam as linhas na mesma ordem e nao dao impasse no banco;
+- pedido do sistema barrado fora de uma chamada, na leitura das declaracoes ou na sondagem (contrato K4), vai ao
+  extrato sem pessoa (``declaracoes_sistema_pediu_dados``, ``sondagem_sistema_pediu_dados``; as categorias em
+  ``dados.pedidos``) e ao contador ``pedidos_do_sistema_barrados``, com ``onde``. A lista lida continua a mesma;
 - a sondagem separa o desfecho: so "versao" conta como versao antiga, e um terceiro ativo e revisado que deixa de
   falar a 2026-07-28 vai a quarentena (D29).
 """
@@ -40,6 +48,7 @@ from typing import Any, Final
 
 import mcp_types as types
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from mcp_claro.cadastro import quarentena as cadastro_quarentena
@@ -53,7 +62,7 @@ from mcp_claro.despachante.chaves import Cifra
 from mcp_claro.despachante.cifra_origem import ContextoSemSistema
 from mcp_claro.extrato import registrar
 from mcp_claro.ligacao import cliente
-from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, Resposta, Sondagem, TipoResultado
+from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, Listagem, Resposta, Segredo, Sondagem, TipoResultado
 from mcp_claro.ligacao.ponto import (
     LINHA_SALA_FORA,
     Ligacao,
@@ -62,7 +71,7 @@ from mcp_claro.ligacao.ponto import (
     pedidos_da_resposta,
     pedidos_legiveis,
 )
-from mcp_claro.ligacao.sala_contrato import FalhaNaSala
+from mcp_claro.ligacao.sala_contrato import SALA_SEM_VAGA, FalhaNaSala, SalaSemVaga
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import bloqueios, estado, estranhos, programas
@@ -94,6 +103,11 @@ TETO_FORNECEDOR: Final = (3, 200)
 TETO_PUBLICADAS: Final = 500
 TETO_NOME_NO_EXTRATO: Final = 128
 TETO_FERRAMENTAS_NO_EXTRATO: Final = 50
+TETO_BYTES_NOME: Final = 1000
+"""Maior nome de ferramenta, em bytes UTF-8, que ``ferramentas_vistas`` guarda: bem abaixo do teto de uma entrada do
+indice da chave primaria ``(sistema_id, nome)`` (cerca de 2,7 kB, mesmo com letras que nao se comprimem). Nome de
+mais de 128 letras que cabe aqui continua guardado: o ADMIN o ve, e a revisao de um terceiro o recusa
+(``telas.admin.TETO_NOME_FERRAMENTA``)."""
 
 
 class DeclaracoesIndisponiveis(Exception):
@@ -101,9 +115,10 @@ class DeclaracoesIndisponiveis(Exception):
 
 
 class DeclaracoesNaoConferidas(DeclaracoesIndisponiveis):
-    """A falha e do MCP-CLARO, nao do sistema: a sala de visitas fora (``sala_fora``) ou o cofre que nao abriu a
-    chave das declaracoes (``chave_indisponivel``). A porta interna responde 503 com ``motivo``, e as rotinas nao
-    contam a rodada como "sem resposta" do servidor (critica A5)."""
+    """A falha e do MCP-CLARO, nao do sistema: a sala de visitas fora (``sala_fora``), a sala cheia dita pelo processo
+    pai dela (``sala_sem_vaga``) ou o cofre que nao abriu a chave das declaracoes (``chave_indisponivel``). A porta
+    interna responde 503 com ``motivo``, e as rotinas nao contam a rodada como "sem resposta" do servidor (critica
+    A5)."""
 
     def __init__(self, motivo: str, mensagem: str) -> None:
         super().__init__(mensagem)
@@ -204,6 +219,12 @@ def _falha(resposta: Resposta, sistema: Sistema) -> dict[str, Any]:
             f"O servidor de terceiros {nome} pediu para mandar o pedido a outro endereco; o MCP-CLARO nao seguiu."
             " Nada foi lido.",
             sala,
+        )
+    if sistema.de_terceiro and resposta.tipo == "nao_enviado" and resposta.excecao == SALA_SEM_VAGA:
+        return _resultado_de_erro(
+            f"A sala de visitas estava cheia; nada foi enviado ao servidor de terceiros {nome}. Tente de novo em"
+            " instantes.",
+            SALA_SEM_VAGA,
         )
     if resposta.excecao == PEDIDO_FUNDO_DEMAIS:
         return _resultado_de_erro(
@@ -318,6 +339,8 @@ def interpretar(resposta: Resposta, ferramenta: FerramentaVitrine, *, com_chave_
     ]
     if sala is not None:
         contadores.append((sala, {"onde": "leitura"}))
+    if _sala_sem_vaga(resposta, sistema):
+        contadores.append((SALA_SEM_VAGA, {"onde": "leitura"}))
     if emoldurado:
         contadores.append(("respostas_de_estranhos", {"origem": "terceiro" if sistema.de_terceiro else "proprio"}))
     if pedidos:
@@ -345,19 +368,72 @@ def interpretar(resposta: Resposta, ferramenta: FerramentaVitrine, *, com_chave_
     )
 
 
+def _sala_sem_vaga(resposta: Resposta | Sondagem, sistema: Sistema) -> bool:
+    """A sala de visitas estava cheia e nada foi a um filho (contrato K7): conta ``sala_sem_vaga`` com ``onde``."""
+    nada_saiu = (
+        resposta.desfecho == "inalcancavel" if isinstance(resposta, Sondagem) else resposta.tipo == "nao_enviado"
+    )
+    return sistema.de_terceiro and nada_saiu and resposta.excecao == SALA_SEM_VAGA
+
+
+async def _listagem(ligacao: Ligacao, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
+    """``ligacao.listar``, com os pedidos do sistema. Uma ligacao que so tem ``listar_ferramentas`` (as trocadas por
+    injecao nos testes; as de verdade, ``ClienteLocal``, ``SemSala`` e ``ClienteSala``, tem as duas) lista sem
+    pedidos."""
+    listar = getattr(ligacao, "listar", None)
+    if listar is None:
+        return Listagem(await ligacao.listar_ferramentas(endereco, segredo, discover_json))
+    listagem: Listagem = await listar(endereco, segredo, discover_json)
+    return listagem
+
+
+def _pedidos_da_falha(erro: Exception) -> tuple[str, ...]:
+    """O que o sistema pediu antes de a listagem falhar: a sala diz em ``FalhaNaSala.pedidos``; o cliente local, em
+    ``ListagemRecusada.pedidos`` e ``ListagemFalhou.pedidos``. Qualquer outra falha nao traz pedido."""
+    if isinstance(erro, FalhaNaSala | cliente.ListagemRecusada | cliente.ListagemFalhou):
+        return erro.pedidos
+    return ()
+
+
+async def _guardar_vistas(c: AsyncConnection, sistema: Sistema, ferramentas: Sequence[dict[str, Any]]) -> None:
+    """Grava ``ferramentas_vistas`` em ordem fixa, pelo nome (ja conferido por ``_declaracao_invalida``), e nao na
+    ordem do servidor: duas leituras ao mesmo tempo travam as mesmas linhas na mesma ordem, sem impasse no banco."""
+    for f in sorted(ferramentas, key=lambda f: str(f["name"])):
+        await c.execute(
+            text(
+                "INSERT INTO ferramentas_vistas (sistema_id, nome, definicao, impressao) "
+                "VALUES (:s, :n, CAST(:d AS jsonb), :i) ON CONFLICT (sistema_id, nome) DO UPDATE "
+                "SET definicao = EXCLUDED.definicao, impressao = EXCLUDED.impressao, vista_em = now()"
+            ),
+            {"s": sistema.id, "n": f["name"], "d": json.dumps(f), "i": impressao(f)},
+        )
+
+
 def _nome_no_extrato(nome: str) -> str:
     """Nome de ferramenta declarado pelo fornecedor, como entra em ``dados`` do extrato: cortado e com os
     caracteres escondidos marcados."""
     return marcar_escondidos(nome[:TETO_NOME_NO_EXTRATO])
 
 
-def _tem_nulo(valor: Any) -> bool:
-    """Algum texto (chave ou valor, em qualquer nivel) com caractere nulo, que o banco nao guarda. Sem recursao."""
+def _texto_que_o_banco_nao_guarda(texto: str) -> bool:
+    """Texto com caractere nulo (U+0000), que o PostgreSQL recusa em texto e jsonb, ou que nao se escreve em UTF-8
+    (um pedaco de par UTF-16 sozinho, como ``\\ud800``), a mesma regra das rotas internas (``app._texto_valido``)."""
+    if "\x00" in texto:
+        return True
+    try:
+        texto.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def _tem_texto_que_o_banco_nao_guarda(valor: Any) -> bool:
+    """Algum texto (chave ou valor, em qualquer nivel) que o banco nao guarda. Sem recursao."""
     pilha = [valor]
     while pilha:
         atual = pilha.pop()
         if isinstance(atual, str):
-            if "\x00" in atual:
+            if _texto_que_o_banco_nao_guarda(atual):
                 return True
         elif isinstance(atual, dict):
             pilha.extend(atual.keys())
@@ -368,12 +444,30 @@ def _tem_nulo(valor: Any) -> bool:
 
 
 def _declaracao_invalida(ferramentas: Sequence[dict[str, Any]]) -> bool:
-    """Ferramenta sem nome, com nome em branco ou com caractere nulo em algum texto (o banco nao guarda)."""
+    """O servidor declarou o que o banco nao guarda: ferramenta sem nome, com nome em branco, com nome de mais de
+    ``TETO_BYTES_NOME`` bytes, ou com um texto que o banco nao guarda em qualquer lugar. Conta como o servidor que
+    nao entregou (``DeclaracoesIndisponiveis``), e nunca como falha nossa no banco (critica A5)."""
     for f in ferramentas:
         nome = f.get("name")
-        if not isinstance(nome, str) or not nome.strip() or _tem_nulo(f):
+        if not isinstance(nome, str) or not nome.strip() or _tem_texto_que_o_banco_nao_guarda(f):
+            return True
+        if len(nome.encode("utf-8")) > TETO_BYTES_NOME:
             return True
     return False
+
+
+_CLASSES_DE_DADO: Final = frozenset({"22", "54"})
+"""SQLSTATE do erro do banco causado pelo dado gravado: 22 (dado que o banco nao aceita: texto ou JSON que ele nao
+le, valor longo demais) e 54 (passou de um limite do banco, como o tamanho de uma entrada de indice)."""
+
+
+def _erro_de_dado(erro: BaseException) -> bool:
+    """O banco recusou o que ia ser gravado por causa do dado (``_CLASSES_DE_DADO``), e nao por falha nossa (impasse,
+    serializacao, conexao, grupo de conexoes tomado, permissao), que sobe como veio e vira 503 (contrato K5)."""
+    if not isinstance(erro, DBAPIError):
+        return False
+    sqlstate = getattr(erro.orig, "sqlstate", None)
+    return isinstance(sqlstate, str) and sqlstate[:2] in _CLASSES_DE_DADO
 
 
 class RevisaoRecusada(Exception):
@@ -627,6 +721,26 @@ class Despachante:
             await registrar(c, papel="despachante", tipo=linha, campos={"sistema": sistema.nome}, sistema_id=sistema.id)
         return linha
 
+    @staticmethod
+    async def _registrar_pedidos(c: AsyncConnection, sistema: Sistema, tipo: str, pedidos: Sequence[str]) -> None:
+        """Pedido do sistema barrado fora de uma chamada (contrato K4): ``declaracoes_sistema_pediu_dados`` ou
+        ``sondagem_sistema_pediu_dados``, sem pessoa, na transacao de quem chama. So as nossas palavras na frase e
+        as nossas categorias em ``dados.pedidos``; nada do que o sistema mandou."""
+        if pedidos:
+            await registrar(
+                c,
+                papel="despachante",
+                tipo=tipo,
+                campos={"sistema": sistema.nome, "pedidos": pedidos_legiveis(pedidos)},
+                sistema_id=sistema.id,
+                dados={"pedidos": list(pedidos)},
+            )
+
+    @staticmethod
+    def _contar_pedidos(pedidos: Sequence[str], *, onde: str) -> None:
+        for categoria in pedidos:
+            CONTADORES.somar("pedidos_do_sistema_barrados", tipo=categoria, onde=onde)
+
     async def sondar_sistema(self, sistema_id: uuid.UUID, segredo: str | None) -> Sondagem:
         """Sondagem de versao no cadastro. Grava sempre o desfecho e as versoes anunciadas (ja conferidas).
 
@@ -715,7 +829,11 @@ class Despachante:
                     {"m": sondagem.motivo, "d": sondagem.desfecho, "va": versoes, "i": sistema_id},
                 )
             sala = await self._registrar_sala(c, sistema, linha_da_sala(sondagem, sistema))
+            await self._registrar_pedidos(c, sistema, "sondagem_sistema_pediu_dados", sondagem.pedidos)
         # Contagens so depois do commit: uma sondagem desfeita nao conta.
+        self._contar_pedidos(sondagem.pedidos, onde="sondagem")
+        if _sala_sem_vaga(sondagem, sistema):
+            CONTADORES.somar(SALA_SEM_VAGA, onde="sondagem")
         if recusa_versao:
             CONTADORES.recusa_versao(
                 "sistema",
@@ -758,38 +876,83 @@ class Despachante:
     async def _listar(self, sistema: Sistema, segredo: str | None, discover_json: Any) -> list[dict[str, Any]]:
         """O que o sistema declara agora, pela ligacao dele, e guardado em ``ferramentas_vistas``.
 
-        Sala de visitas fora: ``DeclaracoesNaoConferidas`` com ``sala_fora`` (nada chegou ao servidor). Qualquer
-        outra falha da listagem: ``DeclaracoesIndisponiveis`` (o servidor nao entregou)."""
+        Falha do MCP-CLARO, que as rotinas nao contam contra o servidor: ``DeclaracoesNaoConferidas``, com
+        ``sala_fora`` (a sala de visitas fora) ou ``sala_sem_vaga`` (a sala cheia, dita pelo processo pai com o
+        cabecalho que so ele escreve: ``SalaSemVaga``). Nos dois, nada chegou ao servidor. Qualquer outra falha da
+        listagem: ``DeclaracoesIndisponiveis`` (o servidor nao entregou), inclusive o corpo de sala cheia sem o
+        cabecalho do pai, que um filho tomado pelo terceiro poderia escrever para escapar da regra das rodadas sem
+        resposta (critica A5).
+
+        O que o servidor declarou e o banco nao guarda (``_declaracao_invalida``, ou o banco que recusa a linha por
+        causa do dado, ``_erro_de_dado``) tambem e ``DeclaracoesIndisponiveis``: conta contra o servidor. So a falha
+        nossa no banco (impasse, conexao, grupo de conexoes tomado) sobe como veio, e a porta interna a responde com
+        503 ``conferencia_nao_feita`` (contrato K5).
+
+        As linhas vao em ordem fixa, pelo nome, e nao na ordem em que o servidor listou: duas leituras ao mesmo tempo
+        (duas copias das rotinas, ou a rodada e a conclusao da revisao) travam as mesmas linhas na mesma ordem, e o
+        banco nao desfaz nenhuma por impasse. O pedido do sistema barrado no meio da listagem vai ao extrato
+        (``declaracoes_sistema_pediu_dados``) na mesma transacao, e ao contador depois dela, tambem quando a
+        listagem falha depois do pedido."""
 
         async def obter() -> str | None:
             return segredo
 
         sondagem = json.dumps(discover_json) if isinstance(discover_json, dict) else discover_json
         try:
-            ferramentas = await self.ligacao(sistema).listar_ferramentas(sistema.endereco, obter, sondagem)
+            listagem = await _listagem(self.ligacao(sistema), sistema.endereco, obter, sondagem)
         except Exception as erro:
             linha = linha_da_sala(resposta_da_listagem(erro), sistema)
-            if linha is not None:
+            pedidos = _pedidos_da_falha(erro)
+            if linha is not None or pedidos:
                 async with self.engine.begin() as c:
                     await self._registrar_sala(c, sistema, linha)
-                CONTADORES.somar(linha, onde="declaracoes")
+                    await self._registrar_pedidos(c, sistema, "declaracoes_sistema_pediu_dados", pedidos)
+                if linha is not None:
+                    CONTADORES.somar(linha, onde="declaracoes")
+                self._contar_pedidos(pedidos, onde="declaracoes")
             if linha == LINHA_SALA_FORA:
                 raise DeclaracoesNaoConferidas(
                     "sala_fora", f"a sala de visitas nao atendeu; nada foi pedido ao sistema {sistema.nome}"
                 ) from erro
+            if isinstance(erro, SalaSemVaga) and sistema.de_terceiro:
+                CONTADORES.somar(SALA_SEM_VAGA, onde="declaracoes")
+                raise DeclaracoesNaoConferidas(
+                    SALA_SEM_VAGA, f"a sala de visitas estava cheia; nada foi pedido ao sistema {sistema.nome}"
+                ) from erro
             raise DeclaracoesIndisponiveis(f"o sistema {sistema.nome} nao entregou as declaracoes") from erro
-        if _declaracao_invalida(ferramentas):
-            raise DeclaracoesIndisponiveis(f"o sistema {sistema.nome} declarou uma ferramenta sem nome valido")
-        async with self.engine.begin() as c:
-            for f in ferramentas:
-                await c.execute(
-                    text(
-                        "INSERT INTO ferramentas_vistas (sistema_id, nome, definicao, impressao) "
-                        "VALUES (:s, :n, CAST(:d AS jsonb), :i) ON CONFLICT (sistema_id, nome) DO UPDATE "
-                        "SET definicao = EXCLUDED.definicao, impressao = EXCLUDED.impressao, vista_em = now()"
-                    ),
-                    {"s": sistema.id, "n": f["name"], "d": json.dumps(f), "i": impressao(f)},
+        ferramentas, pedidos = listagem.ferramentas, listagem.pedidos
+        invalida = _declaracao_invalida(ferramentas)
+        if pedidos or not invalida:
+            try:
+                async with self.engine.begin() as c:
+                    await self._registrar_pedidos(c, sistema, "declaracoes_sistema_pediu_dados", pedidos)
+                    if not invalida:
+                        await _guardar_vistas(c, sistema, ferramentas)
+            except DBAPIError as erro:
+                if not _erro_de_dado(erro):
+                    raise  # falha nossa no banco: 503 conferencia_nao_feita na porta interna (K5)
+                # Segunda defesa: o banco recusou o que o servidor declarou. Conta contra o servidor, como a
+                # declaracao invalida. Nada foi gravado (nem a linha dos pedidos, na mesma transacao): sem pedidos,
+                # vai de novo so o pedido barrado.
+                log.warning(
+                    "declaracoes_que_o_banco_nao_guarda",
+                    sistema=sistema.nome,
+                    erro=type(erro).__name__,
+                    sqlstate=getattr(erro.orig, "sqlstate", None),
                 )
+                if pedidos:
+                    async with self.engine.begin() as c:
+                        await self._registrar_pedidos(c, sistema, "declaracoes_sistema_pediu_dados", pedidos)
+                    self._contar_pedidos(pedidos, onde="declaracoes")
+                raise DeclaracoesIndisponiveis(
+                    f"o sistema {sistema.nome} declarou ferramentas que o MCP-CLARO nao consegue guardar"
+                ) from erro
+            self._contar_pedidos(pedidos, onde="declaracoes")
+        if invalida:
+            raise DeclaracoesIndisponiveis(
+                f"o sistema {sistema.nome} declarou uma ferramenta sem nome valido ou que o MCP-CLARO nao consegue"
+                " guardar"
+            )
         return ferramentas
 
     async def ler_declaracoes(self, sistema_id: uuid.UUID, segredo: str | None) -> list[dict[str, Any]]:

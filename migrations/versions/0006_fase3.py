@@ -7,7 +7,7 @@ Blocos, nesta ordem (cada um com comentario de abertura e "Fim do bloco"):
   propria de recusas de terceiros: o painel filtra ``motivo`` em ``medicoes.v_recusas_versao_sistema`` (critica B12);
 - ESTRANHOS: marca "traz texto de fora" e definicao declarada nas ferramentas revisadas;
 - TRES_SINAIS: tabela ``sinais`` e retrato do alerta na ficha;
-- PEDIDOS: indice das linhas de pedido barrado, para a tela do ADMIN;
+- PEDIDOS: indices das linhas de pedido barrado e da quarentena, para a tela do ADMIN;
 - CONFERENCIA: rodadas seguidas sem resposta ao mudou-parou (critica A5) e a hora da ultima soma;
 - GUARDA_SISTEMAS: nova versao de ``sistemas_guarda`` (origem fixa, endereco e autorizacao de terceiro fixos,
   revisao vigente so com o servidor ativo e so na transacao que a grava, quarentena que so sai pela nova revisao do
@@ -287,10 +287,21 @@ END $$;
 
 SQL_PEDIDOS = r"""
 -- Bloco PEDIDOS (tela do ADMIN). "Pedidos recusados deste sistema": contagem de 30 dias e as ultimas linhas de
--- pedido barrado, por sistema, sem passar pelo extrato inteiro. O indice do pai vale para as particoes de agora e
--- para as criadas depois.
+-- pedido barrado, por sistema, sem passar pelo extrato inteiro. O predicado e o mesmo da consulta da tela
+-- (telas/consultas_terceiros.py, com os tipos no texto do SQL): as linhas de pedido barrado, tambem as de fora de
+-- uma chamada (leitura das ferramentas e sondagem, contrato K4), e o fim de toda acao que traz dados.pedidos nao
+-- vazio (enviada, sem confirmacao ou que nao saiu, contrato K9). Com outro predicado, o banco nao usa o indice
+-- parcial e le a particao do mes inteira (R6b-4).
 CREATE INDEX extrato_pedido_barrado_idx ON extrato (sistema_id, criado_em DESC)
-  WHERE tipo IN ('leitura_sistema_pediu_dados', 'programa_leitura_sistema_pediu_dados', 'acao_sistema_pediu_dados');
+  WHERE tipo IN ('leitura_sistema_pediu_dados', 'programa_leitura_sistema_pediu_dados',
+                 'acao_sistema_pediu_dados', 'declaracoes_sistema_pediu_dados', 'sondagem_sistema_pediu_dados')
+     OR (tipo IN ('acao_enviada', 'acao_nao_confirmada', 'acao_nao_saiu')
+         AND jsonb_typeof(dados -> 'pedidos') = 'array' AND dados -> 'pedidos' <> '[]'::jsonb);
+-- A ultima quarentena de um terceiro (a ficha do ADMIN a mostra enquanto ele esta em quarentena), sem andar pelo
+-- extrato do periodo de tras para frente.
+CREATE INDEX extrato_quarentena_idx ON extrato (sistema_id, criado_em DESC)
+  WHERE tipo IN ('sistema_em_quarentena', 'sistema_em_quarentena_sem_resposta');
+-- Os indices do pai valem para as particoes de agora e para as criadas depois.
 -- Fim do bloco PEDIDOS.
 """
 
@@ -487,6 +498,13 @@ GRANT SELECT (id, visto_em), DELETE ON sinais TO mcp_claro_rotinas;
 GRANT UPDATE (situacao, motivo) ON limites TO mcp_claro_despachante;
 -- Grafana: so a visao nova (a de recusas e a v_recusas_versao_sistema da 0004, filtrada por motivo).
 GRANT SELECT ON medicoes.v_terceiros TO grafana_leitor;
+-- A entrada (a peca voltada a internet) perde em sistemas o que nenhum codigo usa (contrato K6). O unico UPDATE dela
+-- e o da configuracao da autorizacao (autorizacao, atualizado_em), mais a desativacao do D27 e a volta a pendente
+-- (situacao, motivo); o unico INSERT e o do cadastro (nome, endereco, tipo_chave, origem). Mudar o endereco de um
+-- proprio mandaria as chaves por pessoa ja guardadas a outro lugar depois de uma sondagem; mudar o nome ou o tipo
+-- de chave e com a equipe, no banco, como o roteiro do ADMIN diz.
+REVOKE UPDATE (nome, endereco, tipo_chave) ON sistemas FROM mcp_claro_entrada;
+REVOKE INSERT (autorizacao) ON sistemas FROM mcp_claro_entrada;
 -- Sem GRANT novo, de proposito:
 -- * ferramentas_revisadas.texto_de_fora e definicao_declarada, e fichas.sinais: o INSERT da entrada e da tabela
 --   inteira (0002, 0005) e cobre as colunas novas; ninguem tem UPDATE nelas. Mudar a marca e revisar de novo.

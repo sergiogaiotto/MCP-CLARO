@@ -599,11 +599,11 @@ def test_unevaluated_e_recusado_em_qualquer_nivel(palavra: str, niveis: int) -> 
 
 
 def test_palavra_recusada_marca_os_escondidos_no_lugar() -> None:
-    esquema = {"type": "object", "properties": {"co‮nta": {"type": "string", "$anchor": "c"}}}
+    esquema = {"type": "object", "properties": {"co\u202enta": {"type": "string", "$anchor": "c"}}}
     with pytest.raises(EsquemaRecusado) as erro:
         conferir_terceiro(esquema)
     assert erro.value.onde == "properties/co[U+202E]nta"
-    assert "‮" not in str(erro.value)
+    assert "\u202e" not in str(erro.value)
 
 
 def test_campo_com_nome_de_palavra_recusada_e_dado_com_cara_de_esquema_passam() -> None:
@@ -1095,7 +1095,13 @@ def test_referencia_para_definicao_booleana_vale() -> None:
     conferir_argumentos(copia, {"a": {"qualquer": ["coisa"]}})
     with pytest.raises(ArgumentosInvalidos):
         conferir_argumentos(copia, {"b": 1})
-    assert json.loads(_revisar_entrada("terceiro", esquema)["ee"]) == esquema
+    # Gravado com os nomes neutros (R6b-1, contrato K3), as mesmas referencias. Contados na ordem em que o banco
+    # guarda as chaves: "f" antes de "t".
+    assert json.loads(_revisar_entrada("terceiro", esquema)["ee"]) == {
+        "type": "object",
+        "$defs": {"d2": True, "d1": False},
+        "properties": {"a": {"$ref": "#/$defs/d2"}, "b": {"$ref": "#/$defs/d1"}},
+    }
 
 
 # --- Revisao de terceiro: definicoes que nenhuma referencia da raiz chama -----------------------------------------
@@ -1891,7 +1897,7 @@ def _esquema_de_ataque() -> dict[str, Any]:
     }
 
 
-def test_conferir_argumentos_de_terceiro_com_texto_de_ataque_leva_menos_de_50_ms() -> None:
+def test_conferir_argumentos_de_terceiro_com_texto_de_ataque_gasta_pouca_cpu() -> None:
     # A revisao aceita as regras (a vitrine as mostra); a copia da entrada nao tem nenhuma.
     esquema = _esquema_de_ataque()
     conferir_esquema(esquema)
@@ -1913,10 +1919,12 @@ def test_conferir_argumentos_de_terceiro_com_texto_de_ataque_leva_menos_de_50_ms
         "i": ataque,
     }
     conferir_argumentos(copia, {"a": "x"})  # o validador da copia fica pronto (como depois da primeira chamada)
-    inicio = time.perf_counter()
+    # Tempo de CPU do processo, nao de relogio: a carga da maquina nao conta (R6b-7). Medido: 7 ms de CPU (0,06 ms
+    # em test_esquema_limpo); com uniqueItems na copia, 8,7 s. O teto e folgado e ainda separa os dois.
+    inicio = time.process_time()
     conferir_argumentos(copia, pedido)
-    gasto = time.perf_counter() - inicio
-    assert gasto < 0.05, f"{gasto:.3f} s"
+    gasto = time.process_time() - inicio
+    assert gasto < 0.5, f"{gasto:.3f} s de CPU"
 
 
 # --- revisar_ferramenta de terceiro sem banco: o que vai ao INSERT nao depende do gatilho da 0006 -----------------
@@ -2099,7 +2107,8 @@ def test_revisao_de_terceiro_aceita_regras_e_listas_caras_sem_efeito_na_entrada(
     # Regras de formato e uniqueItems do fornecedor sao gravados (a vitrine mostra), mas a copia da entrada nao os
     # tem: as regras caras dos contornos do verificador nao rodam no MCP-CLARO.
     gravado = json.loads(_revisar_entrada("terceiro", _esquema_de_ataque())["ee"])
-    assert gravado == _esquema_de_ataque()
+    assert gravado == modulo.nomes_neutros(_esquema_de_ataque())  # com os nomes neutros (R6b-1, contrato K3)
+    assert gravado["$defs"] == {"d1": _esquema_de_ataque()["$defs"]["t"]}
     copia = para_conferir(gravado)
     assert "pattern" not in json.dumps(copia)
     assert "uniqueItems" not in json.dumps(copia)
@@ -2237,3 +2246,68 @@ def test_descricoes_do_admin_contam_nos_256_kib() -> None:
     gravado = json.loads(_revisar_com(_ConexaoFalsa("terceiro"), esquema)["ee"])
     assert gravado == esquema
     assert modulo._bytes(gravado) <= BYTES_MAXIMOS
+
+
+# --- R7c (R6b-1): a leitura do ponteiro dos nomes neutros, ~1 antes de ~0 -----------------------------------------
+
+
+def test_nomes_neutros_le_til_um_antes_de_til_zero_e_nada_do_fornecedor_chega_ao_tools_list() -> None:
+    """O nome no ``$ref`` e lido como a entrada le um ponteiro JSON: ``~1`` vira ``/`` e so depois ``~0`` vira ``~``
+    (``_alvo_na_raiz``, como ``_definicao``). Na ordem trocada, ``#/$defs/x~01`` (a definicao ``x~1``) seria lido como
+    ``x/``, a outra definicao; e, com uma definicao so, o ``$ref`` ficaria com o nome do fornecedor no ``tools/list``,
+    apontando para nada (toda chamada recusada com "referencia externa"). Os casos de antes nao viam isso: ``~0b``
+    da o mesmo nas duas ordens."""
+    import mcp_types as types
+
+    from mcp_claro.cadastro.modelos import FerramentaVitrine, Sistema
+    from mcp_claro.versao import VERSAO_MCP
+
+    # Duas definicoes que a ordem trocada confunde. Na ordem do banco, "x/" (2 bytes) vira d1 e "x~1" (3 bytes), d2.
+    duas = {
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/x~01"}, "b": {"$ref": "#/$defs/x~1"}},
+        "$defs": {"x~1": {"type": "string"}, "x/": {"type": "integer"}},
+    }
+    conferir_terceiro(duas)
+    neutro = modulo.nomes_neutros(duas)
+    assert neutro["$defs"] == {"d2": {"type": "string"}, "d1": {"type": "integer"}}
+    assert neutro["properties"] == {"a": {"$ref": "#/$defs/d2"}, "b": {"$ref": "#/$defs/d1"}}
+    copia = para_conferir(neutro)
+    conferir_argumentos(copia, {"a": "texto", "b": 1}, terceiro=True)  # cada referencia na sua definicao
+    for trocado in ({"a": 1}, {"b": "texto"}):
+        with pytest.raises(ArgumentosInvalidos):
+            conferir_argumentos(copia, trocado, terceiro=True)
+
+    # Uma definicao so, com o nome do fornecedor: pela revisao (o que vai ao banco) e pela vitrine (o tools/list).
+    com_marca = {
+        "type": "object",
+        "properties": {"q": {"$ref": f"#/$defs/{MARCA}~01x"}},
+        "required": ["q"],
+        "$defs": {f"{MARCA}~1x": {"type": "string", "minLength": 2}},
+    }
+    gravado = json.loads(_revisar_entrada("terceiro", com_marca)["ee"])
+    assert MARCA not in json.dumps(gravado, ensure_ascii=False), gravado
+    assert gravado["properties"]["q"] == {"$ref": "#/$defs/d1"}
+    terceiro = Sistema(
+        id=uuid.uuid4(),
+        nome="fornecedor_x",
+        endereco="https://x.exemplo/mcp",
+        origem="terceiro",
+        tipo_chave="compartilhada",
+        selo=0,
+        situacao="ativo",
+        versao_mcp=VERSAO_MCP,
+    )
+    ferramenta = FerramentaVitrine(
+        uuid.uuid4(), terceiro, "consultar", 1, "consultar_x", None, "Consulta.", gravado, None, {}, "le", "baixo"
+    )
+    tool = types.Tool.model_validate(ferramenta.como_tool()).model_dump(by_alias=True, exclude_none=True, mode="json")
+    no_fio = json.dumps(tool, ensure_ascii=False)
+    assert MARCA not in no_fio, no_fio
+    assert tool["inputSchema"]["properties"]["q"] == {"$ref": "#/$defs/d1"}
+    assert tool["inputSchema"]["$defs"] == {"d1": {"type": "string", "minLength": 2}}
+    # A chamada passa pela conferencia da entrada (o mesmo esquema gravado), e o minLength do fornecedor vale.
+    conferir_argumentos(para_conferir(gravado), {"q": "ok"}, terceiro=True)
+    with pytest.raises(ArgumentosInvalidos) as erro:
+        conferir_argumentos(para_conferir(gravado), {"q": "x"}, terceiro=True)
+    assert "referencia externa" not in str(erro.value.problemas)

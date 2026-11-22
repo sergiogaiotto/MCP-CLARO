@@ -521,11 +521,12 @@ async def estado_das_portas(c: AsyncConnection) -> tuple[Row[Any] | None, Row[An
 async def sistemas_para_autorizar(
     c: AsyncConnection, pessoa_id: uuid.UUID, sistema_id: uuid.UUID | None = None
 ) -> Sequence[Row[Any]]:
-    """Sistemas de chave por pessoa que entram nas ordens valendo da pessoa, com a ultima autorizacao feita."""
+    """Sistemas de chave por pessoa que entram nas ordens valendo da pessoa, com a ultima autorizacao feita e a origem
+    (o endereco de volta de um servidor de terceiros e so dele)."""
     return (
         await c.execute(
             text(
-                "SELECT s.id, s.nome, s.situacao, s.autorizacao IS NOT NULL AS configurado,"
+                "SELECT s.id, s.nome, s.situacao, s.origem, s.autorizacao IS NOT NULL AS configurado,"
                 " (SELECT max(e.criado_em) FROM extrato e WHERE e.pessoa_id = :p AND e.sistema_id = s.id"
                 " AND e.tipo = 'autorizacao_concluida') AS autorizado_em"
                 " FROM sistemas s WHERE s.tipo_chave = 'por_pessoa'"

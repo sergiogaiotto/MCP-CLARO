@@ -138,16 +138,16 @@ Roteiro para quem cuida do dia a dia: [Porta de saída](saida.md).
 ## Fase 3: servidores de terceiros
 
 A Fase 3 recebe servidores MCP que não são da organização (no cadastro, a origem "de terceiros"). O código das
-etapas 1 a 5 está no repositório: banco, ligação, sala de visitas, cadastro, regras, entrada, fila, despachante,
-porta de saída, rotinas, telas e documentos. Falta a etapa 6: as provas de saída de ponta a ponta, os ensaios antes
-de ligar e uma revisão cruzada. As decisões e o que mudou de propósito estão em [decisões](decisoes.md), nas seções
-"Decisões da Fase 3" e "Mudanças deliberadas da Fase 3".
+etapas 1 a 6 está no repositório: banco, ligação, sala de visitas, cadastro, regras, entrada, fila, despachante,
+porta de saída, rotinas, telas e documentos e, da etapa 6, as provas de saída pelo gateway inteiro e os ensaios antes
+de ligar a chave. Falta terminar a revisão cruzada da etapa 6, com os achados corrigidos. As decisões e o que mudou de
+propósito estão em [decisões](decisoes.md), nas seções "Decisões da Fase 3" e "Mudanças deliberadas da Fase 3".
 
 **A chave da Fase 3 continua desligada na partida (D6).** Com `FEATURE_PHASE3_THIRD_PARTY` ligada, a partida é
 recusada em todos os papéis, como com `PROGRAM_ACTIONS_ENABLED`. Ligar depende da decisão registrada do dono,
-depois das provas de saída e das que dependem de gente e de ambiente real (listas abaixo). Enquanto isso, o ADMIN
-cadastra, sonda e revisa servidores de terceiros, e só pessoas de teste (`pessoas.teste`) os veem e usam. Prova:
-`tests/unidade/test_settings_fase3.py`.
+depois das provas de saída, das que dependem de gente e de ambiente real (listas abaixo) e da decisão sobre o teste
+de carga. Enquanto isso, o ADMIN cadastra, sonda e revisa servidores de terceiros, e só pessoas de teste
+(`pessoas.teste`) os veem e usam. Prova: `tests/unidade/test_settings_fase3.py`.
 
 Os arquivos de teste citados ficam em `tests/integracao/`, salvo onde se diz `tests/unidade/`.
 
@@ -174,27 +174,46 @@ Também ficou pronto:
   terceiros (D10; `tests/unidade/test_settings_fase3.py::test_nenhum_valor_da_propagacao_de_rastro_libera_terceiros`).
   A propagação de `traceparent` para sistemas próprios fica fora da Fase 3.
 
-Provas de saída do plano. Cada uma já tem provas por partes; a prova pelo gateway inteiro é da etapa 6:
+Provas de saída do plano, por partes e pelo gateway inteiro (etapa 6):
 
 | Prova de saída | Situação |
 | --- | --- |
-| Cada servidor de terceiros revisado e registrado | Por partes: `test_revisao_servidor.py`, `test_migracao_0006.py` e a visão `medicoes.v_terceiros`. Falta a prova de ponta a ponta: todo terceiro com ferramenta na vitrine tem uma revisão vigente que a contém |
-| Sala de visitas isolada: o servidor não alcança chaves nem dados de outros sistemas | Por partes: `test_sala_isolada.py` (rede e certificados, a cada mudança), `tests/unidade/test_visitas_app.py` (um processo por chamada), `test_chave_separada.py` e `tests/unidade/test_ligacao_terceiro.py`. Falta gravar cada byte que um terceiro recebe, com as chaves de várias pessoas e de sistemas próprios no mesmo banco |
-| Provas de crachá não repassado e de chave por pessoa repetidas com um servidor de terceiros | A fazer na etapa 6 |
-| Mudança só de texto num servidor de teste leva à quarentena | Feito pelas rotinas (`test_rotinas_terceiros.py`). Falta repetir pelo gateway, com a sala |
-| Três sinais juntos suspendem o limite por aproximação, e a ficha mostra o motivo | Feito pela entrada e pela fila (`test_tres_sinais.py`) e pela tela (`test_telas_fase3_pessoa.py`). Falta repetir pelo gateway inteiro |
-| Pedido de senha vindo do servidor não chega à pessoa | Por partes: `test_pedidos_do_servidor.py` e `test_telas_fase3_pessoa.py`. Falta repetir pelo gateway inteiro |
-| Nova (D31): a resposta de um terceiro chega inteira dentro da marca, e nada passa fora dela | Por partes: `test_estranhos_leitura.py` e `test_estranhos_acao.py`. Falta repetir pelo gateway inteiro |
+| Cada servidor de terceiros revisado e registrado | Feito pelo gateway inteiro: `test_fase3_provas_de_saida.py::test_cada_terceiro_na_vitrine_tem_a_revisao_do_servidor_vigente_registrada_em_todo_o_percurso`. O invariante é conferido depois de cada passo do percurso do ADMIN pelas telas e da quarentena pelas rotinas, de três lados: na vitrine do aplicativo, no banco inteiro e no painel `medicoes.v_terceiros`. No percurso, uma conclusão que deixa de fora uma ferramenta já revisada a tira da vitrine, e a conclusão seguinte, com as duas, a traz de volta. Por partes: `test_revisao_servidor.py` e `test_migracao_0006.py` |
+| Sala de visitas isolada: o servidor não alcança chaves nem dados de outros sistemas | Feito pelo gateway inteiro, com a sala de verdade: `test_fase3_provas_de_saida.py::test_sala_isolada_o_terceiro_recebe_so_o_pedido_sem_chave_alheia_cracha_rastro_nem_resultado_alheio`. O teste confere cada byte que dois terceiros recebem, com chaves por pessoa da Ana e da Bia, compartilhada e de programa em próprios. Com o Compose inteiro no ar, de dentro da sala, a entrada, as rotinas e o login não são alcançados pelo nome nem pelo IP: `test_fase3_ensaios.py::test_de_dentro_da_sala_entrada_rotinas_login_no_ar_nao_alcancaveis_por_nome_nem_por_ip`. Por partes: `test_sala_isolada.py` (o banco e o cofre, pelo nome e pelo IP, os metadados das nuvens e os IPs privados da rede `saida_visitas`, a cada mudança), `tests/unidade/test_visitas_app.py`, `test_chave_separada.py` e `tests/unidade/test_ligacao_terceiro.py` |
+| Provas de crachá não repassado e de chave por pessoa repetidas com um servidor de terceiros | Feito pelo gateway inteiro: `test_fase3_provas_de_saida.py::test_cracha_do_aplicativo_nao_chega_ao_terceiro_e_uma_pessoa_nao_alcanca_o_que_e_de_outra` |
+| Mudança só de texto num servidor de teste leva à quarentena | Feito pelas rotinas (`test_rotinas_terceiros.py`) e pelo gateway com a sala (`test_fase3_provas_de_saida.py::test_mudanca_so_de_texto_em_terceiro_leva_o_servidor_inteiro_a_quarentena_pela_sala`): um aviso só ao ADMIN, por e-mail, sem o texto do fornecedor nem o nome das ferramentas no servidor, e a rodada seguinte não repete nem a linha do extrato nem o aviso |
+| Três sinais juntos suspendem o limite por aproximação, e a ficha mostra o motivo | Feito pela entrada e pela fila (`test_tres_sinais.py`), pela tela (`test_telas_fase3_pessoa.py`) e pelo gateway inteiro (`test_fase3_provas_de_saida.py::test_tres_sinais_suspendem_o_limite_e_a_ficha_mostra_o_motivo`, com o limite criado na tela de limites, com passkey) |
+| Pedido de senha vindo do servidor não chega à pessoa | Feito pelo gateway inteiro, também para o texto comum com senha e link (crítica A4): `test_fase3_provas_de_saida.py::test_pedido_de_senha_vindo_do_terceiro_nao_chega_a_pessoa`. Nada do pedido (mensagem, link ou campos) fica guardado na operação. Por partes: `test_pedidos_do_servidor.py` e `test_telas_fase3_pessoa.py` |
+| Nova (D31): a resposta de um terceiro chega inteira dentro da marca, e nada passa fora dela | Feito pelo gateway inteiro: `test_fase3_provas_de_saida.py::test_resposta_de_terceiro_chega_inteira_dentro_da_marca_com_erro_e_dados_estruturados`. O `_meta` que chega ao aplicativo tem só as chaves que o MCP-CLARO escreve: as chaves com o nosso prefixo que o terceiro forja não passam. Por partes: `test_estranhos_leitura.py` e `test_estranhos_acao.py` |
 
-Ainda falta, na etapa 6:
+Ensaios antes de ligar a chave (etapa 6):
 
-- as provas de saída da tabela acima, pelo gateway inteiro;
-- os ensaios antes de ligar a chave: o dublê mal-intencionado (um terceiro que devolve uma instrução escondida: ler,
-  ler um dado pessoal e tentar enviar dentro do limite, que tem de ir para a ficha); a resposta perdida, com
-  `tests/cortador.py` entre o despachante e a sala e entre a sala e o terceiro (nada se repete, e o desfecho é "não
-  confirmada"); a suíte oficial de conformidade com as falhas esperadas iguais; a carga e o ensaio de restauração,
-  como em toda fase;
-- uma revisão cruzada, com cada achado conferido e corrigido.
+- ensaios em `test_fase3_ensaios.py`, com o dublê mal-intencionado `exemplos/ensaio_mal_intencionado.py`:
+  - ler, ler o cadastro com CPF e tentar enviar dentro do limite vai para a ficha pelo alerta dos três sinais
+    (`test_fase3_ensaios.py::test_duble_mal_intencionado_le_le_dado_pessoal_e_a_acao_dentro_do_limite_vai_para_a_ficha`,
+    que confere também que nem as instruções nem o nome do servidor do fornecedor chegam ao aplicativo na
+    descoberta), e o texto do terceiro chega ao aplicativo só dentro da marca, também pela sala de verdade
+    (`test_fase3_ensaios.py::test_pela_sala_de_verdade_o_texto_do_terceiro_chega_so_dentro_da_marca`);
+  - resposta perdida, com `tests/cortador.py` entre o despachante e a sala (a sala em processo e o processo pai de
+    verdade, com um filho por chamada) e entre a sala e o terceiro: nada se repete, o desfecho é "não confirmada" e o
+    pedido igual devolve o mesmo protocolo
+    (`test_fase3_ensaios.py::test_resposta_perdida_entre_o_despachante_e_a_sala_nao_repete`,
+    `test_fase3_ensaios.py::test_resposta_perdida_entre_o_despachante_e_a_sala_de_verdade_nao_repete` e
+    `test_fase3_ensaios.py::test_resposta_perdida_entre_a_sala_e_o_terceiro_nao_repete`);
+  - a sala sob pressão (não é teste de carga): várias chamadas ao mesmo tempo, e cada resposta volta a quem pediu,
+    sem nada perdido nem repetido
+    (`test_fase3_ensaios.py::test_sob_pressao_pela_sala_de_verdade_cada_resposta_volta_a_quem_pediu_e_nada_se_perde`);
+  - a cópia lógica de um banco com servidores de terceiros volta com os dados, as guardas e as permissões da Fase 3;
+  - o isolamento da sala com a entrada, as rotinas e o login no ar
+    (`test_fase3_ensaios.py::test_de_dentro_da_sala_entrada_rotinas_login_no_ar_nao_alcancaveis_por_nome_nem_por_ip`);
+- suíte oficial de conformidade pelo gateway, direto e pelo portão, com a chave da Fase 3 desligada e ligada: 10
+  cenários exigidos passam, 27 falham só como previsto, nenhuma falha sem previsão; a Fase 3 não mudou a lista
+  (`conformidade/falhas-esperadas-gateway.yml`). Ela roda fora do pytest, por `conformidade/gateway.py`, como no CI;
+- a restauração com o pgBackRest e servidores de terceiros não foi conferida neste ambiente:
+  `test_continuidade_pgbackrest.py` pula sem o repositório apt do PGDG. A cópia lógica com terceiros foi conferida
+  (`test_fase3_ensaios.py::test_copia_logica_com_terceiros_volta_com_os_dados_as_guardas_e_os_grants_da_fase_3`);
+- não há teste de carga no repositório: o locust da tabela de testes do plano ainda não entrou. Ligar a chave da
+  Fase 3 (D6) depende da decisão do dono sobre ele ([decisões, "Ainda em aberto"](decisoes.md#ainda-em-aberto)).
 
 Provas que dependem de gente ou de ambiente real:
 

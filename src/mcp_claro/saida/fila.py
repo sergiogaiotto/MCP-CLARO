@@ -910,8 +910,9 @@ async def finalizar(
     """Grava o fim do envio. Se outra copia ja deu a acao como nao confirmada, so guarda a resposta.
 
     ``pedidos``: as categorias do que o sistema pediu no meio da chamada (``Resposta.pedidos``, nosso vocabulario),
-    em ``dados.pedidos`` das linhas ``acao_sistema_pediu_dados`` e ``acao_enviada``, para a tela de pedidos
-    recusados do ADMIN mostrar tambem as acoes.
+    em ``dados.pedidos`` da linha do fim, para a tela de pedidos recusados do ADMIN mostrar tambem as acoes: sempre
+    em ``acao_sistema_pediu_dados`` e ``acao_enviada`` (como antes, lista vazia sem pedido) e, com pedido, tambem em
+    ``acao_nao_confirmada`` e ``acao_nao_saiu`` (contrato K9).
 
     Nova tentativa depois de um COMMIT que deu certo, mas cuja confirmacao se perdeu: a linha ja tem o que este
     fim gravou (``_fim_ja_gravado``), antes ou depois de uma retomada. Nada e gravado de novo."""
@@ -946,7 +947,7 @@ async def finalizar(
         dados["texto_de_fora"] = op.de_estranhos
     elif tipo == "acao_nao_saiu":
         campos["motivo"] = desfecho
-    if tipo in ("acao_enviada", "acao_sistema_pediu_dados"):
+    if pedidos or tipo in ("acao_enviada", "acao_sistema_pediu_dados"):
         dados["pedidos"] = list(pedidos)
     await registrar(
         c,

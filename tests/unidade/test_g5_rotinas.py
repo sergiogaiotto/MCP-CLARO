@@ -149,10 +149,60 @@ def test_alerta_alto_de_sistema_recusado_nao_conta_terceiro() -> None:
     assert "motivo <> 'cadastro_terceiro'" in consulta
 
 
-def test_apelido_de_antes_da_fase_3_faz_a_rodada_inteira() -> None:
-    from mcp_claro.rotinas import app, mudou_parou
+class _SemSistemas:
+    """Engine falso de uma rodada sem nenhum sistema ativo (so a consulta da lista)."""
 
-    assert mudou_parou.conferir_sistemas_proprios is mudou_parou.conferir_sistemas
+    def connect(self) -> Any:
+        class _Conexao:
+            async def __aenter__(self) -> Any:
+                return self
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+            async def execute(self, *_: Any, **__: Any) -> Any:
+                class _Linhas:
+                    def all(self) -> list[Any]:
+                        return []
+
+                return _Linhas()
+
+        return _Conexao()
+
+
+async def test_apelido_de_antes_da_fase_3_aceita_a_chamada_da_fase_2_e_faz_a_rodada_inteira(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R6e-5: ``conferir_sistemas_proprios(engine, fonte, emails_admin)``, como na Fase 2, sem o ``intervalo`` (que
+    a Fase 3 tornou obrigatorio em ``conferir_sistemas``): vale o padrao da tarefa ``mudou_parou`` (900 s)."""
+    from mcp_claro.rotinas import app
+
+    async def nunca(_: uuid.UUID) -> list[dict[str, Any]]:
+        raise AssertionError("sem sistemas, a fonte nao e chamada")
+
+    fonte = cast(Any, type("Fonte", (), {"declaracoes": staticmethod(nunca)})())
+    resultado = await mudou_parou.conferir_sistemas_proprios(cast(Any, _SemSistemas()), fonte, ["admin@exemplo.teste"])
+    assert (resultado.sistemas, resultado.sem_resposta, resultado.quarentenas) == (0, [], [])
+    # A rodada e a de ``conferir_sistemas`` (proprios e terceiros revisados), com o intervalo padrao da tarefa.
+    vistos: list[dict[str, Any]] = []
+
+    async def conferir(*args: Any, **kwargs: Any) -> mudou_parou.ResultadoMudouParou:
+        vistos.append({"args": args, **kwargs})
+        return mudou_parou.ResultadoMudouParou()
+
+    monkeypatch.setattr(mudou_parou, "conferir_sistemas", conferir)
+    await mudou_parou.conferir_sistemas_proprios(cast(Any, "engine"), fonte, ["a@b"])
+    await mudou_parou.conferir_sistemas_proprios(cast(Any, "engine"), fonte, ["a@b"], intervalo=60.0)
+    assert vistos == [
+        {"args": ("engine", fonte, ["a@b"]), "intervalo": 900.0},
+        {"args": ("engine", fonte, ["a@b"]), "intervalo": 60.0},
+    ]
+    padroes = {
+        ConfigRotinas().intervalo_mudou_parou,
+        float(Parametros.model_fields["TOOL_DRIFT_CHECK_SECONDS"].default),
+    }
+    assert padroes == {mudou_parou.INTERVALO_PADRAO}
+    monkeypatch.undo()
     assert app.conferir_sistemas is mudou_parou.conferir_sistemas
 
 

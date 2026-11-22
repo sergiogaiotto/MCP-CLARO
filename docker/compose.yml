@@ -6,6 +6,12 @@
 # A imagem do gateway pode vir pronta: MCP_CLARO_IMAGEM=<nome:etiqueta> (padrao mcp-claro:dev, construida aqui).
 name: mcp-claro
 
+# O ambiente (APP_ENV) de todos os papeis, a sala de visitas incluida, num lugar so. A sala nao recebe o resto do
+# ambiente do gateway (ele tem DATABASE_* e VAULT_*), e a partida dela recusa subir sem APP_ENV escrito: sem ele,
+# ela subiria como desenvolvimento e aceitaria enderecos locais.
+x-app-env: &app_env
+  APP_ENV: teste
+
 x-gateway: &gateway
   build:
     context: ..
@@ -18,7 +24,7 @@ x-gateway: &gateway
   logging:
     driver: local
   environment: &ambiente
-    APP_ENV: teste
+    <<: *app_env
     PUBLIC_BASE_URL: https://mcp-claro.localhost
     DATABASE_URL: postgresql://mcp_claro_entrada@banco:5432/mcp_claro
     DB_SSLMODE: verify-full
@@ -170,7 +176,7 @@ services:
     cap_drop: ["ALL"]
     tmpfs: ["/tmp"]
     environment:
-      APP_ENV: teste
+      <<: *app_env
       VISITS_INTERNAL_PORT: "9446"
       # Certificado de servidor da ca_visitas (so serverAuth) e, como autoridade de clientes, a ca_clientes_visitas.
       # INTERNAL_CA_FILE e a ca_visitas: so a conferencia de saude a usa.

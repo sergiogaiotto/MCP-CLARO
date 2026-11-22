@@ -235,7 +235,8 @@ async def test_cada_terceiro_na_vitrine_tem_a_revisao_do_servidor_vigente_regist
 ) -> None:
     """Percurso inteiro pelas telas e pelas rotinas, com o invariante conferido depois de cada passo: cadastro e
     sondagem, leitura, revisao de cada ferramenta, conclusao com as duas, revisao nova de uma (sai da vitrine ate a
-    proxima conclusao), conclusao de novo, mudanca so de texto, quarentena pelas rotinas e nova revisao."""
+    proxima conclusao), conclusao de novo, conclusao so com uma (a outra sai da vitrine) e de novo com as duas,
+    mudanca so de texto, quarentena pelas rotinas e nova revisao."""
     k_comp, k_decl = _chave("compartilhada"), _chave("declaracoes")
     _chaves(monkeypatch, {k_comp: "*", k_decl: "*"})
     terceiro = await gw.servir(mal_comportado.criar(segunda_ferramenta=True), gravar=True)
@@ -294,6 +295,18 @@ async def test_cada_terceiro_na_vitrine_tem_a_revisao_do_servidor_vigente_regist
     vistas = await _invariante(gw, pares, base, ("ativo", True), nossos)
     assert vistas[("ana", app.client_id)] == sorted([pedido_vitrine, entrega_vitrine])
 
+    # Conclusao so com uma: a outra continua revisada e ativa, mas sai da vitrine, porque a revisao vigente nao a
+    # publica (a publicada numa revisao anterior nao vale mais). A conclusao com as duas a traz de volta.
+    assert (await admin.concluir(sistema_id, "consultar_pedido")).status_code == 303
+    assert (await gw.revisada(sistema_id, "consultar_entrega")).nome_vitrine == entrega_vitrine
+    vistas = await _invariante(gw, pares, base, ("ativo", True), nossos)
+    assert vistas[("ana", app.client_id)] == [pedido_vitrine]
+    recusa = await gw.chamar(ana, app, entrega_vitrine, {"pedido": "P-1"})
+    assert isinstance(recusa, MCPError)
+    assert (await admin.concluir(sistema_id, "consultar_pedido", "consultar_entrega")).status_code == 303
+    vistas = await _invariante(gw, pares, base, ("ativo", True), nossos)
+    assert vistas[("ana", app.client_id)] == sorted([pedido_vitrine, entrega_vitrine])
+
     # Mudanca so de texto e a rodada das rotinas (pela sala): quarentena, nada na vitrine.
     await terceiro.modo("muda_so_texto")
     antes = len(gw.pela_sala)
@@ -313,7 +326,7 @@ async def test_cada_terceiro_na_vitrine_tem_a_revisao_do_servidor_vigente_regist
     vistas = await _invariante(gw, pares, base, ("ativo", True), nossos)
     assert vistas[("ana", app.client_id)] == sorted([pedido_vitrine, entrega_vitrine])
     tipos = [ln.tipo for ln in await gw.extrato(sistema_id=sistema_id)]
-    assert tipos.count("admin_servidor_revisado") == 3
+    assert tipos.count("admin_servidor_revisado") == 5
     assert "sistema_em_quarentena" in tipos
     assert "sistema_saiu_da_quarentena" in tipos
 
@@ -703,17 +716,7 @@ async def test_mudanca_so_de_texto_em_terceiro_leva_o_servidor_inteiro_a_quarent
     assert nome in linha.frase
     assert [(x["ferramenta"], x["mudanca"]) for x in linha.dados["ferramentas"]] == [("consultar_pedido", "mudou")]
     assert linha.dados["revisao"] == str(revisao)
-    async with gw.dono.connect() as c:
-        avisos = (
-            await c.execute(
-                text(
-                    "SELECT canal, destino, assunto, corpo FROM avisos WHERE evento = 'sistema_em_quarentena'"
-                    " AND corpo ->> 'sistema_id' = :s"
-                ),
-                {"s": str(sistema_id)},
-            )
-        ).all()
-    (aviso,) = avisos
+    (aviso,) = await _avisos_de_quarentena(gw, sistema_id)
     assert (aviso.canal, aviso.destino) == ("email", g9.ADMIN_EMAIL)
     # O assunto e o texto sao os fixos do aviso, so com o nome do cadastro e a quantidade.
     assert (aviso.assunto, aviso.corpo["texto"]) == aviso_admin("sistema_em_quarentena", sistema=nome, quantas=1)
@@ -724,10 +727,27 @@ async def test_mudanca_so_de_texto_em_terceiro_leva_o_servidor_inteiro_a_quarent
     for do_fornecedor in ("Consulta a situacao", "consultar_pedido", "consultar_entrega"):
         assert do_fornecedor not in tudo, do_fornecedor
 
-    # Segunda rodada: nada se repete (o servidor nao esta mais ativo).
+    # Segunda rodada: nada se repete (o servidor nao esta mais ativo): nem a linha do extrato, nem o aviso.
     resultado = await gw.conferir(sistema_id)
     assert nome not in resultado.quarentenas
     assert len(await gw.extrato(sistema_id=sistema_id, tipo="sistema_em_quarentena")) == 1
+    assert await _avisos_de_quarentena(gw, sistema_id) == [aviso]
+
+
+async def _avisos_de_quarentena(gw: Gateway, sistema_id: uuid.UUID) -> list[Any]:
+    """Os avisos (e-mail e webhook) de ``sistema_em_quarentena`` deste sistema."""
+    async with gw.dono.connect() as c:
+        return list(
+            (
+                await c.execute(
+                    text(
+                        "SELECT canal, destino, assunto, corpo FROM avisos WHERE evento = 'sistema_em_quarentena'"
+                        " AND corpo ->> 'sistema_id' = :s"
+                    ),
+                    {"s": str(sistema_id)},
+                )
+            ).all()
+        )
 
 
 # --- 5. Tres sinais suspendem o limite e a ficha mostra o motivo ------------------------------------------------
@@ -1011,6 +1031,7 @@ async def test_pedido_de_senha_vindo_do_terceiro_nao_chega_a_pessoa(
         assert not isinstance(acao, MCPError), acao
         op_acao = await _operacao(gw, g9.protocolo(acao))
         assert op_acao.estado == Estado.SISTEMA_PEDIU_DADOS
+        assert op_acao.resultado is None  # nada do pedido (mensagem, link, esquema) fica guardado na operacao
         assert _pedidos(duble) == 1
         assert len(_posts_de_chamada(duble)) == 1
         # A4: texto comum de resposta com a senha e um link, numa leitura e numa acao que sai.
@@ -1067,7 +1088,16 @@ def _so_dentro(resultado: Any, *trechos: str) -> None:
         assert "phish.exemplo" not in t
 
 
-def _nada_do_sistema_fora_dos_blocos(resultado: Any, sistema: str) -> None:
+# As chaves do _meta que o MCP-CLARO escreve, conforme o codigo de hoje: na leitura (moldura e despachante), na
+# resposta de uma acao enviada (mais o protocolo) e na consulta pelo protocolo (sem o selo).
+META_LEITURA = frozenset({"origem", "texto_de_estranhos", "marca", "sistema", "selo"})
+META_ACAO = META_LEITURA | {"protocolo", "estado", "codigo_conferencia"}
+META_CONSULTA = META_ACAO - {"selo"}
+
+
+def _nada_do_sistema_fora_dos_blocos(resultado: Any, sistema: str, chaves: frozenset[str] = META_LEITURA) -> None:
+    """Nada do sistema fora dos blocos de texto, e o ``_meta`` com exatamente as nossas ``chaves``: o terceiro forja
+    chaves do nosso prefixo que nao escrevemos (``tp.FORJADO``), e conferir so o prefixo deixaria passar."""
     bruto = resultado.model_dump(by_alias=True, mode="json", exclude_none=True)
     assert "structuredContent" not in bruto
     for bloco in bruto["content"]:
@@ -1075,8 +1105,10 @@ def _nada_do_sistema_fora_dos_blocos(resultado: Any, sistema: str) -> None:
         assert bloco["type"] == "text"
     meta = dict(bruto.get("_meta") or {})
     meta.pop("io.modelcontextprotocol/serverInfo", None)
-    assert all(k.startswith(PREFIXO_META) for k in meta), meta
+    assert set(meta) == {PREFIXO_META + k for k in chaves}, meta
     assert tp.MARCA not in json.dumps(meta)
+    for chave, forjado in tp.FORJADO.items():
+        assert meta.get(chave) != forjado, chave
     assert meta[PREFIXO_META + "sistema"] == sistema
     assert meta[estranhos.META_MARCA] != "0123456789ab"  # a marca forjada pelo terceiro nao vale
     assert meta[estranhos.META_ORIGEM] == "terceiro"
@@ -1150,14 +1182,20 @@ async def test_resposta_de_terceiro_chega_inteira_dentro_da_marca_com_erro_e_dad
     assert textos[0] == f"Protocolo {op.protocolo}: enviada uma vez ao sistema."
     assert textos[1].startswith("MCP-CLARO: o texto entre [[estranhos ")
     _so_dentro(r, "Resposta do fornecedor.", "Recurso embutido.", '"recado"', "[U+202E]")
-    _nada_do_sistema_fora_dos_blocos(r, nome)
+    _nada_do_sistema_fora_dos_blocos(r, nome, META_ACAO)
+    assert (r.meta[PREFIXO_META + "protocolo"], r.meta[PREFIXO_META + "estado"]) == (op.protocolo, "enviada")
     marcas.add(g9.marca_de(r))
     assert len(marcas) == 2  # uma marca nova a cada resposta
     # A consulta pelo protocolo devolve o mesmo, emoldurado de novo, com outra marca.
     async with gw.cliente(ana, app) as c:
         consulta = await c.call_tool(CONSULTA, {"protocolo": op.protocolo})
     _so_dentro(consulta, "Resposta do fornecedor.", '"recado"')
-    _nada_do_sistema_fora_dos_blocos(consulta, nome)
+    _nada_do_sistema_fora_dos_blocos(consulta, nome, META_CONSULTA)
+    assert consulta.meta is not None
+    assert (consulta.meta[PREFIXO_META + "protocolo"], consulta.meta[PREFIXO_META + "estado"]) == (
+        op.protocolo,
+        "enviada",
+    )
     assert g9.marca_de(consulta) not in marcas
     # Guardado sem moldura (a moldura nasce a cada entrega).
     assert "[[estranhos" not in json.dumps(op.resultado)

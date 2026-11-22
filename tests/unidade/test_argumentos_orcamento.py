@@ -5,7 +5,7 @@ tetos de tamanho (``conferir_tamanho``): so o orcamento e os cinco primeiros err
 de 200 mil valores medido pelo G2b, que a revisao agora recusa (``ESCOLHAS_MAXIMAS``) e que o orcamento sozinho
 tambem recusa. A prova principal e a conta de passos, deterministica, e a memoria (``tracemalloc``). O tempo e o da
 CPU deste processo (``time.process_time``, que nao conta o tempo em que a maquina carregada atende outros
-processos), com folga sobre o medido.
+processos), com folga sobre o medido, numa chamada sem ``tracemalloc`` (ele multiplica a CPU medida de 3 a 12 vezes).
 """
 
 from __future__ import annotations
@@ -43,6 +43,10 @@ from mcp_claro.entrada.argumentos import (
 )
 
 SEGUNDOS: float = 1.0
+# Medido sem tracemalloc, nesta maquina, em 7 rodadas de 5 medidas por caso: o maior tempo foi de cerca de 0,3 s no
+# anyOf de 1990 const (0,2 a 0,28 s; mediana de 0,07 s) e de 0,07 s no enum de 200 mil (mediana de 0,04 s); os outros
+# casos ficaram abaixo de 0,15 s. Sem o orcamento, de 2 a 28 s, 7,7 s e 8,5 s (G2b). Com o tracemalloc ligado na mesma
+# chamada, chegou a 1,196 s numa suite carregada. E maximo de poucas medidas, nao um limite: a prova e a dos passos.
 MEGAS: int = 50
 
 
@@ -69,17 +73,28 @@ def de_terceiro(esquema: dict[str, Any], pedido: dict[str, Any]) -> dict[str, An
     return copia
 
 
-def medir(esquema: dict[str, Any], pedido: dict[str, Any], *, terceiro: bool = True) -> tuple[Any, float, int]:
-    """(desfecho, segundos de CPU, pico em bytes): o desfecho e a excecao levantada ou os passos gastos."""
-    tracemalloc.start()
-    inicio = time.process_time()
+def _conferir(esquema: dict[str, Any], pedido: dict[str, Any], terceiro: bool) -> Any:
     try:
-        desfecho: Any = conferir_argumentos(esquema, pedido, terceiro=terceiro)
+        return conferir_argumentos(esquema, pedido, terceiro=terceiro)
     except ArgumentosInvalidos as erro:
-        desfecho = erro
+        return erro
+
+
+def medir(esquema: dict[str, Any], pedido: dict[str, Any], *, terceiro: bool = True) -> tuple[Any, float, int]:
+    """(desfecho, segundos de CPU, pico em bytes): o desfecho e a excecao levantada ou os passos gastos.
+
+    Duas chamadas iguais. A primeira da o desfecho e o tempo, sem ``tracemalloc``. A segunda, com o validador ja
+    pronto, so o pico de memoria.
+    """
+    inicio = time.process_time()
+    desfecho = _conferir(esquema, pedido, terceiro)
     segundos = time.process_time() - inicio
-    _, pico = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    tracemalloc.start()
+    try:
+        _conferir(esquema, pedido, terceiro)
+        _, pico = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
     return desfecho, segundos, pico
 
 

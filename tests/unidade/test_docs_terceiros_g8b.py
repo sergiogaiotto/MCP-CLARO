@@ -158,8 +158,9 @@ TEXTOS_DO_CODIGO_NO_ROTEIRO = [
     admin.CHAVE_DE_TERCEIRO,
     admin.MODELO_FORA_DA_REVISAO,
     admin_portas.TERCEIRO_JA_CONFIGURADO,
-    admin.DECLARACOES_FALHA["sala_fora"][1],
-    admin.DECLARACOES_FALHA["chave_indisponivel"][1],
+    # As falhas do MCP-CLARO ao ler as ferramentas (503, cada uma com a sua frase) e a frase comum.
+    *(admin.DECLARACOES_FALHA[motivo][1] for motivo in sorted(admin.DECLARACOES_NOSSAS)),
+    admin.DECLARACOES_FALHA[""][1],
     paginas.DESFECHOS_SONDAGEM["desvio"],
     paginas.DESFECHOS_SONDAGEM["nao_mcp"],
     paginas.DESFECHOS_SONDAGEM["sem_acesso"],

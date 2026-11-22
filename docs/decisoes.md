@@ -205,6 +205,21 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   de teste já os chamam; um endereço esquecido faria esse tráfego sair do processo que abre todas as chaves. Prova:
   `tests/unidade/test_settings_fase3.py`, `tests/unidade/test_sala_salto.py` e, para a troca de chave,
   `tests/integracao/test_g3a_autorizacao_terceiros.py`.
+- **Ao atualizar um piloto para a Fase 3, `VISITS_INTERNAL_URL` entra no ambiente de todos os papéis.** A
+  partida de toda peça, menos a sala, confere os parâmetros do gateway inteiro (`Parametros.problemas`, que não sabe
+  o papel), como nas Fases 1 e 2 com `SCREENS_CLIENT_SECRET_FILE`, `GRAFANA_WEBHOOK_PASSWORD_FILE` e
+  `WATCH_CONTINUITY_URL`. Por isso, em piloto e produção, ponha o mesmo `VISITS_INTERNAL_URL` em todos os papéis,
+  também no vigia da segunda máquina e nos comandos `migrar`, `migrar-vigia` e `conferir`. Sem ele, a partida sai
+  com a frase que começa por "Fora de desenvolvimento e teste, VISITS_INTERNAL_URL e obrigatorio e usa https". Fazer
+  a partida saber o papel, para exigir o valor só de quem fala com a sala, fica para uma decisão à parte. Prova:
+  `src/mcp_claro/config/settings.py` (`_problemas_da_fase3`), `src/mcp_claro/__main__.py` e
+  `tests/unidade/test_r6d_documentos.py`.
+- **A sala não sobe sem `APP_ENV`.** A partida da sala de visitas recusa subir sem `APP_ENV` escrito no ambiente
+  dela, com a frase "A sala de visitas precisa de APP_ENV escrito no ambiente dela (desenvolvimento, teste, piloto ou
+  producao): sem ele, ela subiria como desenvolvimento e aceitaria enderecos locais." Por quê: o padrão do parâmetro
+  é desenvolvimento, e em desenvolvimento a sala aceita endereços locais; uma sala sem o parâmetro chamaria um
+  terceiro sem conferir o https nem o IP público (o muro da rede da sala ainda tira as rotas para endereços que não
+  são públicos). Prova: `src/mcp_claro/visitas/partida.py` e `tests/unidade/test_r6e_ambiente_sala.py`.
 - **Parâmetros novos.** `VISITS_INTERNAL_PORT`: 9446 no início, de 1024 a 65535, diferente das outras portas
   internas. `VISITS_INTERNAL_URL`: vazio em desenvolvimento e teste; obrigatório, com https, em piloto e produção.
   `VISITS_CA_FILE`, `VISITS_CLIENT_CERT_FILE` e `VISITS_CLIENT_KEY_FILE`: os arquivos do mTLS (conexão com
@@ -231,17 +246,24 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   parecida, cerca de 0,75 s de tempo de relógio (mediana de 20 partidas). Prova: `docker/compose.yml` e
   `tests/integracao/test_sala_isolada.py`.
 - **Prova de isolamento a cada mudança, com regra escrita para quando pula.** `tests/integracao/test_sala_isolada.py`
-  sobe a sala, o despachante, o banco e o cofre e prova, de dentro da sala, que ela não alcança o banco, o cofre, a
-  entrada, as rotinas nem o login. A prova só é pulada fora do CI quando o passo da construção da imagem que falhou,
-  ou o bloco final do log, mostra um erro de rede, por exemplo um nome que não resolve ou uma rede inalcançável. No
-  CI, a falta de rede também falha a prova. Um aviso de rede num passo que não foi o que falhou não conta: o pip que
-  tentou de novo e instalou, o apt que só avisou, ou um passo que o Docker cancelou porque outro falhou. A linha
-  "Failed to fetch" sozinha também não conta, porque o uv e o apt a escrevem também quando recusam um certificado.
-  Qualquer outra falha de construção falha a prova também fora do CI. Exemplos: certificado recusado no pip, no uv ou
-  no apt (atrás de um proxy que troca o certificado), `uv.lock` ou `Dockerfile` quebrado, e um log que não é do
-  BuildKit (sem passo que falhou nem bloco final). O Compose escreve o progresso da construção na saída e o fim no
-  erro; o `docker build` escreve tudo no erro. A prova lê os dois juntos. Prova: o próprio
-  `tests/integracao/test_sala_isolada.py`.
+  sobe a sala, o despachante, o banco e o cofre e prova, de dentro da sala, que ela não alcança o banco nem o cofre,
+  pelo nome e pelo IP, nem os metadados das nuvens (169.254.169.254) e os IPs privados da rede `saida_visitas`
+  (`tests/integracao/test_sala_isolada.py::test_de_dentro_da_sala_nada_alem_do_despachante_e_da_internet`). A entrada,
+  as rotinas e o login não sobem nessa prova. Com o Compose inteiro no ar, a prova de que a sala não os alcança, pelo
+  nome nem pelo IP, é
+  `tests/integracao/test_fase3_ensaios.py::test_de_dentro_da_sala_entrada_rotinas_login_no_ar_nao_alcancaveis_por_nome_nem_por_ip`.
+  Com uma imagem pronta (`MCP_CLARO_IMAGEM`), a prova confere antes que os arquivos `.py` do pacote dentro da imagem
+  são os do repositório e, se não forem, falha antes de subir
+  (`tests/integracao/test_sala_isolada.py::test_a_imagem_da_prova_e_deste_codigo`). A prova só é pulada fora do CI
+  quando o passo da construção da imagem que falhou, ou o bloco final do log, mostra um erro de rede, por exemplo um
+  nome que não resolve ou uma rede inalcançável. No CI, a falta de rede também falha a prova. Um aviso de rede num
+  passo que não foi o que falhou não conta: o pip que tentou de novo e instalou, o apt que só avisou, ou um passo que
+  o Docker cancelou porque outro falhou. A linha "Failed to fetch" sozinha também não conta, porque o uv e o apt a
+  escrevem também quando recusam um certificado. Qualquer outra falha de construção falha a prova também fora do CI.
+  Exemplos: certificado recusado no pip, no uv ou no apt (atrás de um proxy que troca o certificado), `uv.lock` ou
+  `Dockerfile` quebrado, e um log que não é do BuildKit (sem passo que falhou nem bloco final). O Compose escreve o
+  progresso da construção na saída e o fim no erro; o `docker build` escreve tudo no erro. A prova lê os dois juntos.
+  Prova: o próprio `tests/integracao/test_sala_isolada.py`.
 
 ### Banco: migração 0006
 
@@ -266,6 +288,13 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   de renovação e o segredo do cliente) para outro lugar. Prova:
   `tests/integracao/test_migracao_0006.py::test_origem_nao_muda_nem_pelo_dono` e
   `::test_terceiro_endereco_e_autorizacao_so_mudam_de_vazio_para_um_valor`.
+- **A entrada perde em `sistemas` o que nenhum código usa (vale para todos).** A 0006 tira da entrada, a peça
+  voltada à internet, o direito de mudar o nome, o endereço e o tipo de chave de um sistema e o de gravar a
+  autorização no cadastro de um sistema novo. Ficam com ela o cadastro (nome, endereço, tipo de chave e origem), a
+  configuração da autorização, a desativação (D27) e a volta a "pendente". Essas mudanças são da equipe, pelo dono
+  das tabelas do banco, como o roteiro do ADMIN já diz. Por quê: com a entrada tomada, mudar o endereço de um
+  sistema próprio ativo era aceito, e uma sondagem aceita depois o punha ativo no endereço novo, com as chaves por
+  pessoa já guardadas. Prova: `tests/integracao/test_r6b_grants_entrada.py`.
 - **A revisão do servidor é só de acrescentar e só vale na transação que a grava.** Uma revisão do servidor nunca
   muda nem se apaga. A hora dela (`revisoes_servidor.revisado_em`) é a hora do banco. A revisão vigente de um
   terceiro só vale com ele "ativo" e passa a valer na mesma transação que a grava: uma revisão que deixou de valer
@@ -313,6 +342,18 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   no transporte, com um 202 que não conta como status. Cada pedido barrado vira uma categoria do nosso vocabulário,
   nunca com texto, link ou nome de campo do sistema. Prova:
   `tests/unidade/test_ligacao_pedidos.py::test_401_no_segundo_post_do_fio_antigo_nao_vira_nao_saiu`.
+- **Pedido barrado fora de uma chamada também vai ao extrato (vale para todos).** Quando um sistema pede algo no
+  meio da leitura das ferramentas (a lista das declarações, na revisão e no mudou-parou) ou no meio da sondagem de
+  versão, o pedido continua barrado e agora fica registrado: o extrato ganha a linha
+  `declaracoes_sistema_pediu_dados` ou `sondagem_sistema_pediu_dados`, sem pessoa, com as categorias do nosso
+  vocabulário, e o contador `pedidos_do_sistema_barrados` soma, com `onde=declaracoes` ou `onde=sondagem`. Antes, o
+  pedido era barrado sem deixar rastro, e o D14 conta com esse registro no lugar da quarentena. O quadro "Pedidos
+  recusados deste sistema", na tela do ADMIN, conta essas linhas ("Na leitura das ferramentas" e "Na sondagem", sem
+  ferramenta) e também as ações que terminaram "não confirmada" ("Numa ação sem confirmação") ou "não saiu" ("Numa
+  ação, que não saiu") depois de um pedido barrado. Vale também quando a leitura das ferramentas falha depois do
+  pedido (o servidor pede e depois manda um erro) e quando a sondagem passa do prazo depois do pedido: o pedido fica
+  no extrato e no contador, e a falha conta como antes. Prova: `src/mcp_claro/despachante/servico.py`,
+  `tests/integracao/test_r6e_pedidos_fora_da_chamada.py` e `tests/integracao/test_r6b_pedidos_na_tela.py`.
 - **Uma chamada, um POST de pedido (vale para todos).** O segundo pedido na mesma chamada não sai, e a chamada vira
   "dúvida" (numa ação, "não confirmada"). Antes, "uma chamada é um POST" dependia do kit. Prova:
   `tests/unidade/test_ligacao_pedidos.py::test_segundo_pedido_na_mesma_chamada_nao_sai_e_vira_duvida`.
@@ -379,6 +420,25 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   chegou ao terceiro. Qualquer outra coisa que não seja HTTP 200 com corpo do contrato (um 500, um corpo cortado,
   queda ou prazo depois de enviar) é dúvida, porque a sala pode ter chamado o terceiro. Prova:
   `tests/unidade/test_sala_salto.py::test_resposta_da_sala_que_nao_e_200_do_contrato_e_duvida`.
+- **Sala cheia: nada sai, sem dúvida.** A sala atende até 32 chamadas ao mesmo tempo, somando todos os terceiros.
+  Uma chamada espera uma vaga por no máximo 2 s; sem vaga, a sala responde "nada enviado", com a exceção
+  `sala_sem_vaga`, e nada vai a um filho. Na ação, isso é "não saiu" ("a sala de visitas estava cheia; nada saiu"),
+  e um pedido igual depois é uma ação nova; na leitura, o aplicativo recebe o erro legível "A sala de visitas estava
+  cheia; nada foi enviado ao servidor de terceiros", com o nome do servidor e o pedido para tentar de novo em
+  instantes. Antes, a espera pela vaga contava no prazo do despachante, e a chamada a um terceiro que nem tinha saído
+  podia ficar em dúvida ("não confirmada") por causa de outros terceiros lentos. Na leitura das declarações (revisão
+  do servidor e mudou-parou), a sala cheia é falha do MCP-CLARO, como a sala fora: o despachante responde 503 com o
+  motivo `sala_sem_vaga`, a conclusão da revisão é recusada com o motivo `sem_resposta`, e o mudou-parou não conta a
+  rodada. Só vale a sala cheia dita pelo processo pai da sala: só ele põe na resposta o cabeçalho
+  `mcp-claro-sala: sala_sem_vaga`, e o filho escreve só o status e o corpo. O mesmo corpo de sala cheia sem o
+  cabeçalho, que um filho tomado pelo terceiro poderia escrever, continua contando como o servidor que não entregou
+  (502 `declaracoes_indisponiveis`), para ele não fugir da quarentena por não responder (A5). O contador
+  `sala_sem_vaga` soma com `onde=acao` na ação, `onde=leitura` na leitura, `onde=declaracoes` na leitura das
+  declarações e `onde=sondagem` na conferência da versão. O que fica: com a sala cheia em toda rodada, nenhuma
+  conferência de terceiro é feita (veja "Riscos aceitos da Fase 3"). Prova: `src/mcp_claro/visitas/app.py`,
+  `tests/unidade/test_r6e_sala_vagas.py` e, para as declarações, `tests/unidade/test_r6e_sala_cheia_marcada.py`,
+  `tests/integracao/test_r6e_sala_cheia.py` e
+  `tests/unidade/test_docs_fase3_g8a.py::test_a_sala_cheia_dita_pelo_pai_nao_conta_rodada_e_o_corpo_sem_a_marca_conta`.
 - **Sala fora e endereço recusado só valem quando nada saiu.** Uma resposta "dúvida" nunca vira "nada foi enviado".
   Prova: `tests/unidade/test_sala_salto.py::test_duvida_que_diz_sala_fora_nao_vira_nada_foi_enviado_na_leitura`.
 - **Nomes que só o despachante dá.** Na resposta da sala, os nomes que só o despachante dá ficam fora do contrato:
@@ -398,6 +458,15 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   da ferramenta saem só da classe revisada, com `openWorldHint` sempre verdadeiro, e a descrição termina com "Servidor
   de terceiros: a resposta e texto escrito por estranhos." O ADMIN pode escrever a descrição de cada campo do primeiro
   nível, de até 300 letras. Prova: `tests/unidade/test_esquema_limpo.py` e `tests/unidade/test_como_tool_terceiro.py`.
+- **Nomes neutros nas definições do esquema de terceiro.** No esquema que o aplicativo vê, os nomes das definições
+  (`$defs` e `definitions`) viram nomes neutros (`d1`, `d2`, ...), com cada `$ref` reescrito, e o `$schema` da raiz
+  sai: a entrada confere sempre como 2020-12. Os números seguem uma ordem fixa, a ordem em que o banco guarda as
+  chaves (a mais curta antes), e não a ordem em que o fornecedor as escreveu: assim a revisão, a prévia do ADMIN e o
+  aplicativo veem os mesmos nomes. Antes, esses dois textos, escritos pelo fornecedor, chegavam ao aplicativo e à
+  prévia do ADMIN. A troca vem depois de todas as conferências da revisão, e por isso não muda o que é recusado; o
+  veredito da conferência dos argumentos é o mesmo, e a impressão continua a da definição declarada (o mudou-parou
+  não muda). A vitrine e a prévia do ADMIN fazem a troca de novo. Prova: `tests/unidade/test_r6b_nomes_neutros.py`,
+  `tests/integracao/test_r6b_revisao_nomes.py` e `tests/integracao/test_r6b_nomes_do_banco.py`.
 - **Toda origem que não seja "proprio" conta como terceiro.** Na marca de estranhos, na escolha da ligação e na
   chave do cofre, o MCP-CLARO trata qualquer origem que não seja `proprio` como terceiro: é o lado que aperta.
   Prova: `tests/unidade/test_estranhos.py` e
@@ -655,28 +724,44 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   da quarentena. Prova:
   `tests/integracao/test_rotinas_terceiros.py::test_mudanca_so_de_texto_em_terceiro_leva_o_servidor_inteiro_a_quarentena`
   e `::test_revisao_com_impressao_fora_da_receita_vai_a_quarentena`.
-- **Avisos novos ao ADMIN.** Três eventos novos para os webhooks: `sistema_em_quarentena` ("MCP-CLARO: servidor de
-  terceiros em quarentena (mudou, parou)"), `sistema_em_quarentena_sem_resposta` ("MCP-CLARO: servidor de terceiros
-  em quarentena (não respondeu à conferência)") e `sistema_em_quarentena_revisao_inconsistente` ("MCP-CLARO:
-  servidor de terceiros em quarentena (revisão que não confere)"). O último sai quando a revisão guardada não confere
-  com a própria lista de ferramentas, no lugar do aviso de "mudou 0 ferramentas". Os três dizem que os limites das
-  pessoas foram suspensos. Prova: `src/mcp_claro/extrato/frases.py` (`AVISOS_ADMIN`) e
+- **Avisos novos ao ADMIN.** Três eventos novos para os webhooks, cada um com o assunto que o e-mail leva (o assunto
+  vai sem acento):
+  `sistema_em_quarentena` (`MCP-CLARO: servidor de terceiros em quarentena (mudou, parou)`),
+  `sistema_em_quarentena_sem_resposta` (`MCP-CLARO: servidor de terceiros em quarentena (nao respondeu a conferencia)`)
+  e `sistema_em_quarentena_revisao_inconsistente`
+  (`MCP-CLARO: servidor de terceiros em quarentena (revisao que nao confere)`). O último sai quando a revisão guardada
+  não confere com a própria lista de ferramentas, no lugar do aviso de "mudou 0 ferramentas". Os três dizem que os
+  limites das pessoas foram suspensos. Prova: `src/mcp_claro/extrato/frases.py` (`AVISOS_ADMIN`) e
   `tests/unidade/test_avisos_frases.py`.
 - **Terceiro que não responde (A5).** Duas rodadas seguidas sem resposta levam à quarentena com "não respondeu à
   conferência". Uma resposta no meio zera a contagem. Uma rodada que o MCP-CLARO não conseguiu fazer não conta nem
-  zera: o despachante fora do ar (sem conexão, 503 ou 404 dele), a sala de visitas fora e a chave das declarações que
-  o cofre não abriu. Conta qualquer outra falha: o servidor que não entregou as declarações (502), um 500 ou o prazo
-  de leitura. Com o intervalo do início (`TOOL_DRIFT_CHECK_SECONDS`, 900 s), um terceiro que para de responder vai à
-  quarentena em até cerca de 30 minutos.
-  Prova:
-  `tests/integracao/test_rotinas_terceiros.py::test_terceiro_que_nao_responde_em_duas_rodadas_seguidas_sai_da_vitrine`
-  e `::test_conferencia_nao_feita_pelo_mcp_claro_nao_conta_rodada`.
+  zera: o despachante fora do ar (sem conexão, 503 ou 404 dele), a sala de visitas fora, a sala de visitas cheia dita
+  pelo processo pai dela (503 com o motivo `sala_sem_vaga`), a chave das declarações que o cofre não abriu e uma
+  falha do MCP-CLARO no banco ou no grupo de conexões do despachante durante a conferência (503 com o motivo
+  `conferencia_nao_feita`). Conta qualquer outra falha: o servidor que não entregou as declarações (502, também
+  quando ele declarou o que o banco não guarda e quando o corpo de sala cheia vem sem o cabeçalho do processo pai),
+  um erro 500 do despachante sem motivo nosso ou o prazo de leitura. Com o intervalo do início
+  (`TOOL_DRIFT_CHECK_SECONDS`, 900 s), um terceiro que para de responder vai à quarentena em até cerca de 30
+  minutos. Prova:
+  `tests/integracao/test_rotinas_terceiros.py::test_terceiro_que_nao_responde_em_duas_rodadas_seguidas_sai_da_vitrine`,
+  `::test_conferencia_nao_feita_pelo_mcp_claro_nao_conta_rodada`,
+  `tests/integracao/test_r6e_vistas.py::test_duas_rodadas_com_o_banco_do_despachante_fora_nao_levam_a_quarentena` e
+  `tests/integracao/test_r6e_sala_cheia.py::test_sala_cheia_nas_declaracoes_e_na_sondagem_nao_conta_contra_o_terceiro`.
 - **A falha do MCP-CLARO na leitura das declarações não conta contra o servidor.** Na leitura das declarações
-  (revisão e mudou-parou), com a sala de visitas fora, a resposta do despachante é 503 `sala_fora`. Se o cofre não
-  abre a chave das declarações, ou se não dá para saber a origem do sistema, a resposta é 503
-  `chave_indisponivel`. As rotinas não contam essas rodadas como "sem resposta". O 502 `declaracoes_indisponiveis`
-  fica só para o servidor que não entregou, e isso inclui o endereço de terceiro que não é público. Prova:
-  `tests/integracao/test_g3r_despachante.py`.
+  (revisão e mudou-parou), com a sala de visitas fora, a resposta do despachante é 503 `sala_fora`; com a sala cheia
+  dita pelo processo pai dela, 503 `sala_sem_vaga`. Se o cofre não abre a chave das declarações, ou se não dá para
+  saber a origem do sistema, a resposta é 503 `chave_indisponivel`. Uma falha do banco ou do grupo de conexões do
+  despachante durante a leitura (por exemplo, todas as conexões ocupadas) é 503 `conferencia_nao_feita`. As rotinas
+  não contam essas rodadas como "sem resposta". O 503 `conferencia_nao_feita` é só para a falha nossa: um impasse no
+  banco, a conexão que cai ou o grupo de conexões tomado. Quando o banco recusa o que o servidor declarou, a falha é
+  do servidor: um nome de ferramenta com mais de 1.000 bytes, um texto com caractere nulo ou que não se escreve em
+  UTF-8, ou um erro do banco causado pelo dado ao gravar (as classes 22 e 54 do PostgreSQL) dão 502
+  `declaracoes_indisponiveis`, e a rodada conta. Um nome de mais de 128 letras que cabe em 1.000 bytes continua
+  guardado: o ADMIN o vê, e a revisão o recusa. O 502 `declaracoes_indisponiveis` fica para o servidor que não
+  entregou e vale também para o endereço de terceiro que não é público e para o corpo de sala cheia sem o cabeçalho
+  do processo pai ("Sala cheia: nada sai, sem dúvida", acima). Prova: `tests/integracao/test_g3r_despachante.py`,
+  `tests/integracao/test_r6e_vistas.py::test_pool_tomado_nas_declaracoes_e_503_conferencia_nao_feita`,
+  `tests/unidade/test_r6e_falha_de_dado.py` e `tests/integracao/test_r6e_dados_do_terceiro.py`.
 - **Duas cópias das rotinas contam uma rodada só.** Uma rodada sem resposta só soma quando a última soma tem mais de
   metade de `TOOL_DRIFT_CHECK_SECONDS` (com o padrão, 450 s). Assim, duas cópias das rotinas que rodam a segundos uma
   da outra contam uma rodada só. Prova:
@@ -727,11 +812,40 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
   ainda estão desligados neste MCP-CLARO. Só pessoas de teste os autorizam. Nada foi guardado." A troca do código
   e a renovação conferem o endereço de troca de chave (https e IP público) e gravam `sala_endereco_recusado`
   quando ele não serve. Prova: `tests/integracao/test_g3a_autorizacao_terceiros.py`.
+- **Endereço de volta só de cada servidor de terceiros.** Num servidor de terceiros, a volta da página de
+  autorização chega por um endereço só dele, `/telas/autorizar/<número do servidor>/volta`, e a entrada diz ao
+  despachante por qual endereço ela chegou. Os sistemas próprios continuam com `/telas/autorizar/volta`, o endereço
+  já cadastrado nos servidores de autorização desde a Fase 2. O despachante recusa, com o motivo
+  `estado_de_outro_sistema`, a volta que chega pelo endereço de outro sistema e a de um terceiro que chega pela volta
+  dos próprios, antes de abrir o segredo do cliente, de decifrar o verificador e de trocar o código. Nada é enviado a
+  ninguém nem guardado: o extrato ganha a linha `autorizacao_recusada`, e a pessoa lê "Este pedido de autorização não
+  é deste sistema. Nada foi guardado. Comece de novo por aqui." O começo da autorização de um terceiro também recusa
+  um endereço de volta que não seja o dele. Por quê: com um endereço de volta só para todos os sistemas, um terceiro
+  mal-intencionado podia mandar a pessoa à página de autorização de outro sistema, com o pedido dele; o código desse
+  outro sistema voltava pelo endereço comum e ia, com o verificador, ao endereço de troca do terceiro, que ficava
+  com a chave da pessoa no outro sistema (a mistura de servidores de autorização). A defesa supõe que o servidor de
+  autorização de cada sistema só aceita o endereço de volta que tem cadastrado (RFC 6749, 3.1.2). Ela não cobre a
+  mistura entre dois sistemas próprios, que dividem a mesma volta. O `iss` na volta (RFC 9207) ainda não é
+  conferido. Prova: `tests/integracao/test_r6a_mistura_autorizacao.py`.
+- **Prazo total da troca de chave (OAuth) e espera curta da renovação (vale para todos).** A troca de chave tem um
+  prazo total de 15 s: abrir a conexão, mandar o pedido e ler a resposta inteira. Vale para a troca do código, na
+  autorização, e para a renovação, de próprio e de terceiro. Antes, o prazo de leitura de 10 s valia para cada pedaço
+  lido, e um endereço de troca que mandasse um byte de cada vez segurava a renovação por horas, com a porta de saída
+  parada para todos os sistemas. Esgotado o prazo, vale o que já valia para o servidor de autorização que não
+  responde: na renovação, a chave atual, se ainda vale; senão, a ação fica "não saiu" ("não deu para renovar a
+  chave") e a leitura é recusada; na autorização, a recusa `sistema_indisponivel`, sem nada guardado. A renovação
+  espera no máximo 3 s pela vez, quando outra renovação da mesma pessoa no mesmo sistema já está em curso. Sem a vez,
+  ela desiste sem segurar conexão do banco e sem nada enviado. Depois, lê de novo a chave atual e a usa se ela ainda
+  não venceu, mesmo no último minuto, quando já seria renovada; senão, a ação fica "não saiu" ("não deu para renovar
+  a chave") e a leitura é recusada. O risco que continua está em "Riscos aceitos da Fase 3", abaixo. Prova:
+  `tests/integracao/test_r6a_renovacao_prazo.py`, com
+  `::test_sem_a_trava_a_renovacao_usa_a_chave_atual_se_ela_ainda_vale`, e `tests/unidade/test_r6a_troca_prazo.py`.
 - **Conclusão da revisão do servidor.** Exige a chave de leitura das declarações (A5), lê o servidor de novo e recusa
   se a situação muda no meio (por exemplo, uma quarentena que entrou entre a leitura e a trava). Recusa (400) texto
   que o banco não guarda. Publicar uma lista vazia é aceito: tira da quarentena sem nada na vitrine, e nada chega às
-  pessoas (decisão do coordenador). Com a sala de visitas fora, a recusa da conclusão diz que o servidor não
-  entregou as declarações (motivo `sem_resposta`), sem um motivo próprio para a sala (decisão do coordenador). Prova:
+  pessoas (decisão do coordenador). Com a sala de visitas fora ou cheia, a recusa da conclusão diz que o servidor
+  não entregou as declarações (motivo `sem_resposta`), sem um motivo próprio para a sala (decisão do coordenador).
+  Prova:
   `tests/integracao/test_revisao_servidor.py`.
 - **Sondagem.** A sondagem grava sempre o desfecho e as versões anunciadas. Um terceiro ativo e revisado recusado
   por versão vai à quarentena com motivo próprio (D29). Em quarentena, a sondagem, com ou sem veredito, mantém o
@@ -764,8 +878,9 @@ O roteiro de quem cuida do dia a dia está em [Porta de saída](saida.md#ações
   confirmada".
 - **Só o último status 401 vence a chave por pessoa.** Um "recusado" sem status de recusa é "não confirmada".
 - **O que o sistema pediu no meio da ação vai ao desfecho só com o nosso vocabulário.** Um resultado normal com
-  pedido barrado continua "enviada". As linhas `acao_enviada` e `acao_sistema_pediu_dados` do extrato levam as
-  categorias em `dados.pedidos`.
+  pedido barrado continua "enviada". A linha do fim da ação leva as categorias em `dados.pedidos`: sempre em
+  `acao_enviada` e `acao_sistema_pediu_dados`, e em `acao_nao_confirmada` e `acao_nao_saiu` quando houve pedido
+  barrado.
 - **O `_meta` guardado leva só a conta de partes retiradas.**
 - **Resposta funda demais.** Pelo cliente local (sistemas próprios), a resposta com mais de 199 níveis, ou que o
   kit não escreve, deixa a ação "enviada" sem resultado. Antes, derrubava o turno da porta, e a ação ficava "não
@@ -801,13 +916,29 @@ Riscos que ficam, decididos pelo dono ou pelo coordenador. O modelo de ameaças
 - **"Não saiu" forjável por um terceiro.** Todo status ou código que vira "não saiu" pode ser forjado por um
   terceiro que executou a ação e respondeu assim: 401, 403 e 3xx no último status, e os códigos -32601, -32602,
   -32600, -32700 e -32021. Nesse caso, um pedido igual sai de novo, só para esse mesmo terceiro, sem alcance a outros
-  sistemas. Vale igual para sistema próprio desde a Fase 2. Sem mudança de código.
+  sistemas. Vale igual para sistema próprio desde a Fase 2. Sem mudança de código. Na sala, um filho tomado pelo
+  terceiro pode, depois de chamar o terceiro, escrever qualquer resposta "nada enviado" do contrato, também a de sala
+  cheia (`sala_sem_vaga`): a sala devolve o que o filho escreveu sem ler, e a ação fica "não saiu", com o mesmo
+  alcance.
+- **Sala cheia em toda conferência.** Se as 32 vagas da sala ficarem ocupadas por mais de 2 s na hora de cada
+  rodada do mudou-parou, nenhuma conferência de terceiro é feita, e um servidor que mudou só é visto quando a sala
+  esvazia. Isso vale também para o terceiro lento que ocupa as vagas: enquanto a sala estiver cheia, a mudança dele
+  não é vista; a vitrine continua só com o que foi revisado. O contador `sala_sem_vaga` (com `onde=declaracoes`)
+  mostra; a equipe que opera o gateway confere. Só a sala cheia dita pelo processo pai não conta: o mesmo corpo
+  escrito por um filho tomado conta como o servidor que não entregou (decisão do coordenador, na revisão cruzada).
 - **Resposta funda demais pelos dois caminhos.** Pela sala, a resposta funda demais volta como dúvida, e a ação fica
   "não confirmada". Pelo cliente local (sistemas próprios), a ação fica "enviada" sem resultado. Os dois são do lado
   seguro.
 - **Janela de DNS.** Entre a conferência do nome de um terceiro e a conexão, o DNS pode mudar. O https com
   certificado público dificulta o desvio para um endereço interno; na sala, a rede isolada também. A troca de chave
   do OAuth, que sai do despachante e não da sala, só conta com o https e a conferência do IP.
+- **Troca de chave lenta ocupa a porta de saída.** Cada ação de um terceiro com o endereço de troca de chave lento
+  ainda pode ocupar a porta única de saída por até 15 s da troca, mais a espera da vez (até 3 s) e a conferência do
+  endereço de troca (até 3 s). Nesse tempo, nenhuma outra ação sai, de nenhum sistema. Um prazo a mais na porta de
+  saída ficou de fora: o prazo total da troca e a espera curta da renovação bastam por agora (decisão do coordenador,
+  na revisão cruzada). Vale igual para sistema próprio. Cada renovação também segura uma conexão do banco do
+  despachante enquanto troca a chave. Renovações de pessoas diferentes no mesmo terceiro lento não dividem a vez, e
+  cada uma pode segurar a sua conexão por até cerca de 15 s.
 - **Fichas do alerta e o teto por aplicativo (B11).** O teto de fichas por hora (`CONFIRM_CAP_PER_HOUR`) é por
   aplicativo, somando todas as pessoas, e a pausa vale para todas. Com o alerta, ações que iam por limite viram
   fichas: poucas pessoas com o alerta ligado podem pausar um aplicativo muito usado para todo mundo. Medir no piloto
@@ -835,7 +966,9 @@ Estes pontos não travam o código e ficam como parâmetro ou roteiro até a res
 
 - sistema real e ações da Fase 2; servidores de terceiros da Fase 3 (os primeiros reais); equipes da Fase 4;
 - ligar a chave da Fase 3 (D6): decisão do dono, depois das provas que dependem de gente e de ambiente real
-  ([andamento](andamento.md#fase-3-servidores-de-terceiros));
+  ([andamento](andamento.md#fase-3-servidores-de-terceiros)) e da decisão sobre o teste de carga (item seguinte);
+- o teste de carga com o `locust`, que o plano pede antes de abrir fase, não existe no repositório: não houve teste de
+  carga nas Fases 1 e 2 nem nesta. Ligar a chave da Fase 3 (D6) depende dessa decisão do dono;
 - prazo e tamanho da equipe;
 - revisão de LGPD;
 - servidor de e-mail, destinos de webhook, local da segunda máquina e do repositório de backup;

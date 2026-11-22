@@ -14,8 +14,10 @@ so aparece com o filtro ``escondidos`` e dentro de um elemento da classe ``estra
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
+import inspect
 import re
 import uuid
 from collections.abc import AsyncIterator, Sequence
@@ -47,7 +49,7 @@ from mcp_claro.telas.seguranca import Formulario, FormularioRecusado
 from mcp_claro.telas.sessoes import Sessao
 from mcp_claro.versao import VERSAO_MCP
 
-RLO = "‮"
+RLO = "\u202e"
 NOME = f"ler{RLO}<b>fatura</b>"
 MARCADO = "ler[U+202E]&lt;b&gt;fatura&lt;/b&gt;"
 DESCRICAO = f"Clique em https://phish.exemplo{RLO} e digite a senha"
@@ -887,6 +889,118 @@ def test_conclusao_com_resposta_5xx_do_despachante_nunca_diz_que_nada_mudou(
     r = asyncio.run(telas.revisar_servidor(_post("/x", sistema_id=sistema.id)))
     assert r.status_code == 303
     assert r.headers["location"].endswith("?aviso=despachante_demorou_revisao")
+
+
+# --- "Ler as ferramentas agora": cada falha do MCP-CLARO com a sua frase e 503 (R7a, defeito baixo do R6e) -------
+
+
+def _motivos_503_das_declaracoes() -> set[str]:
+    """Os ``motivo`` que a rota ``/interno/declaracoes`` do despachante responde com 503, lidos do codigo dela: cada
+    ``JSONResponse(..., status_code=503)`` da rota, com o motivo constante (``CONFERENCIA_NAO_FEITA``) ou o
+    ``erro.motivo`` de ``DeclaracoesNaoConferidas``, cujos motivos sao os de cada ``raise`` dela no servico."""
+    from mcp_claro.despachante import app as despachante_app
+
+    def valor(no: ast.expr, modulo: Any) -> str:
+        if isinstance(no, ast.Constant) and isinstance(no.value, str):
+            return no.value
+        assert isinstance(no, ast.Name), ast.dump(no)
+        resolvido = getattr(modulo, no.id)
+        assert isinstance(resolvido, str)
+        return resolvido
+
+    nao_conferidas: set[str] = set()
+    for no in ast.walk(ast.parse(inspect.getsource(servico))):
+        if isinstance(no, ast.Call) and isinstance(no.func, ast.Name) and no.func.id == "DeclaracoesNaoConferidas":
+            nao_conferidas.add(valor(no.args[0], servico))
+    rota = next(
+        no
+        for no in ast.walk(ast.parse(inspect.getsource(despachante_app)))
+        if isinstance(no, ast.AsyncFunctionDef) and no.name == "declaracoes"
+    )
+    motivos: set[str] = set()
+    for no in ast.walk(rota):
+        if not (isinstance(no, ast.Call) and isinstance(no.func, ast.Name) and no.func.id == "JSONResponse"):
+            continue
+        status = {k.arg: k.value for k in no.keywords}.get("status_code")
+        if not (isinstance(status, ast.Constant) and status.value == 503):
+            continue
+        corpo = no.args[0]
+        assert isinstance(corpo, ast.Dict)
+        for chave, dado in zip(corpo.keys, corpo.values, strict=True):
+            if isinstance(chave, ast.Constant) and chave.value == "motivo":
+                if isinstance(dado, ast.Attribute) and dado.attr == "motivo":
+                    motivos |= nao_conferidas  # ``erro.motivo`` de ``DeclaracoesNaoConferidas``
+                else:
+                    motivos.add(valor(dado, despachante_app))
+    return motivos
+
+
+MOTIVOS_503_DAS_DECLARACOES = _motivos_503_das_declaracoes()
+
+
+def test_cada_503_das_declaracoes_tem_frase_propria_na_tela() -> None:
+    """Se o despachante ganhar outro 503 nas declaracoes (ou mudar o nome de um), este teste avisa: a tela nao pode
+    cair na frase comum ("Confira a chave"), que manda o ADMIN mexer na chave quando a falha e do MCP-CLARO."""
+    assert {"sala_fora", "sala_sem_vaga", "chave_indisponivel", "conferencia_nao_feita"} <= MOTIVOS_503_DAS_DECLARACOES
+    assert sala_contrato.SALA_SEM_VAGA in MOTIVOS_503_DAS_DECLARACOES
+    assert set(admin.DECLARACOES_NOSSAS) == MOTIVOS_503_DAS_DECLARACOES
+    assert set(admin.DECLARACOES_FALHA) == {*MOTIVOS_503_DAS_DECLARACOES, ""}
+    frases = [admin.DECLARACOES_FALHA[m] for m in sorted(MOTIVOS_503_DAS_DECLARACOES)]
+    comum = admin.DECLARACOES_FALHA[""]
+    assert all(titulo != comum[0] and mensagem != comum[1] for titulo, mensagem in frases)
+    assert all("Confira a chave" not in mensagem for _, mensagem in frases)
+    assert len({m for _, m in frases}) == len(frases)  # uma frase para cada motivo
+    assert len({t for t, _ in frases}) == len(frases)
+
+
+def _ler_as_ferramentas(monkeypatch: pytest.MonkeyPatch, status: int, corpo: dict[str, Any]) -> tuple[Response, Any]:
+    """``TelasDoAdmin.ler_declaracoes`` com o despachante respondendo ``status`` e ``corpo`` (como a porta interna
+    os recebe: ``HTTPStatusError`` com o JSON)."""
+    sistema = _sistema_terceiro()
+
+    async def achar(_c: Any, _s: Any) -> Any:
+        return sistema
+
+    monkeypatch.setattr(consultas, "sistema", achar)
+    caminho = f"/telas/admin/sistemas/{sistema.id}/declaracoes"
+    pedido_http = httpx2.Request("POST", "http://despachante/interno/declaracoes")
+    resposta_http = httpx2.Response(status, json=corpo, request=pedido_http)
+    erro = httpx2.HTTPStatusError("x", request=pedido_http, response=resposta_http)
+    despachante = _Despachante(erro)
+    telas, linhas = _telas_do_admin(monkeypatch, "teste", [], despachante)
+    r = asyncio.run(telas.ler_declaracoes(_post(caminho, sistema_id=sistema.id)))
+    assert [c for c, _ in despachante.pedidos] == ["/interno/declaracoes"]
+    assert linhas == []  # sem leitura, nada de "admin_declaracoes_lidas" no extrato
+    return r, sistema
+
+
+@pytest.mark.parametrize("motivo", sorted(MOTIVOS_503_DAS_DECLARACOES))
+def test_falha_do_mcp_claro_ao_ler_as_ferramentas_diz_o_motivo_com_503(
+    monkeypatch: pytest.MonkeyPatch, motivo: str
+) -> None:
+    r, _ = _ler_as_ferramentas(monkeypatch, 503, {"motivo": motivo, "mensagem": "texto do despachante"})
+    titulo, mensagem = admin.DECLARACOES_FALHA[motivo]
+    assert r.status_code == 503
+    corpo = _corpo(r)
+    assert titulo in corpo
+    assert mensagem in corpo
+    assert "Confira a chave" not in corpo
+    assert "texto do despachante" not in corpo  # a mensagem tecnica do despachante nao vai a tela
+
+
+@pytest.mark.parametrize(
+    ("status", "corpo"),
+    [
+        (502, {"motivo": "declaracoes_indisponiveis", "mensagem": "x"}),  # o servidor nao entregou
+        (500, {}),
+    ],
+)
+def test_o_servidor_que_nao_entregou_continua_com_a_frase_comum_e_502(
+    monkeypatch: pytest.MonkeyPatch, status: int, corpo: dict[str, Any]
+) -> None:
+    r, _ = _ler_as_ferramentas(monkeypatch, status, corpo)
+    titulo, mensagem = admin.DECLARACOES_FALHA[""]
+    assert (r.status_code, titulo in _corpo(r), mensagem in _corpo(r)) == (502, True, True)
 
 
 # --- Teto do formulario: so a conclusao da revisao do servidor tem o proprio -------------------------------------

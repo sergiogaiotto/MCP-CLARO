@@ -42,7 +42,7 @@ BASE: dict[str, Any] = {
     "valores": {},
 }
 ZW = "​"  # largura zero: "para" e "para" + ZW parecem iguais na tela
-RLO = "‮"  # inverte o que vem depois
+RLO = "\u202e"  # inverte o que vem depois
 
 
 def _render(modelo: str, **contexto: Any) -> str:
@@ -374,6 +374,7 @@ def _consultas_falsas(monkeypatch: pytest.MonkeyPatch, nova: limites.Escolha, an
     monkeypatch.setattr(passkeys, "tem_ativa", tem)
     monkeypatch.setattr(consultas, "revisao_por_id", revisao)
     monkeypatch.setattr(consultas, "travar_revisao", nada)
+    monkeypatch.setattr(limites, "travar_sistema", nada)  # a trava consultiva do sistema (R6b-2)
 
 
 def _get(query: dict[str, str]) -> Request:

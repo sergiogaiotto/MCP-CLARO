@@ -8,6 +8,9 @@ segredo nenhum ali.
 A sala so sobe com mTLS: certificado de servidor da ``ca_visitas`` e, como autoridade de clientes, a
 ``ca_clientes_visitas``, que so emite o certificado do despachante.
 
+A sala so sobe com ``APP_ENV`` escrito no ambiente dela (contrato K8): sem ele, os ``Parametros`` caem no padrao
+``desenvolvimento``, e a sala aceitaria enderecos locais (``Sala.liberar_locais``) sem que o despachante soubesse.
+
 As regras gerais de ``Parametros.problemas`` (telas, avisos, vigia, banco) sao dos outros papeis e nao valem aqui.
 """
 
@@ -18,6 +21,10 @@ from collections.abc import Mapping
 from mcp_claro.config.settings import ConfiguracaoInvalida, Parametros
 
 PREFIXOS_PROIBIDOS = ("DATABASE_", "DB_", "VAULT_")
+SEM_APP_ENV = (
+    "A sala de visitas precisa de APP_ENV escrito no ambiente dela (desenvolvimento, teste, piloto ou producao): sem"
+    " ele, ela subiria como desenvolvimento e aceitaria enderecos locais."
+)
 SEGREDOS_DA_SALA = frozenset({"INTERNAL_CA_FILE", "INTERNAL_CERT_FILE", "INTERNAL_KEY_FILE", "INTERNAL_CLIENT_CA_FILE"})
 # Nao e segredo: a lista de autoridades do sistema (a imagem a deixa vazia).
 NAO_SAO_SEGREDO = frozenset({"SSL_CERT_FILE"})
@@ -26,6 +33,8 @@ NAO_SAO_SEGREDO = frozenset({"SSL_CERT_FILE"})
 def problemas_da_sala(p: Parametros, ambiente: Mapping[str, str]) -> list[str]:
     """Lista o que a partida da sala recusa. ``ambiente`` e o do processo (nomes e, nos ``*_FILE``, se ha valor)."""
     erros: list[str] = []
+    if "APP_ENV" not in ambiente:
+        erros.append(SEM_APP_ENV)
     proibidas = sorted(nome for nome in ambiente if nome.startswith(PREFIXOS_PROIBIDOS))
     if proibidas:
         erros.append(f"A sala de visitas nao tem banco nem cofre: tire {', '.join(proibidas)} do ambiente dela.")

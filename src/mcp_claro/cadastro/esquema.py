@@ -9,6 +9,11 @@ chamar: nomes de campo, valores de ``enum``/``const`` e ``pattern``.
 
 ``com_descricoes`` poe as descricoes de campo escritas pelo ADMIN, so no primeiro nivel.
 
+``nomes_neutros`` (contrato K3) tira o que a limpeza ainda deixa de texto livre: o ``$schema`` da raiz e os nomes de
+``$defs`` e ``definitions`` (viram ``d1``, ``d2``..., com as referencias reescritas, contados na ordem em que o banco
+guarda as chaves). A revisao de terceiro a chama depois de todas as conferencias; a vitrine e a previa do ADMIN, de
+novo, com os mesmos nomes.
+
 A entrada confere cada argumento com o esquema revisado, dentro do proprio laco (``entrada.argumentos``). Num
 terceiro (critica B3, desenho simples do coordenador):
 
@@ -630,6 +635,81 @@ def conferir_referencias(esquema: Mapping[str, Any]) -> None:
     conta.custo(raiz, ())
     for caminho, definicao in _definicoes(raiz):
         conta.custo(definicao, caminho, 1)
+
+
+PREFIXO_NEUTRO: Final = "d"
+"""Nomes neutros das definicoes de um terceiro (``nomes_neutros``): ``d1``, ``d2``..."""
+
+
+def _ordem_do_banco(chave: Any) -> tuple[int, bytes]:
+    """Para ordenar as chaves de um objeto como o PostgreSQL as guarda num ``jsonb`` (e as devolve): a mais curta
+    antes, em bytes UTF-8, e, entre as do mesmo tamanho, a menor em bytes (sem colacao). Para nomes ``dN``, e a ordem
+    dos numeros."""
+    bruto = str(chave).encode("utf-8", "surrogatepass")
+    return len(bruto), bruto
+
+
+def _caminho_do_banco(par: tuple[tuple[str, ...], Any]) -> list[tuple[int, bytes]]:
+    """Para ordenar as partes logo abaixo de um no (``_filhos``) na ordem do banco. O indice de uma lista, como
+    texto, fica na ordem dos numeros."""
+    return [_ordem_do_banco(pedaco) for pedaco in par[0]]
+
+
+def _alvo_na_raiz(referencia: Any) -> tuple[str, str] | None:
+    """(``$defs`` ou ``definitions``, nome) que ``referencia`` aponta na raiz, lida como a entrada le o ponteiro
+    (``%XX``, depois ``~1`` e ``~0``, como ``_definicao``); None em outra forma."""
+    if not isinstance(referencia, str) or not referencia.startswith("#/"):
+        return None
+    pedacos = [p.replace("~1", "/").replace("~0", "~") for p in unquote(referencia[2:]).split("/")]
+    if len(pedacos) != 2 or pedacos[0] not in _DEFINICOES:
+        return None
+    return pedacos[0], pedacos[1]
+
+
+@_sem_estouro
+def nomes_neutros(esquema: Mapping[str, Any]) -> dict[str, Any]:
+    """Copia do esquema de um terceiro sem o texto livre que a limpeza deixa (contrato K3): tira o ``$schema`` da raiz
+    (a entrada sempre confere como 2020-12), troca o nome de cada definicao (``$defs`` e ``definitions``, em qualquer
+    lugar) por ``d1``, ``d2``, ... na ordem do documento e reescreve cada ``$ref`` ``#/$defs/<nome>`` ou
+    ``#/definitions/<nome>`` (o nome lido como ponteiro JSON, com ``%XX``, ``~0`` e ``~1``) para o nome novo. Dados
+    (``enum``, ``const``...) e nomes de campo ficam como estao, e as chaves de cada objeto ficam na ordem em que
+    vieram.
+
+    A ordem do documento e a do banco: cada parte antes das de baixo dela, e as chaves de cada objeto na ordem em que
+    o PostgreSQL as guarda num ``jsonb`` (``_ordem_do_banco``), nao na ordem em que vieram. Assim a revisao (que
+    grava), a previa do ADMIN e a vitrine (que le do banco) dao os mesmos nomes, qualquer que seja a ordem das chaves
+    na definicao, e a funcao e idempotente tambem depois de o esquema passar pelo banco.
+
+    O veredito da conferencia dos argumentos e o mesmo. Espera um esquema que passou em ``conferir_terceiro``: num
+    outro, termina sem erro, mas uma referencia de outra forma fica como veio (a revisao a recusa). A revisao a chama
+    depois de todas as conferencias, para nao mudar o que e recusado; por isso o esquema gravado pode passar de
+    ``BYTES_MAXIMOS`` por poucas letras (nome curto que vira ``dN``). Sem recursao."""
+    raiz = _copia(dict(esquema))
+    raiz.pop("$schema", None)
+    novos: dict[tuple[str, str], str] = {}
+    numero = 0
+    pilha: list[tuple[bool, Any]] = [(True, raiz)]
+    while pilha:
+        na_raiz, no = pilha.pop()
+        if not isinstance(no, dict):
+            continue
+        # A parte sai da pilha antes das de baixo dela: trocar os nomes aqui nao muda o que o percurso visita.
+        for chave in sorted((k for k in no if k in _DEFINICOES and isinstance(no[k], dict)), key=_ordem_do_banco):
+            definicoes: dict[str, Any] = no[chave]
+            trocas: dict[str, str] = {}
+            for nome in sorted(definicoes, key=_ordem_do_banco):
+                numero += 1
+                trocas[nome] = f"{PREFIXO_NEUTRO}{numero}"
+            no[chave] = {trocas[nome]: sub for nome, sub in definicoes.items()}
+            if na_raiz:  # so as da raiz: e onde toda referencia aceita aponta
+                novos.update({(chave, str(nome)): novo for nome, novo in trocas.items()})
+        alvo = _alvo_na_raiz(no.get("$ref"))
+        if alvo is not None and alvo in novos:
+            no["$ref"] = f"#/{alvo[0]}/{novos[alvo]}"
+        # As de baixo na ordem do banco. Os nomes novos (dN) ficam na mesma ordem que os antigos tinham.
+        filhos = sorted(_filhos(no), key=_caminho_do_banco)
+        pilha.extend((False, sub) for _, sub in reversed(filhos))
+    return dict(raiz)
 
 
 @_sem_estouro

@@ -2,13 +2,22 @@
 
 - Chave sem prazo conhecido, ou que vence depois de ``MARGEM``, e usada como esta (caminho rapido,
   sem trava).
-- Chave vencida ou perto de vencer: o despachante segura a trava consultiva do par (pessoa, sistema)
-  (``pg_advisory_xact_lock``), le de novo (outro pedido pode ter renovado enquanto ele esperava) e so
+- Chave vencida ou perto de vencer: o despachante pega a trava consultiva do par (pessoa, sistema)
+  (``autorizacao.travar_com_prazo``), le de novo (outro pedido pode ter renovado enquanto ele esperava) e so
   entao troca a chave de renovacao no ``token_endpoint``. A chave nova e gravada, cifrada, na mesma
-  transacao, antes de qualquer envio ao sistema. Duas renovacoes ao mesmo tempo geram uma troca so.
+  transacao, antes de qualquer envio ao sistema. Duas renovacoes ao mesmo tempo geram uma troca so, se a
+  segunda chegar a trava dentro da espera curta.
+- A espera pela trava e curta (``autorizacao.ESPERA_TRAVA_RENOVACAO``): quem a segura pode estar esperando um
+  servidor de autorizacao lento, ate ``autorizacao.PRAZO_TROCA``. Sem a trava no prazo, a transacao fecha e a
+  conexao volta ao pool, sem nada enviado. Como quando o servidor nao responde: se a chave atual ainda vale (lida de
+  novo, sem a trava), ela e usada; senao, ``RenovacaoIndisponivel("trava_ocupada")``.
 - O servidor de autorizacao recusou a renovacao (``invalid_grant``): as chaves da pessoa naquele
   sistema sao apagadas e ela precisa autorizar de novo (``AutorizacaoVencida``).
-- O servidor nao respondeu: se a chave atual ainda vale, ela e usada; senao, ``RenovacaoIndisponivel``.
+- O servidor nao respondeu, inclusive no prazo total da troca (``autorizacao.PRAZO_TROCA``): se a chave atual
+  ainda vale, ela e usada; senao, ``RenovacaoIndisponivel``.
+
+A troca acontece de dentro da trava e da transacao: cada renovacao de um servidor lento segura uma conexao do
+despachante (e, na porta de saida, a porta unica) por ate ``PRAZO_TROCA`` segundos, mais a espera da trava.
 
 Nunca ha reenvio do ``tools/call``: renova-se antes de enviar. Um 401 no envio e recusa definitiva
 daquele pedido; ``marcar_vencida`` so faz o proximo pedido renovar antes.
@@ -45,7 +54,12 @@ class AutorizacaoVencida(Exception):
 
 
 class RenovacaoIndisponivel(Exception):
-    """O servidor de autorizacao nao respondeu e a chave atual ja venceu: tente de novo mais tarde."""
+    """A chave atual ja venceu e nao deu para renovar: o servidor de autorizacao nao respondeu, ou outra renovacao do
+    mesmo par segura a trava por mais que a espera curta (``"trava_ocupada"``). Tente de novo mais tarde."""
+
+
+class _SemTrava(Exception):
+    """Interna: a trava do par nao veio na espera curta. Sai do bloco da transacao, que desfaz e devolve a conexao."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,25 +134,68 @@ async def renovar(
     ambiente: str = "producao",
     liberar_locais: bool = False,
 ) -> ChaveAberta:
-    """Renova com a trava do par (pessoa, sistema). Quem chegar depois usa a chave que o primeiro gravou."""
-    async with engine.begin() as c:
-        await autorizacao.travar(c, pessoa_id, sistema_id)
-        acesso = await _ler(c, sistema_id, pessoa_id, "acesso")
-        if acesso is None:
-            raise chaves.ChaveAusente("a autorizacao foi derrubada")
-        agora = datetime.now(UTC)
-        if _vale(acesso.expira_em, margem, agora):
-            return ChaveAberta(await _abrir(cifra, acesso, sistema_id, pessoa_id), acesso.cifrada)
-        atual: ChaveAberta | None = None
-        if _vale(acesso.expira_em, timedelta(0), agora):
-            atual = ChaveAberta(await _abrir(cifra, acesso, sistema_id, pessoa_id), acesso.cifrada)
-        desfecho = await _trocar_com_trava(
-            c, cifra, sistema_id, pessoa_id, atual, ambiente=ambiente, liberar_locais=liberar_locais
-        )
+    """Renova com a trava do par (pessoa, sistema), esperada no maximo ``autorizacao.ESPERA_TRAVA_RENOVACAO``.
+
+    Quem chegar a trava dentro dessa espera usa a chave que o primeiro gravou. Quem nao chegar desiste depois do
+    ROLLBACK, sem segurar a conexao e sem nada enviado: le de novo a chave de acesso, sem a trava, e a usa se ela
+    ainda vale (sem a ``margem``); senao, ``RenovacaoIndisponivel("trava_ocupada")``. Nos dois casos, o contador
+    ``renovacoes_falhas{motivo="trava_ocupada"}``.
+    """
+    try:
+        async with engine.begin() as c:
+            desfecho = await _renovar_na_transacao(
+                c, cifra, sistema_id, pessoa_id, margem, ambiente=ambiente, liberar_locais=liberar_locais
+            )
+    except _SemTrava:
+        CONTADORES.somar("renovacoes_falhas", motivo="trava_ocupada")
+        atual = await _atual_sem_trava(engine, cifra, sistema_id, pessoa_id)
+        log.warning("renovacao_sem_trava", usou_a_chave_atual=atual is not None)
+        if atual is not None:
+            return atual
+        raise RenovacaoIndisponivel("trava_ocupada") from None
     if isinstance(desfecho, Exception):
         CONTADORES.somar("renovacoes_falhas", motivo=type(desfecho).__name__)
         raise desfecho
     return desfecho
+
+
+async def _atual_sem_trava(
+    engine: AsyncEngine, cifra: Cifra, sistema_id: uuid.UUID, pessoa_id: uuid.UUID
+) -> ChaveAberta | None:
+    """Sem a trava: a chave de acesso de agora, se ainda vale (sem margem). Le sem trava e devolve a conexao antes de
+    decifrar. Vencida, marcada vencida depois de um 401 ou apagada: ``None``."""
+    async with engine.connect() as c:
+        linha = await _ler(c, sistema_id, pessoa_id, "acesso")
+    if linha is None or not _vale(linha.expira_em, timedelta(0), datetime.now(UTC)):
+        return None
+    return ChaveAberta(await _abrir(cifra, linha, sistema_id, pessoa_id), linha.cifrada)
+
+
+async def _renovar_na_transacao(
+    c: AsyncConnection,
+    cifra: Cifra,
+    sistema_id: uuid.UUID,
+    pessoa_id: uuid.UUID,
+    margem: timedelta,
+    *,
+    ambiente: str,
+    liberar_locais: bool,
+) -> ChaveAberta | Exception:
+    """Pega a trava (espera curta; sem ela, ``_SemTrava``), le de novo e, se ainda precisa, troca a chave."""
+    if not await autorizacao.travar_com_prazo(c, pessoa_id, sistema_id):
+        raise _SemTrava
+    acesso = await _ler(c, sistema_id, pessoa_id, "acesso")
+    if acesso is None:
+        raise chaves.ChaveAusente("a autorizacao foi derrubada")
+    agora = datetime.now(UTC)
+    if _vale(acesso.expira_em, margem, agora):
+        return ChaveAberta(await _abrir(cifra, acesso, sistema_id, pessoa_id), acesso.cifrada)
+    atual: ChaveAberta | None = None
+    if _vale(acesso.expira_em, timedelta(0), agora):
+        atual = ChaveAberta(await _abrir(cifra, acesso, sistema_id, pessoa_id), acesso.cifrada)
+    return await _trocar_com_trava(
+        c, cifra, sistema_id, pessoa_id, atual, ambiente=ambiente, liberar_locais=liberar_locais
+    )
 
 
 async def _trocar_com_trava(

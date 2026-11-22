@@ -3,7 +3,10 @@
 Sobe, com os arquivos do repositorio, a sala de visitas (``visitas`` e ``visitas-muro``), o despachante, o banco e o
 cofre, e prova de dentro da sala, conectando de verdade:
 
-- sem alcance a banco:5432, cofre:8200, entrada:8443, rotinas:9444 e login:8080, nem pelo nome nem pelo IP;
+- sem alcance a banco:5432 e cofre:8200, nem pelo nome nem pelo IP. A entrada, as rotinas e o login nem sobem aqui:
+  de dentro da sala, o nome deles nao resolve (entrada:8443, rotinas:9444 e login:8080), e so isso. Com as tres pecas
+  no ar, tentadas pelo nome e por cada IP, a prova e
+  ``test_fase3_ensaios.py::test_de_dentro_da_sala_entrada_rotinas_login_no_ar_nao_alcancaveis_por_nome_nem_por_ip``;
 - sem alcance a 169.254.169.254 (metadados das nuvens), a IPs privados da rede ``saida_visitas`` (o host e os
   vizinhos) nem ao lado do host da rede ``visitas``: a rota recusa na hora, nao e so falta de resposta;
 - o despachante:9443 e alcancavel pela rede ``visitas``, mas sem certificado (ou com o da sala) o TLS recusa;
@@ -20,7 +23,8 @@ de se isolar (nem importa ``mcp_claro.__main__``).
 
 O banco usa a imagem oficial do PostgreSQL com os scripts do repositorio montados, sem o pgBackRest (que so muda o
 backup), para a prova nao depender do repositorio apt do PGDG. A imagem do gateway e construida aqui, com uma
-etiqueta so desta rodada, salvo se ``MCP_CLARO_IMAGEM`` apontar uma imagem pronta (feita do mesmo codigo). Sem rede
+etiqueta so desta rodada, salvo se ``MCP_CLARO_IMAGEM`` apontar uma imagem pronta: ela precisa ser deste codigo (os
+``.py`` do pacote dentro dela batem, um a um, com os de ``src/mcp_claro``), ou a prova falha antes de subir. Sem rede
 para construir a imagem (uma linha de erro de rede no passo que falhou ou no bloco final do log), a prova e pulada
 numa maquina comum, mas falha no CI (variavel ``CI`` ligada), com o fim do log: no CI, ela nunca some em silencio. Um
 aviso de rede num passo que deu certo (o pip que tentou de novo e instalou, o apt que so avisou), ou num passo que o
@@ -34,6 +38,7 @@ falso.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -347,6 +352,21 @@ class Projeto:
     def apagar_imagem(self) -> None:
         subprocess.run(["docker", "image", "rm", "-f", self.imagem], capture_output=True, check=False)  # noqa: S603, S607
 
+    def impressao_da_imagem(self) -> dict[str, str]:
+        """A impressao dos ``.py`` do pacote instalado na imagem (``impressao_do_codigo``), lida num conteiner
+        descartavel, sem rede e sem subir o Compose."""
+        comando = ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python", self.imagem]
+        r = subprocess.run(  # noqa: S603
+            [*comando, "-c", IMPRESSAO_NA_IMAGEM],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if r.returncode != 0:
+            pytest.fail(f"nao deu para ler o codigo da imagem {self.imagem}:\n{r.stderr[-2000:]}", pytrace=False)
+        return dict(json.loads(r.stdout.strip().splitlines()[-1]))
+
     def compose(self, *args: str, verificar: bool = True, prazo: float = 600) -> subprocess.CompletedProcess[str]:
         comando = ["docker", "compose", "-p", self.nome, "-f", "docker/compose.yml", "-f", "docker/compose.sala.yml"]
         r = subprocess.run(  # noqa: S603
@@ -405,6 +425,40 @@ def construir_imagem(p: Projeto) -> None:
     )
 
 
+def impressao_do_codigo(pacote: Path = RAIZ / "src" / "mcp_claro") -> dict[str, str]:
+    """sha256 de cada ``.py`` do pacote ``mcp_claro`` deste checkout, pelo caminho dentro do pacote."""
+    return {
+        a.relative_to(pacote).as_posix(): hashlib.sha256(a.read_bytes()).hexdigest()
+        for a in sorted(pacote.rglob("*.py"))
+    }
+
+
+# A mesma conta, dentro da imagem, sobre o pacote instalado (o que o ``mcp-claro`` da imagem roda). ``find_spec`` acha
+# o pacote sem importar.
+IMPRESSAO_NA_IMAGEM = (
+    "import hashlib, importlib.util, json, pathlib\n"
+    "raiz = pathlib.Path(importlib.util.find_spec('mcp_claro').submodule_search_locations[0])\n"
+    "print(json.dumps({a.relative_to(raiz).as_posix(): hashlib.sha256(a.read_bytes()).hexdigest()"
+    " for a in sorted(raiz.rglob('*.py'))}))\n"
+)
+
+
+def conferir_imagem_pronta(p: Projeto) -> None:
+    """Com ``MCP_CLARO_IMAGEM``, a prova so vale se a imagem for deste codigo: compara a impressao dos ``.py`` de
+    ``src/mcp_claro`` com a do pacote dentro da imagem e, se nao baterem, falha antes de subir qualquer coisa. Nao
+    compara as dependencias (``uv.lock``) nem o resto da imagem: so o codigo do MCP-CLARO."""
+    aqui, na_imagem = impressao_do_codigo(), p.impressao_da_imagem()
+    if na_imagem == aqui:
+        return
+    diferentes = sorted(nome for nome in aqui.keys() | na_imagem.keys() if aqui.get(nome) != na_imagem.get(nome))
+    pytest.fail(
+        f"MCP_CLARO_IMAGEM={p.imagem} nao foi feita deste codigo: {len(diferentes)} arquivo(s) de src/mcp_claro"
+        f" diferem ({', '.join(diferentes[:10])}{', ...' if len(diferentes) > 10 else ''}). Para provar este codigo,"
+        " construa a imagem de novo ou tire MCP_CLARO_IMAGEM (a prova constroi uma imagem so desta rodada).",
+        pytrace=False,
+    )
+
+
 def _ha_docker() -> bool:
     return shutil.which("docker") is not None
 
@@ -412,16 +466,18 @@ def _ha_docker() -> bool:
 def montar_projeto(
     *, fabrica: Callable[[Path, str, str], Projeto] = Projeto, ha_docker: Callable[[], bool] = _ha_docker
 ) -> Iterator[Projeto]:
-    """Monta o projeto da prova, constroi a imagem (salvo se ``MCP_CLARO_IMAGEM`` apontar uma pronta) e sobe a sala e
-    o despachante; no fim, derruba tudo. E o proprio fixture ``projeto`` (logo abaixo), sem nada no meio: os testes de
-    construir ou pular rodam este caminho com um projeto falso (``fabrica``), e um pulo posto aqui no lugar de
-    ``construir_imagem`` faz esses testes falharem."""
+    """Monta o projeto da prova, constroi a imagem (salvo se ``MCP_CLARO_IMAGEM`` apontar uma pronta, que precisa ser
+    deste codigo: ``conferir_imagem_pronta``) e sobe a sala e o despachante; no fim, derruba tudo. E o proprio
+    fixture ``projeto`` (logo abaixo), sem nada no meio: os testes de construir ou pular rodam este caminho com um
+    projeto falso (``fabrica``), e um pulo posto aqui no lugar de ``construir_imagem`` faz esses testes falharem."""
     if not ha_docker():
         pytest.skip("sem Docker")
     pronta = os.environ.get("MCP_CLARO_IMAGEM")
     raiz = Path(tempfile.mkdtemp(prefix="mcp-claro-sala-"))
     p = fabrica(raiz, f"mcpclarosala{uuid.uuid4().hex[:8]}", pronta or f"mcp-claro:sala-{uuid.uuid4().hex[:8]}")
     try:
+        if pronta:
+            conferir_imagem_pronta(p)
         p.preparar()
         if not pronta:
             construir_imagem(p)
@@ -445,6 +501,11 @@ def _mais_um(rede: str, deslocamento: int) -> str:
     partes = [int(x) for x in base.split(".")]
     numero = (partes[0] << 24 | partes[1] << 16 | partes[2] << 8 | partes[3]) + deslocamento
     return ".".join(str((numero >> s) & 255) for s in (24, 16, 8, 0))
+
+
+def test_a_imagem_da_prova_e_deste_codigo(projeto: Projeto) -> None:
+    """A imagem que a prova sobe (construida aqui ou a de ``MCP_CLARO_IMAGEM``) tem o mesmo codigo do checkout."""
+    assert projeto.impressao_da_imagem() == impressao_do_codigo()
 
 
 def test_de_dentro_da_sala_nada_alem_do_despachante_e_da_internet(projeto: Projeto) -> None:
@@ -1061,9 +1122,15 @@ class _ProjetoFalso(Projeto):
         self.chamadas: list[tuple[str, ...]] = []
         self.preparado = False
         self.imagem_apagada = False
+        self.impressao: dict[str, str] | None = None  # None: a imagem e deste codigo
+        self.imagem_lida = False
 
     def preparar(self) -> None:
         self.preparado = True
+
+    def impressao_da_imagem(self) -> dict[str, str]:
+        self.imagem_lida = True
+        return impressao_do_codigo() if self.impressao is None else self.impressao
 
     def apagar_imagem(self) -> None:
         self.imagem_apagada = True
@@ -1409,6 +1476,50 @@ def test_fixture_com_imagem_pronta_nao_constroi_nem_apaga_a_imagem(monkeypatch: 
     assert falso.imagem == "mcp-claro:pronta"
     assert falso.chamadas == [("up", "-d", "--wait", "despachante", "visitas"), ("down", "-v", "--remove-orphans")]
     assert not falso.imagem_apagada
+
+
+def test_fixture_com_imagem_pronta_le_o_codigo_dela(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_ci_ou_nao(monkeypatch, "true")
+    monkeypatch.setenv("MCP_CLARO_IMAGEM", "mcp-claro:pronta")
+    falso = _ProjetoFalso(0)
+    assert _desfecho_do_fixture(falso) == ("segue", "")
+    assert falso.imagem_lida
+
+
+@pytest.mark.parametrize("caso", ["arquivo_mudado", "arquivo_a_mais", "arquivo_a_menos"])
+def test_fixture_com_imagem_pronta_de_outro_codigo_falha_antes_de_subir(
+    monkeypatch: pytest.MonkeyPatch, caso: str
+) -> None:
+    """R6c-8: ``MCP_CLARO_IMAGEM`` com uma imagem feita de outro codigo nao vale como prova deste: falha com uma frase
+    clara, antes de subir qualquer coisa, e nao apaga a imagem de quem a fez."""
+    _no_ci_ou_nao(monkeypatch, None)
+    monkeypatch.setenv("MCP_CLARO_IMAGEM", "mcp-claro:velha")
+    aqui = impressao_do_codigo()
+    primeiro = sorted(aqui)[0]
+    outra = dict(aqui)
+    if caso == "arquivo_mudado":
+        outra[primeiro] = "0" * 64
+    elif caso == "arquivo_a_mais":
+        outra["visitas/novo.py"] = "0" * 64
+    else:
+        del outra[primeiro]
+    falso = _ProjetoFalso(0)
+    falso.impressao = outra
+    desfecho, texto = _desfecho_do_fixture(falso)
+    assert desfecho == "falhou", texto
+    assert texto.startswith("MCP_CLARO_IMAGEM=mcp-claro:velha nao foi feita deste codigo:"), texto
+    assert ("visitas/novo.py" if caso == "arquivo_a_mais" else primeiro) in texto
+    assert "construa a imagem de novo ou tire MCP_CLARO_IMAGEM" in texto
+    assert falso.chamadas == [("down", "-v", "--remove-orphans")]  # nada subiu
+    assert not falso.imagem_apagada
+
+
+def test_impressao_do_codigo_cobre_os_py_do_pacote() -> None:
+    impressao = impressao_do_codigo()
+    assert "__init__.py" in impressao
+    assert "visitas/app.py" in impressao
+    assert all(nome.endswith(".py") for nome in impressao)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", valor) for valor in impressao.values())
 
 
 def test_fixture_sem_docker_pula_sem_montar_nada(monkeypatch: pytest.MonkeyPatch) -> None:

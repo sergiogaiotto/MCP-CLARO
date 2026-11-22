@@ -17,6 +17,11 @@ filhos ja iniciados e sem dado nenhum (``PRONTOS``), cada um para uma chamada so
 - devolve o status e os bytes que o filho escreveu, sem ler nem conferir (o despachante confere o contrato);
 - erro inesperado do filho (saiu sem resposta, resposta fora do formato, prazo da sala esgotado): 500, que o
   despachante le como duvida;
+- espera uma vaga (``MAX_CHAMADAS``, de todos os terceiros juntos) no maximo ``PRAZO_VAGA``. Sem vaga, responde 200
+  com o corpo de "nao enviado" da rota e a excecao ``sala_sem_vaga`` (``_SEM_VAGA``), e nada vai a um filho: um
+  terceiro lento que ocupa as vagas nao deixa em duvida a chamada a outro, que nem saiu (contrato K7). Essa resposta,
+  e so ela, leva o cabecalho ``sala_contrato.CABECALHO_DA_SALA``: o filho escreve so o status e o corpo, e nao
+  consegue imita-la (o despachante nao conta a sala cheia contra o servidor nas declaracoes, critica A5);
 - se o despachante desiste da conexao, o filho daquela chamada e morto na hora;
 - cria todos os filhos numa thread so (``CRIADORA``), aberta em ``Sala.ligada()`` e fechada no fim: o
   ``PR_SET_PDEATHSIG`` do filho vale pela thread que o criou, nao pelo processo, e um filho criado numa thread do
@@ -57,6 +62,7 @@ from mcp_claro.visitas import filho
 ROTAS: Final = (sala_contrato.ROTA_CHAMAR, sala_contrato.ROTA_LISTAR, sala_contrato.ROTA_SONDAR)
 PRONTOS: Final = 2  # filhos iniciados, sem dado nenhum, a espera de uma chamada cada
 MAX_CHAMADAS: Final = 32  # chamadas ao mesmo tempo, cada uma no seu processo
+PRAZO_VAGA: Final = 2.0  # segundos que uma chamada espera uma vaga; sem vaga, "nao enviado" (sala_sem_vaga)
 TETO_CHAMADA: Final = 660.0  # segundos: o maior prazo do contrato (600) com folga; nenhum filho vive mais que isso
 TETO_RESPOSTA: Final = 3 + sala_contrato.TETO_SALTO  # status e corpo que o filho escreve
 TETO_ESPERA_FIM: Final = 5.0
@@ -75,6 +81,19 @@ _FORA_DO_CONTRATO: Final = {
     ).para_json(),
     sala_contrato.ROTA_SONDAR: sala_contrato.RespostaSondar(
         desfecho="inalcancavel", motivo=sala_contrato.MOTIVO_PEDIDO_FORA, excecao=sala_contrato.PEDIDO_FORA_DO_CONTRATO
+    ).para_json(),
+}
+
+# Sala cheia (contrato K7): a resposta de "nao enviado" de cada rota, sem nada ir a um filho.
+_SEM_VAGA: Final = {
+    sala_contrato.ROTA_CHAMAR: sala_contrato.RespostaChamar(
+        tipo="nao_enviado", excecao=sala_contrato.SALA_SEM_VAGA
+    ).para_json(),
+    sala_contrato.ROTA_LISTAR: sala_contrato.RespostaListar(
+        tipo="nao_enviado", excecao=sala_contrato.SALA_SEM_VAGA
+    ).para_json(),
+    sala_contrato.ROTA_SONDAR: sala_contrato.RespostaSondar(
+        desfecho="inalcancavel", motivo=sala_contrato.MOTIVO_SALA_SEM_VAGA, excecao=sala_contrato.SALA_SEM_VAGA
     ).para_json(),
 }
 
@@ -160,7 +179,8 @@ class _Filho:
 class Atendimento:
     status: int
     corpo: bytes
-    desfecho: str  # filho, filho_nao_isolou, filho_sem_resposta, filho_resposta_invalida, prazo
+    desfecho: str  # filho, filho_nao_isolou, filho_sem_resposta, filho_resposta_invalida, prazo, sem_vaga
+    marca: str | None = None  # so o pai: o valor de ``CABECALHO_DA_SALA`` (sala cheia)
 
 
 class _NaoIsolou(Exception):
@@ -186,6 +206,7 @@ class Sala:
         prontos: int = PRONTOS,
         max_chamadas: int = MAX_CHAMADAS,
         teto_chamada: float = TETO_CHAMADA,
+        prazo_vaga: float = PRAZO_VAGA,
     ) -> None:
         # O ambiente que vale e o da sala, nunca um campo do pedido; enderecos locais so em desenvolvimento.
         self.ambiente = str(p.APP_ENV)
@@ -197,6 +218,7 @@ class Sala:
         self._prontos: collections.deque[_Filho] = collections.deque()
         self._max_chamadas = max_chamadas
         self._vagas: anyio.Semaphore | None = None
+        self._prazo_vaga = prazo_vaga
         self._teto_chamada = teto_chamada
         self._tarefas: anyio.abc.TaskGroup | None = None
         self._criadora: ThreadPoolExecutor | None = None
@@ -287,10 +309,18 @@ class Sala:
                     await anyio.to_thread.run_sync(criadora.shutdown)
 
     async def atender(self, rota: str, corpo: bytes) -> Atendimento:
-        """Um filho por chamada. O corpo devolvido e o que o filho escreveu, sem leitura."""
+        """Um filho por chamada. O corpo devolvido e o que o filho escreveu, sem leitura.
+
+        A vaga e esperada no maximo ``prazo_vaga``. Sem vaga, 200 com o "nao enviado" da rota (``_SEM_VAGA``): nada
+        foi a um filho nem ao terceiro, e o despachante le "nao enviado", e nao a duvida do prazo dele."""
         if self._vagas is None or self._criadora is None:
             raise RuntimeError("a sala de visitas so atende ligada (Sala.ligada)")
-        async with self._vagas:
+        # Cancelada a espera, o semaforo do anyio devolve a vaga que tivesse acabado de dar: nenhuma fica presa.
+        with anyio.move_on_after(self._prazo_vaga) as espera:
+            await self._vagas.acquire()
+        if espera.cancelled_caught:
+            return Atendimento(200, _SEM_VAGA[rota], "sem_vaga", marca=sala_contrato.SALA_SEM_VAGA)
+        try:
             filhos: list[_Filho] = []
             try:
                 await self._pegar(filhos)
@@ -307,6 +337,8 @@ class Sala:
                 with anyio.CancelScope(shield=True):
                     for usado in filhos:
                         await anyio.to_thread.run_sync(usado.encerrar)
+        finally:
+            self._vagas.release()
         if not mensagem:  # o filho saiu sem escrever (erro inesperado, ou morto)
             return Atendimento(500, _ERRO, "filho_sem_resposta" if mensagem is not None else "filho_resposta_invalida")
         status = _status(mensagem)
@@ -386,7 +418,9 @@ def criar_app_visitas(p: Parametros, *, sala: Sala | None = None) -> Starlette:
             desfecho=atendimento.desfecho,
             duracao_ms=duracao_ms,
         )
-        return Response(atendimento.corpo, status_code=atendimento.status, media_type=_JSON)
+        # O cabecalho e do pai, nunca do filho (que so escreve status e corpo).
+        cabecalhos = {sala_contrato.CABECALHO_DA_SALA: atendimento.marca} if atendimento.marca else None
+        return Response(atendimento.corpo, status_code=atendimento.status, media_type=_JSON, headers=cabecalhos)
 
     @asynccontextmanager
     async def ciclo(_: Starlette) -> AsyncIterator[None]:

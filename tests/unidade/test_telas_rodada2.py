@@ -416,6 +416,10 @@ def test_criar_trava_a_revisao_antes_de_ler_as_escolhas(monkeypatch: pytest.Monk
     async def travar(_: Any, ferramenta_id: uuid.UUID) -> None:
         passos.append(("trava", ferramenta_id))
 
+    async def revisao(_: Any, ferramenta_id: uuid.UUID) -> None:
+        passos.append(("revisao", ferramenta_id))
+        return None
+
     async def escolhas(*_: Any) -> list[Any]:
         passos.append("escolhas")
         return []
@@ -427,6 +431,7 @@ def test_criar_trava_a_revisao_antes_de_ler_as_escolhas(monkeypatch: pytest.Monk
         return Response(status_code=status)
 
     monkeypatch.setattr(t, "formulario", formulario)
+    monkeypatch.setattr(consultas, "revisao_por_id", revisao)
     monkeypatch.setattr(consultas, "travar_revisao", travar)
     monkeypatch.setattr(consultas, "ferramentas_de_acao", escolhas)
     monkeypatch.setattr(limites.politica, "varios", maximos)
@@ -434,7 +439,7 @@ def test_criar_trava_a_revisao_antes_de_ler_as_escolhas(monkeypatch: pytest.Monk
     monkeypatch.setattr(telas, "_pagina_novo", pagina)
     r = asyncio.run(telas.criar(_pedido()))
     assert r.status_code == 400  # a escolha nao esta na lista (vazia aqui)
-    assert passos == ([("trava", ferramenta), "escolhas"] if valida else ["escolhas"])
+    assert passos == ([("revisao", ferramenta), ("trava", ferramenta), "escolhas"] if valida else ["escolhas"])
 
 
 # --- T4: aviso a cada passkey cadastrada ou desativada ---

@@ -36,6 +36,9 @@ Fase 3 (servidores de terceiros):
   valem (as acoes vao para a ficha): a tela diz ate que horas, se nenhum sinal novo chegar (``Alerta.ate``).
 - Limite suspenso pela quarentena do servidor (``saida.quarentena.MOTIVO_LIMITE``) aparece com o motivo, com
   acento, e o que fazer: criar outro depois da nova revisao.
+- Criar toma, antes de ler a vitrine, a trava consultiva do sistema, compartilhada (``travar_sistema``), a mesma
+  que a quarentena toma exclusiva: ou a quarentena entra antes (e a acao sai da lista), ou ela espera o COMMIT e
+  suspende o limite novo. Nenhum limite nasce ativo num servidor em quarentena.
 """
 
 from __future__ import annotations
@@ -49,7 +52,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from urllib.parse import urlencode
 
-from sqlalchemy import Row
+from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -58,7 +61,7 @@ from starlette.routing import BaseRoute, Route
 from mcp_claro.logs import logger
 from mcp_claro.regras import politica, sinais
 from mcp_claro.regras.escondidos import marcar_escondidos
-from mcp_claro.saida import fila
+from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.protocolo import FUSO, canonico
 from mcp_claro.telas import consultas, passkeys
@@ -366,6 +369,14 @@ class Limite:
         return self.de_terceiro and bool(self.linha.sem_revisao)
 
 
+async def travar_sistema(c: AsyncConnection, sistema_id: uuid.UUID) -> None:
+    """Trava consultiva compartilhada do sistema ate o fim da transacao que cria o limite: a mesma chave que a
+    quarentena (``saida.quarentena.por_em_quarentena``) toma exclusiva. Varias telas criam limites ao mesmo tempo;
+    a quarentena espera todas."""
+    for chave in travas.chaves_do_alcance("sistema", sistema_id=sistema_id):
+        await c.execute(text("SELECT pg_advisory_xact_lock_shared(:k)"), {"k": chave})
+
+
 async def cancelar_liberadas(c: AsyncConnection, limite_id: uuid.UUID, motivo: str, *, quem: str) -> int:
     """Na transacao que encerra o limite: cancela o que ele liberou e ainda espera a hora de sair.
 
@@ -580,10 +591,16 @@ class TelasDeLimites:
         status = 400
         criado: uuid.UUID | None = None
         async with self.t.engine.begin() as c:
-            # Primeiro a trava da versao revisada escolhida: os campos de destinatario lidos aqui valem ate o
-            # COMMIT, e uma revisao do ADMIN que os mude espera (ou ja terminou, e a escolha antiga sai da lista).
             ferramenta_id = ferramenta_da_escolha(f.texto("escolha"))
             if ferramenta_id is not None:
+                # Primeiro a trava consultiva do sistema, compartilhada (a ordem da porta de saida: as consultivas
+                # antes das linhas). A quarentena toma a mesma, exclusiva: ou ela entrou antes, e a acao ja nao esta
+                # na lista, ou ela espera este COMMIT e suspende o limite novo (R6b-2).
+                revisao = await consultas.revisao_por_id(c, ferramenta_id)
+                if revisao is not None:
+                    await travar_sistema(c, uuid.UUID(str(revisao.sistema_id)))
+                # Depois a trava da versao revisada escolhida: os campos de destinatario lidos aqui valem ate o
+                # COMMIT, e uma revisao do ADMIN que os mude espera (ou ja terminou, e a escolha antiga sai da lista).
                 await consultas.travar_revisao(c, ferramenta_id)
             escolhas = {e.chave: e for e in await self._escolhas(c, sessao)}
             maximo_dia, maximo_dias = await self._maximos(c)

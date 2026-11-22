@@ -65,7 +65,7 @@ target-version = "py314"
 src = ["src", "tests", "exemplos"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "BLE", "RUF", "SIM", "PT", "TRY"]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "BLE", "RUF", "SIM", "PT", "TRY", "PLE2502"]
 ignore = [
   "TRY003",  # mensagens legiveis em portugues ficam na propria excecao
   "RUF001", "RUF002", "RUF003",  # acentos em textos e comentarios em portugues

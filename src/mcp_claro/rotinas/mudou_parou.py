@@ -421,5 +421,14 @@ async def conferir_sistemas(
     return resultado
 
 
-conferir_sistemas_proprios = conferir_sistemas
-"""Apelido de antes da Fase 3: a rodada inteira (proprios e terceiros revisados)."""
+INTERVALO_PADRAO: Final = 900.0
+"""Segundos entre as rodadas do mudou-parou quando quem chama nao diz: o padrao de ``TOOL_DRIFT_CHECK_SECONDS`` e de
+``ConfigRotinas.intervalo_mudou_parou`` (um teste confere que os tres batem)."""
+
+
+async def conferir_sistemas_proprios(
+    engine: AsyncEngine, fonte: FonteDeclaracoes, emails_admin: Sequence[str], *, intervalo: float = INTERVALO_PADRAO
+) -> ResultadoMudouParou:
+    """Apelido de antes da Fase 3, com a chamada da Fase 2 (``engine, fonte, emails_admin``): a rodada inteira de
+    ``conferir_sistemas`` (proprios e terceiros revisados). Sem ``intervalo``, vale ``INTERVALO_PADRAO``."""
+    return await conferir_sistemas(engine, fonte, emails_admin, intervalo=intervalo)

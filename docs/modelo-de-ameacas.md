@@ -48,6 +48,7 @@ ou não. Nenhuma delas é garantia: cada uma reduz o que um servidor mal-intenci
 | O servidor fica sabendo de quem chama ou cruza rastros | Sem `traceparent`, `tracestate` e `baggage`, nem nos cabeçalhos nem no corpo, com ou sem rastros ligados; na conversa MCP, nome e versão genéricos (`mcp-claro`); cookies recusados. A troca de chave (OAuth) ainda leva a versão do produto ([veja abaixo](#o-despachante-e-a-troca-de-chave-dos-terceiros)) | `ligacao/cliente.py` |
 | A chave de um terceiro é usada para abrir chaves dos próprios, ou o contrário | Chave Transit própria dos terceiros (`mcp-claro-chaves-terceiros`, `derived`), escolhida pela origem do sistema e conferida na partida do despachante | `despachante/cifra_origem.py` |
 | O ADMIN, ou alguém com acesso ao banco, troca o endereço depois de guardar as chaves | Num terceiro, o endereço não muda depois do cadastro, e a configuração de autorização só passa de vazia a preenchida; depois, só cadastrando o servidor de novo. Assim, as chaves já guardadas não seguem para um endereço cadastrado depois. O nome do servidor continua dependendo do DNS e do certificado do fornecedor (veja a janela de DNS em "O que fica, de propósito") | Migração 0006 (`sistemas_guarda`), `despachante/autorizacao.py` |
+| Um terceiro manda a pessoa à página de autorização de outro sistema, com o pedido dele (mistura de servidores de autorização), para trocar o código dela no endereço de troca dele | Cada servidor de terceiros tem um endereço de volta só dele (`/telas/autorizar/<id>/volta`). A volta que chega pelo endereço de outro sistema, ou a de um terceiro pela volta dos próprios, é recusada (`estado_de_outro_sistema`) antes de abrir o segredo do cliente, decifrar o verificador ou trocar o código: nada vai a ninguém. A defesa conta com o servidor de autorização de cada sistema aceitar só o endereço de volta que tem cadastrado (RFC 6749, 3.1.2) e não cobre a mistura entre dois sistemas próprios, que dividem a mesma volta. O `iss` na volta (RFC 9207) ainda não é conferido | `despachante/autorizacao.py`, `telas/autorizar.py` |
 | O esquema do fornecedor trava a CPU da entrada | Num terceiro, a entrada não roda as regras de formato (`pattern`) do fornecedor nem compara listas item a item; o esquema tem tetos de tamanho e de profundidade, e cada conferência tem um orçamento de passos ([decisões, "Mudanças deliberadas da Fase 3"](decisoes.md#mudanças-deliberadas-da-fase-3-21112026)) | `cadastro/esquema.py`, `entrada/argumentos.py` |
 
 ### O despachante e a troca de chave dos terceiros
@@ -61,6 +62,13 @@ todas as chaves, recebe e lê a resposta desse endereço do terceiro. E, nessa t
 nome e a versão do MCP-CLARO (cabeçalho `User-Agent`, `mcp-claro/` e a versão): o endereço de troca do terceiro fica
 sabendo qual versão do produto roda. A conversa MCP, pela sala, vai com nome e versão genéricos.
 
+O teto de tempo da troca: a troca inteira tem um prazo total de 15 s (abrir a conexão, mandar o pedido e ler a
+resposta inteira), e a renovação espera no máximo 3 s pela vez de outra renovação da mesma pessoa no mesmo sistema.
+Antes, o prazo valia para cada pedaço da resposta, e um endereço de troca que mandasse um byte de cada vez prendia a
+porta de saída por horas. O que fica: cada ação de um terceiro com o endereço de troca de chave lento ainda pode
+ocupar a porta única de saída por até 15 s da troca, mais a espera da vez e a conferência do endereço (até 3 s
+cada). Nesse tempo, nenhuma outra ação sai, de nenhum sistema.
+
 A página de autorização do próprio terceiro abre no navegador da pessoa, fora do MCP-CLARO. Ela pode pedir senha:
 isso é do terceiro, não do gateway.
 
@@ -71,7 +79,14 @@ dados daquela chamada (a chave do terceiro já aberta, os argumentos e o endere�
 do despachante, entrega ao filho e devolve o que o filho escreveu, sem interpretar bytes do terceiro. Assim, um
 terceiro que tome um filho só vê a própria chamada. Para a chamada não esperar o filho carregar, a sala deixa 2
 filhos já iniciados e sem dado nenhum, e atende até 32 chamadas ao mesmo tempo (`visitas/app.py`, `PRONTOS` e
-`MAX_CHAMADAS`).
+`MAX_CHAMADAS`). As vagas são de todos os terceiros juntos. Com as 32 vagas ocupadas por mais de 2 s, a chamada
+seguinte não sai ("não saiu"), sem ficar em dúvida: nada vai a um filho. Terceiros lentos que ocupem as vagas podem,
+assim, fazer chamadas a outros terceiros não saírem (negação de serviço, não leitura); a pessoa pode pedir de novo.
+Na conferência do mudou-parou, a sala cheia dita pelo processo pai (com um cabeçalho que o filho não consegue
+escrever) é falha do MCP-CLARO e não conta contra o servidor; o mesmo corpo escrito por um filho tomado, sem o
+cabeçalho, conta como o servidor que não entregou. Com a sala cheia em toda rodada, nenhuma conferência de terceiro é
+feita (contador `sala_sem_vaga`, `onde=declaracoes`). Isso vale também para o terceiro lento que ocupa as vagas:
+enquanto a sala estiver cheia, a mudança dele não é vista; a vitrine continua só com o que foi revisado.
 
 Como cada filho se fecha antes de receber o pedido:
 
@@ -95,7 +110,9 @@ menos; a partida de um filho fica parecida, com mediana entre 0,70 e 0,83 s de r
 partidas.
 
 A sala também não guarda segredo nenhum além do próprio certificado: a partida dela recusa variáveis `DATABASE_*`,
-`DB_*`, `VAULT_*` e qualquer outro arquivo de segredo (`*_FILE`). Cada filho herda esse ambiente sem segredos.
+`DB_*`, `VAULT_*` e qualquer outro arquivo de segredo (`*_FILE`), e recusa subir sem `APP_ENV` escrito no ambiente
+dela (sem ele, subiria como desenvolvimento e aceitaria endereços locais). Cada filho herda esse ambiente sem
+segredos.
 
 **Sala sem Landlock (decisão do dono).** A sala sobe mesmo num núcleo sem Landlock (núcleo antigo ou com o Landlock
 desligado): ela não recusa a partida, e o log de partida diz a versão do Landlock (`landlock=0` quer dizer sem
@@ -137,11 +154,18 @@ Se o dono quiser, a partida em piloto e produção pode passar a recusar núcleo
   certificado válido para esse nome recebe as chaves.
 - A chave do terceiro passa aberta do despachante à sala, só pelo mTLS da rede `visitas`, e vive só no processo
   daquela chamada.
+- Um endereço de troca de chave lento ocupa a porta de saída: cada ação de um terceiro assim pode segurar a porta
+  única por até 15 s da troca, mais a espera da vez e a conferência do endereço, e nesse tempo nenhuma outra ação sai
+  ([decisões, "Riscos aceitos da Fase 3"](decisoes.md#riscos-aceitos-da-fase-3)).
 - "Não saiu" forjável por um terceiro (risco aceito, em
   [decisões, "Riscos aceitos da Fase 3"](decisoes.md#riscos-aceitos-da-fase-3)). Todo status ou código que vira
   "não saiu" pode ser forjado por um terceiro que executou a ação e respondeu assim: 401, 403 e 3xx no último
   status, e os códigos -32601, -32602, -32600, -32700 e -32021. Nesse caso, um pedido igual sai de novo, só para
-  esse mesmo terceiro, sem alcance a outros sistemas. Vale igual para sistema próprio desde a Fase 2.
+  esse mesmo terceiro, sem alcance a outros sistemas. Vale igual para sistema próprio desde a Fase 2. Na sala, um
+  filho tomado pelo terceiro pode escrever, depois de chamar o terceiro, qualquer resposta "nada enviado" do
+  contrato, também a de sala cheia, com o mesmo alcance.
+- Sala cheia em toda conferência: enquanto durar, nenhuma conferência de terceiro é feita, nem a do terceiro lento
+  que ocupa as vagas (risco aceito, em [decisões, "Riscos aceitos da Fase 3"](decisoes.md#riscos-aceitos-da-fase-3)).
 - Alarme falso dos três sinais: quem lê e-mail o dia todo fica quase sempre sem limite. E o teto de confirmações é
   por aplicativo, somando todas as pessoas: fichas do alerta de poucas pessoas podem pausar o aplicativo para
   todos. Os dois se medem no piloto; o dono pode trocar para teto por pessoa e aplicativo.

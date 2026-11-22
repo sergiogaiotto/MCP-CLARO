@@ -384,6 +384,17 @@ FRASES: Final[dict[str, Frase]] = {
             "O sistema {sistema} pediu {pedidos} no meio da leitura em {ferramenta}, pelo programa {programa},"
             " responsavel {responsavel}; o MCP-CLARO recusou e nao repassou o pedido.",
         ),
+        # Pedido barrado fora de uma chamada (contrato K4): sem pessoa, so as categorias em dados.pedidos.
+        Frase(
+            "declaracoes_sistema_pediu_dados",
+            "O sistema {sistema} pediu {pedidos} no meio da leitura das ferramentas; o MCP-CLARO recusou e nao"
+            " repassou o pedido.",
+        ),
+        Frase(
+            "sondagem_sistema_pediu_dados",
+            "O sistema {sistema} pediu {pedidos} no meio da sondagem de versao; o MCP-CLARO recusou e nao repassou o"
+            " pedido.",
+        ),
         Frase(
             "tres_sinais",
             "Alerta dos tres sinais no protocolo {protocolo}: o aplicativo leu texto de fora em {de_fora} e viu dados"
