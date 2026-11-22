@@ -657,8 +657,13 @@ async def _esperando(m: Mundo, pid: int) -> None:
 async def _ordem_oposta(m: Mundo, a: uuid.UUID, b: uuid.UUID) -> tuple[uuid.UUID, uuid.UUID]:
     """(primeiro no disco, segundo no disco), com o primeiro no disco de ``id`` maior: quem trava pela ordem do disco
     (o UPDATE sem ordem) e quem trava em ordem de ``id`` (a quarentena) comecam por limites diferentes. Regrava a
-    linha que esta antes no disco (vai para o fim) ate ficar assim."""
-    for _ in range(5):
+    linha que esta antes no disco ate ficar assim.
+
+    A linha regravada vai para o fim so quando a pagina nao tem lugar livre antes. No banco da sessao, que outros
+    testes ja usaram, o PostgreSQL reaproveita lugares livres do comeco da pagina (cada regravacao gasta um deles, e
+    o lugar que ela deixa so volta a valer depois de um VACUUM): por isso as tentativas sao muitas, e nao 5, que uma
+    vez nao bastaram na suite inteira. Cada tentativa e uma transacao curta."""
+    for _ in range(300):
         async with m.dono.begin() as c:
             linhas = (
                 (await c.execute(text("SELECT id FROM limites WHERE id = ANY(:i) ORDER BY ctid"), {"i": [a, b]}))
