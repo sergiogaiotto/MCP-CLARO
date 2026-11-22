@@ -413,6 +413,94 @@ FRASES: Final[dict[str, Frase]] = {
             "sala_fora",
             "A sala de visitas nao esta disponivel; nada foi enviado ao servidor de terceiros {sistema}.",
         ),
+        # Fase 4: selos de nivel 2 e 3. Nenhuma frase leva o numero da operacao, texto, identificador ou hora vindos
+        # do sistema: so nomes do cadastro, protocolo, niveis, datas do gateway e o vocabulario do contrato do selo.
+        Frase(
+            "admin_selo_declaracao_salva",
+            "Declaracao de teste do selo do sistema {sistema} salva por {quem} (versao {versao}); a bateria so escreve"
+            " no alvo declarado, e so se ele se declarar de teste.",
+        ),
+        Frase("admin_selo_teste_pedido", "Teste de selo nivel {nivel} do sistema {sistema} pedido por {quem}."),
+        Frase(
+            "selo_testado",
+            "Teste de selo nivel {nivel} do sistema {sistema}: aprovado pelo criterio do MCP-CLARO; o sistema fica no"
+            " nivel {nivel} ate {vale_ate}.",
+        ),
+        Frase(
+            "selo_nao_aprovado",
+            "Teste de selo nivel {nivel} do sistema {sistema}: nao aprovado pelo criterio do MCP-CLARO, {falhas} casos"
+            " falharam ou ficaram sem teste; o sistema fica no nivel 1.",
+        ),
+        Frase(
+            "selo_teste_interrompido",
+            "Teste de selo do sistema {sistema} interrompido: {motivo}; nada mudou no selo.",
+        ),
+        Frase("selo_retirado", "Selo do sistema {sistema} retirado: {motivo}; o sistema volta ao nivel 1."),
+        Frase(
+            "selo_a_vencer", "O selo de nivel {nivel} do sistema {sistema} vence em {vale_ate}; o ADMIN foi avisado."
+        ),
+        Frase(
+            "sistema_informou",
+            "O sistema {sistema} informou sobre o protocolo {protocolo}: {estado}. E o que o sistema diz; o MCP-CLARO"
+            " nao confere do lado de la.",
+        ),
+        Frase(
+            "sistema_nao_respondeu_consulta",
+            "O sistema {sistema} nao respondeu a consulta sobre o protocolo {protocolo}; a decisao fica com a pessoa.",
+        ),
+        Frase(
+            "sistema_fora_consulta",
+            "O MCP-CLARO nao perguntou ao sistema {sistema} sobre o protocolo {protocolo}: {motivo}; a decisao fica"
+            " com a pessoa.",
+        ),
+        Frase(
+            "consulta_nao_feita",
+            "O MCP-CLARO nao conseguiu perguntar ao sistema {sistema} sobre o protocolo {protocolo}: {motivo}. A falha"
+            " e do MCP-CLARO, nao do sistema.",
+        ),
+        Frase(
+            "sistema_informou_no_bloqueio",
+            "Depois do bloqueio, o sistema {sistema} informou sobre o protocolo {protocolo}: {estado}. E o que o"
+            " sistema diz.",
+        ),
+        Frase(
+            "aviso_bloqueio_sem_resposta",
+            "O sistema {sistema} nao respondeu ao aviso do bloqueio; o comprovante fica sem o que ele informaria.",
+        ),
+        Frase(
+            "aviso_bloqueio_sistema_fora",
+            "O MCP-CLARO nao avisou o sistema {sistema} do bloqueio: {motivo}; o comprovante fica sem o que ele"
+            " informaria.",
+        ),
+        Frase(
+            "aviso_bloqueio_dispensado",
+            "O bloqueio acabou antes de a porta de saida abrir; o MCP-CLARO nao avisou o sistema {sistema}.",
+        ),
+        Frase(
+            "acao_enviada_mesmo_numero",
+            "Acao {ferramenta} enviada uma vez ao sistema com o mesmo numero do protocolo {original}; protocolo"
+            " {protocolo}.",
+        ),
+        Frase(
+            "acao_enviada_sem_numero",
+            "Acao {ferramenta} enviada uma vez ao sistema sem o numero do selo, porque o MCP-CLARO nao conseguiu"
+            " grava-lo; protocolo {protocolo}. Se a resposta se perder, a decisao fica com a pessoa.",
+        ),
+        Frase(
+            "acao_enviada_selo_menor",
+            "Acao {ferramenta} enviada uma vez ao sistema no nivel {nivel}, abaixo do nivel {nivel_ficha} da ficha,"
+            " porque o selo do sistema mudou depois; protocolo {protocolo}.",
+        ),
+        Frase(
+            "sistema_se_contradisse",
+            "O sistema {sistema} deu respostas que nao combinam sobre o protocolo {protocolo}; o selo dele foi"
+            " retirado.",
+        ),
+        Frase(
+            "sistema_contradito",
+            "O que a pessoa registrou sobre o protocolo {protocolo} difere do que o sistema {sistema} informou; o ADMIN"
+            " foi avisado.",
+        ),
     )
 }
 
@@ -461,6 +549,45 @@ AVISOS_ADMIN: Final[dict[str, AvisoAdmin]] = {
 }
 
 
+# Fase 4: avisos ao ADMIN sobre os selos (nenhum aviso novo as pessoas: so o extrato). Ficam a parte dos da Fase 3,
+# que sao os dos servidores de terceiros; ``aviso_admin`` procura nos dois.
+AVISOS_ADMIN_SELO: Final[dict[str, AvisoAdmin]] = {
+    a.evento: a
+    for a in (
+        AvisoAdmin(
+            "selo_a_vencer",
+            "MCP-CLARO: selo de sistema perto de vencer",
+            "O selo de nivel {nivel} do sistema {sistema} vence em {dias} dias ({vale_ate}). Sem um teste novo"
+            " aprovado, o sistema volta ao nivel 1 quando o selo vencer. Para pedir o teste, abra o sistema nas telas"
+            " do ADMIN.",
+        ),
+        AvisoAdmin(
+            "selo_nao_aprovado",
+            "MCP-CLARO: teste de selo nao aprovado",
+            "O teste de selo nivel {nivel} do sistema {sistema} nao foi aprovado pelo criterio do MCP-CLARO: {falhas}"
+            " casos falharam ou ficaram sem teste. O sistema fica no nivel 1. O relatorio do teste esta na pagina do"
+            " sistema, nas telas do ADMIN.",
+        ),
+        AvisoAdmin(
+            "selo_retirado",
+            "MCP-CLARO: selo de sistema retirado",
+            "O selo do sistema {sistema} foi retirado: {motivo}. O sistema volta ao nivel 1: o MCP-CLARO deixa de"
+            " mandar o numero da operacao e de perguntar a ele o que houve. Para voltar a um nivel maior, peca um"
+            " teste novo nas telas do ADMIN.",
+        ),
+        AvisoAdmin(
+            "sistema_contradito",
+            "MCP-CLARO: uma pessoa registrou o contrario do que um sistema informou",
+            "Uma pessoa registrou sobre o protocolo {protocolo} o contrario do que o sistema {sistema} informou. O"
+            " selo continua, porque a pessoa pode ter se enganado. Veja o extrato do protocolo e decida, nas telas do"
+            " ADMIN, se retira o selo.",
+        ),
+    )
+}
+if set(AVISOS_ADMIN) & set(AVISOS_ADMIN_SELO):  # pragma: no cover - conferido pelo teste das frases
+    raise RuntimeError("Evento de aviso ao ADMIN repetido entre a Fase 3 e a Fase 4")
+
+
 class FraseDesconhecida(KeyError):
     pass
 
@@ -480,10 +607,9 @@ def frase(tipo: str, **campos: object) -> str:
 
 def aviso_admin(evento: str, **campos: object) -> tuple[str, str]:
     """Assunto e texto de um aviso ao ADMIN, exigindo exatamente os campos do texto."""
-    try:
-        a = AVISOS_ADMIN[evento]
-    except KeyError as erro:
-        raise FraseDesconhecida(evento) from erro
+    a = AVISOS_ADMIN.get(evento) or AVISOS_ADMIN_SELO.get(evento)
+    if a is None:
+        raise FraseDesconhecida(evento)
     faltam = a.campos() - campos.keys()
     sobram = campos.keys() - a.campos()
     if faltam or sobram:

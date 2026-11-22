@@ -125,3 +125,70 @@ def test_frases_do_extrato_dos_avisos_da_fase_3() -> None:
         modelo = FRASES[tipo].modelo.lower()
         for proibida in ("token", "senha", "argumento", "resultado", "e-mail", "cpf"):
             assert proibida not in modelo, (tipo, proibida)
+
+
+# --- Fase 4: avisos ao ADMIN sobre os selos (desenho 7.4) ----------------------------------------------------
+
+AVISOS_FASE4 = {
+    "selo_a_vencer": (
+        "MCP-CLARO: selo de sistema perto de vencer",
+        {"nivel": 2, "sistema": "Cobranca", "dias": 14, "vale_ate": "20/02/2027"},
+    ),
+    "selo_nao_aprovado": ("MCP-CLARO: teste de selo nao aprovado", {"nivel": 3, "sistema": "Cobranca", "falhas": 4}),
+    "selo_retirado": (
+        "MCP-CLARO: selo de sistema retirado",
+        {"sistema": "Cobranca", "motivo": "o sistema nao respondeu a 3 consultas seguidas"},
+    ),
+    "sistema_contradito": (
+        "MCP-CLARO: uma pessoa registrou o contrario do que um sistema informou",
+        {"sistema": "Cobranca", "protocolo": "CLR-2026-00000007"},
+    ),
+}
+
+TEXTOS_AVISOS_FASE4 = {
+    "selo_a_vencer": (
+        "O selo de nivel 2 do sistema Cobranca vence em 14 dias (20/02/2027). Sem um teste novo aprovado, o sistema"
+        " volta ao nivel 1 quando o selo vencer. Para pedir o teste, abra o sistema nas telas do ADMIN."
+    ),
+    "selo_nao_aprovado": (
+        "O teste de selo nivel 3 do sistema Cobranca nao foi aprovado pelo criterio do MCP-CLARO: 4 casos falharam ou"
+        " ficaram sem teste. O sistema fica no nivel 1. O relatorio do teste esta na pagina do sistema, nas telas do"
+        " ADMIN."
+    ),
+    "selo_retirado": (
+        "O selo do sistema Cobranca foi retirado: o sistema nao respondeu a 3 consultas seguidas. O sistema volta ao"
+        " nivel 1: o MCP-CLARO deixa de mandar o numero da operacao e de perguntar a ele o que houve. Para voltar a"
+        " um nivel maior, peca um teste novo nas telas do ADMIN."
+    ),
+    "sistema_contradito": (
+        "Uma pessoa registrou sobre o protocolo CLR-2026-00000007 o contrario do que o sistema Cobranca informou. O"
+        " selo continua, porque a pessoa pode ter se enganado. Veja o extrato do protocolo e decida, nas telas do"
+        " ADMIN, se retira o selo."
+    ),
+}
+
+
+def test_avisos_da_fase_4_com_assunto_fixo_texto_e_campos_exatos() -> None:
+    import pytest
+
+    from mcp_claro.extrato.frases import AVISOS_ADMIN, AVISOS_ADMIN_SELO, aviso_admin
+
+    assert set(AVISOS_ADMIN_SELO) == set(AVISOS_FASE4) == set(TEXTOS_AVISOS_FASE4)
+    assert not set(AVISOS_ADMIN) & set(AVISOS_ADMIN_SELO)
+    for evento, (assunto, campos) in AVISOS_FASE4.items():
+        assert AVISOS_ADMIN_SELO[evento].campos() == set(campos)
+        assert aviso_admin(evento, **campos) == (assunto, TEXTOS_AVISOS_FASE4[evento])
+        assert (assunto + TEXTOS_AVISOS_FASE4[evento]).isascii()
+        with pytest.raises(ValueError, match="faltam"):
+            aviso_admin(evento)
+        with pytest.raises(ValueError, match="sobram"):
+            aviso_admin(evento, **campos, extra=1)
+
+
+def test_avisos_da_fase_4_sem_segredo_promessa_nem_o_nome_do_rascunho() -> None:
+    from mcp_claro.extrato.frases import AVISOS_ADMIN_SELO
+
+    for evento, a in AVISOS_ADMIN_SELO.items():
+        texto = (a.assunto + " " + a.texto).lower()
+        for proibida in ("token", "senha", "garant", "certificado", "aprovado no", "mws", "write-safety", "://"):
+            assert proibida not in texto, (evento, proibida)

@@ -243,12 +243,15 @@ async def banco_0005(banco_migrado: Parametros) -> AsyncIterator[tuple[Parametro
         await no_servidor(banco_migrado, f"DROP DATABASE IF EXISTS {nome} WITH (FORCE)")
 
 
-async def test_a_cabeca_e_a_0006(dono: AsyncEngine) -> None:
+async def test_a_0006_esta_na_cadeia_e_o_banco_na_cabeca(dono: AsyncEngine) -> None:
+    """A 0006 segue a 0005 e e seguida pela 0007 (Fase 4); o banco dos testes esta na cabeca."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    assert ScriptDirectory.from_config(Config(str(RAIZ / "alembic.ini"))).get_current_head() == "0006"
-    assert await fazer(dono, "SELECT version_num FROM alembic_version") == "0006"
+    roteiro = ScriptDirectory.from_config(Config(str(RAIZ / "alembic.ini")))
+    assert roteiro.get_revision("0006").down_revision == "0005"
+    assert roteiro.get_revision("0007").down_revision == "0006"
+    assert await fazer(dono, "SELECT version_num FROM alembic_version") == roteiro.get_current_head()
 
 
 def test_downgrade_levanta_erro() -> None:
@@ -326,7 +329,7 @@ async def test_migracao_sobre_dados_da_fase_2(banco_0005: tuple[Parametros, Asyn
     situacoes = await fazer(engine, "SELECT array_agg(situacao ORDER BY nome) FROM sistemas WHERE nome LIKE 'buraco-%'")
     assert situacoes == ["pendente", "ativo", "pendente"]
 
-    await asyncio.to_thread(migrar, q, "head")
+    await asyncio.to_thread(migrar, q, "0006")
     assert await fazer(engine, "SELECT version_num FROM alembic_version") == "0006"
 
     # Dados da Fase 2 inteiros; colunas novas vazias; a revisada antiga de terceiro igual as novas.
@@ -386,11 +389,11 @@ async def test_migracao_para_com_terceiro_antigo_de_chave_de_programa(
         " 'terceiro', 'programa')",
     )
     with pytest.raises(Exception, match="Servidores de terceiros com chave de programa: robo-de-fora"):
-        await asyncio.to_thread(migrar, q, "head")
+        await asyncio.to_thread(migrar, q, "0006")
     assert await fazer(engine, "SELECT version_num FROM alembic_version") == "0005"
     # Com o tipo de chave trocado, a migracao passa.
     await fazer(engine, "UPDATE sistemas SET tipo_chave = 'compartilhada' WHERE nome = 'robo-de-fora'")
-    await asyncio.to_thread(migrar, q, "head")
+    await asyncio.to_thread(migrar, q, "0006")
     assert await fazer(engine, "SELECT version_num FROM alembic_version") == "0006"
 
 

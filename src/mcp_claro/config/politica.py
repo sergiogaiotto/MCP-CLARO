@@ -40,6 +40,7 @@ POLITICA: Final[dict[str, ValorPolitica]] = {
         ValorPolitica("THREE_SIGNALS_WINDOW_MINUTES", 240, 5, 10080, "Janela dos tres sinais"),
         ValorPolitica("DUPLICATE_WINDOW_MINUTES", 30, 1, 1440, "Intervalo de pedido igual"),
         ValorPolitica("BADGE_TTL_DAYS", 90, 1, 365, "Validade de um selo de nivel 2 ou 3"),
+        ValorPolitica("BADGE_WARN_DAYS", 14, 1, 90, "Aviso ao ADMIN antes de o selo de nivel 2 ou 3 vencer"),
         ValorPolitica("LEDGER_RETENTION_DAYS", 730, 30, 3650, "Guarda do extrato"),
         ValorPolitica("READS_CAP_PER_DAY", 200, 1, 100000, "Catraca: leituras por ordem por dia"),
         ValorPolitica("ALLOWANCE_MAX_PER_DAY", 5, 1, 1000, "Teto diario de um limite por aproximacao"),
@@ -50,6 +51,16 @@ POLITICA: Final[dict[str, ValorPolitica]] = {
 
 def valor_inicial(chave: str) -> int:
     return POLITICA[chave].inicial
+
+
+def dias_de_aviso_do_selo(validade_dias: int, aviso_dias: int) -> int:
+    """Dias antes de ``vale_ate`` em que o ADMIN recebe o aviso do selo a vencer.
+
+    ``BADGE_WARN_DAYS`` vale menos que ``BADGE_TTL_DAYS``: um aviso maior que a validade sairia no dia do teste. Com
+    os dois na politica vigente, vale o menor entre o aviso e a validade menos um dia (0: sem aviso antes, so na
+    validade de 1 dia).
+    """
+    return max(0, min(aviso_dias, validade_dias - 1))
 
 
 def nunca_mais_frouxo(chave: str, padrao: int, proposto: int) -> int:

@@ -7,7 +7,7 @@ def test_valores_iniciais_do_plano() -> None:
     assert valor_inicial("CARD_TTL_MINUTES") == 30
     assert valor_inicial("OUTBOX_HOLD_SECONDS") == 60
     assert valor_inicial("READS_CAP_PER_DAY") == 200
-    assert len(POLITICA) == 15
+    assert len(POLITICA) == 16
 
 
 def test_limites() -> None:
