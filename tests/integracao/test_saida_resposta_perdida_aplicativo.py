@@ -38,7 +38,7 @@ from sqlalchemy import text
 
 from mcp_claro.saida.estados import Estado
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
-from tests.apoio import porta_livre
+from tests.apoio import porta_livre, soltar
 from tests.cortador import Cortador, cortador
 from tests.integracao.test_autorizacao import Ambiente
 from tests.integracao.test_saida import ambiente_de_acoes, chamadas, confirmar, esperar_estado, meta, operacao, politica
@@ -274,8 +274,9 @@ async def toxiproxy(destino: str) -> AsyncIterator[tuple[str, httpx2.AsyncClient
     """Sobe o Toxiproxy na rede da maquina, com um proxy na frente de ``destino``. Devolve (url do proxy, API)."""
     docker = shutil.which("docker")
     assert docker is not None
-    api, escuta = porta_livre(), porta_livre()
+    api, escuta = porta_livre(), porta_livre()  # reservadas; cada uma e solta logo antes do Toxiproxy abrir
     nome = f"mcp-claro-toxiproxy-{uuid.uuid4().hex[:8]}"
+    soltar(api)
     await asyncio.to_thread(
         subprocess.run,
         [
@@ -303,6 +304,7 @@ async def toxiproxy(destino: str) -> AsyncIterator[tuple[str, httpx2.AsyncClient
                         break
                 await asyncio.sleep(0.1)
             sem_esquema = destino.split("://", 1)[-1].split("/", 1)[0]
+            soltar(escuta)
             r = await http.post(
                 "/proxies",
                 json={"name": "entrada", "listen": f"127.0.0.1:{escuta}", "upstream": sem_esquema, "enabled": True},

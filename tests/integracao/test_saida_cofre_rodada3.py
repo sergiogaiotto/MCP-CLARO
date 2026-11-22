@@ -149,7 +149,9 @@ async def test_cofre_trancado_fecha_a_saida_e_destravado_reabre_e_a_acao_sai_uma
             pedidos, aplicativo = await pedidos_de(amb)
             f = await vitrine(amb)
             with pytest.raises(AcaoRecusada) as recusa:
-                await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Novo com cofre {marca}"}, None))
+                await pedidos.pedir(
+                    Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Novo com cofre {marca}"}, None, terceiros=False)
+                )
             assert recusa.value.motivo == "saida_fechada"
             # Aviso ao ADMIN, uma vez, sem nada do cofre alem do motivo.
             fechou = await avisos(amb, email)

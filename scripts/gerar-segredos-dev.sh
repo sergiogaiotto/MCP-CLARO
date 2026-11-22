@@ -41,6 +41,7 @@ done
 #   entrada     <- portao      (ca_clientes_entrada)
 #   despachante <- entrada     (ca_clientes_despachante)
 #   rotinas     <- grafana     (ca_clientes_rotinas)
+#   visitas     <- despachante (ca_clientes_visitas, mais abaixo, com a ca_visitas)
 nova_autoridade() {
   [ -s "$DEST/$1.pem" ] && return 0
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 365 -subj "/CN=MCP-CLARO $1 (teste)" \
@@ -76,6 +77,27 @@ emitir_cliente ca_clientes_despachante rotinas_cliente
 emitir_cliente ca_clientes_entrada entrada_saude
 emitir_cliente ca_clientes_despachante despachante_saude
 emitir_cliente ca_clientes_rotinas rotinas_saude
+
+# Sala de visitas (critica M4). A chave da sala fica no conteiner exposto aos servidores de terceiros, por isso o
+# certificado dela sai de uma autoridade propria (ca_visitas), so serverAuth: nem o cofre nem as portas internas
+# (que aceitam a ca_interna e as ca_clientes_*) aceitam esse certificado. O despachante confia so na ca_visitas para
+# falar com a sala. Sem certificado de saude: a ca_clientes_visitas so emite o certificado do despachante.
+#   visitas <- despachante (ca_clientes_visitas)
+emitir_servidor() {
+  local ca=$1 nome=$2
+  [ -s "$DEST/${nome}_cert.pem" ] && return 0
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$nome" \
+    -keyout "$DEST/${nome}_key.pem" -out "$DEST/${nome}.csr" 2>/dev/null
+  printf "subjectAltName=DNS:%s,DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\nkeyUsage=critical,digitalSignature,keyAgreement\nbasicConstraints=critical,CA:FALSE\nauthorityKeyIdentifier=keyid\nsubjectKeyIdentifier=hash\n" "$nome" \
+    > "$DEST/${nome}.ext"
+  openssl x509 -req -in "$DEST/${nome}.csr" -CA "$DEST/$ca.pem" -CAkey "$DEST/${ca}_key.pem" -CAcreateserial \
+    -days 90 -extfile "$DEST/${nome}.ext" -out "$DEST/${nome}_cert.pem" 2>/dev/null
+  rm -f "$DEST/${nome}.csr" "$DEST/${nome}.ext"
+}
+nova_autoridade ca_visitas
+nova_autoridade ca_clientes_visitas
+emitir_servidor ca_visitas visitas
+emitir_cliente ca_clientes_visitas despachante_visitas_cliente
 
 chmod 644 "$DEST"/*  # a pasta fica 700; os conteineres leem como usuarios sem privilegio
 echo "Segredos de desenvolvimento em $DEST/ (fora do Git)."

@@ -68,9 +68,11 @@ groups:
               editorMode: code
               format: table
               rawQuery: true
+              # Servidor de terceiros recusado (motivo cadastro_terceiro) nao dispara este alerta alto (D30): fica
+              # no painel "Servidores de terceiros" e no resumo semanal.
               rawSql: |
                 SELECT coalesce(sum(contagem), 0)::float8 AS valor FROM medicoes.v_recusas_versao_sistema
-                WHERE minuto >= now() - interval '1 hour'
+                WHERE minuto >= now() - interval '1 hour' AND motivo <> 'cadastro_terceiro'
           - refId: C
             datasourceUid: __expr__
             model:
@@ -87,8 +89,9 @@ groups:
           assunto: versao
         annotations:
           summary: >-
-            Um sistema conectado passou a falar outra versao do MCP e foi recusado. As ferramentas dele ficam
-            fora ate o sistema voltar a falar a 2026-07-28.
+            Um sistema proprio conectado passou a falar outra versao do MCP e foi recusado. As ferramentas dele
+            ficam fora ate o sistema voltar a falar a 2026-07-28. Servidores de terceiros recusados nao entram aqui:
+            veja o painel "Servidores de terceiros".
 
       - uid: mcp-claro-crachas-recusados-subindo
         title: Crachas recusados subindo

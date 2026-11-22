@@ -271,6 +271,8 @@ async def subir_arranjo(banco: Parametros, pasta: Path, *, portao: Portao | None
     ``banco`` aponta para o PostgreSQL ja migrado, com o usuario dono do esquema (o das migracoes).
     """
     senhas = await _ligar_usuarios_dos_papeis(banco, pasta)
+    # Portas reservadas ate cada servidor() abrir. Nenhuma vai a outro programa: o portao (Caddy) so conecta na
+    # porta da entrada, e a entrada noutro endereco (ponte do Docker) solta a reserva dentro de servidor().
     porta_idp, porta_desp, porta_entrada, porta_proxy = (porta_livre() for _ in range(4))
     idp = IdpFalso(emissor=f"http://127.0.0.1:{porta_idp}/realms/mcp-claro")
     comum: dict[str, Any] = {

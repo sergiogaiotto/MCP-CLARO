@@ -1,4 +1,4 @@
-"""Os quatro papeis da mesma imagem: entrada, despachante, rotinas e vigia."""
+"""Os cinco papeis da mesma imagem: entrada, despachante, rotinas, vigia e visitas (a sala de visitas)."""
 
 from __future__ import annotations
 
@@ -10,3 +10,4 @@ class Papel(enum.StrEnum):
     DESPACHANTE = "despachante"
     ROTINAS = "rotinas"
     VIGIA = "vigia"
+    VISITAS = "visitas"

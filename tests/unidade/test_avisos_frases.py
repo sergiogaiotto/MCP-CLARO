@@ -34,3 +34,94 @@ def test_frases_novas_sem_segredo_nem_conteudo() -> None:
         modelo = FRASES[tipo].modelo.lower()
         for proibida in ("token", "senha", "argumento", "resultado", "e-mail", "cpf"):
             assert proibida not in modelo, (tipo, proibida)
+
+
+# --- Fase 3: avisos ao ADMIN (por e-mail e webhook) ----------------------------------------------------------
+
+AVISOS_FASE3 = {
+    "sistema_em_quarentena": (
+        "MCP-CLARO: servidor de terceiros em quarentena (mudou, parou)",
+        {"sistema": "Fornecedor CRM", "quantas": 2},
+    ),
+    "sistema_em_quarentena_sem_resposta": (
+        "MCP-CLARO: servidor de terceiros em quarentena (nao respondeu a conferencia)",
+        {"sistema": "Fornecedor CRM", "rodadas": 2},
+    ),
+    "sistema_em_quarentena_revisao_inconsistente": (
+        "MCP-CLARO: servidor de terceiros em quarentena (revisao que nao confere)",
+        {"sistema": "Fornecedor CRM"},
+    ),
+}
+
+# O texto inteiro de cada aviso, com os campos de AVISOS_FASE3. A quarentena cancela o que esperava e suspende os
+# limites das pessoas com o servidor (critica M2).
+TEXTOS_AVISOS_FASE3 = {
+    "sistema_em_quarentena": (
+        "O servidor de terceiros Fornecedor CRM mudou 2 ferramentas (mudadas, novas ou sumidas) depois da revisao do"
+        " servidor. Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi cancelado e os"
+        " limites das pessoas com ele foram suspensos. Para voltar, leia as ferramentas, revise as que mudaram e"
+        " conclua a revisao do servidor nas telas do ADMIN."
+    ),
+    "sistema_em_quarentena_sem_resposta": (
+        "O servidor de terceiros Fornecedor CRM nao respondeu a conferencia do mudou-parou em 2 rodadas seguidas. Ele"
+        " entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi cancelado e os limites das"
+        " pessoas com ele foram suspensos. Confira o servidor com o fornecedor; depois, leia as ferramentas e conclua"
+        " a revisao do servidor nas telas do ADMIN."
+    ),
+    "sistema_em_quarentena_revisao_inconsistente": (
+        "A revisao do servidor de terceiros Fornecedor CRM guardada no MCP-CLARO nao confere com a lista de"
+        " ferramentas dela. Ele entrou em quarentena: nada dele chega as pessoas, o que esperava para sair foi"
+        " cancelado e os limites das pessoas com ele foram suspensos. Leia as ferramentas e conclua a revisao do"
+        " servidor de novo nas telas do ADMIN; se acontecer outra vez, fale com a equipe do MCP-CLARO."
+    ),
+}
+
+
+def test_textos_dos_avisos_da_fase_3() -> None:
+    from mcp_claro.extrato.frases import aviso_admin
+
+    assert set(TEXTOS_AVISOS_FASE3) == set(AVISOS_FASE3)
+    for evento, (assunto, campos) in AVISOS_FASE3.items():
+        assert aviso_admin(evento, **campos) == (assunto, TEXTOS_AVISOS_FASE3[evento])
+
+
+def test_avisos_da_fase_3_tem_assunto_fixo_e_campos_exatos() -> None:
+    import pytest
+
+    from mcp_claro.extrato.frases import AVISOS_ADMIN, FraseDesconhecida, aviso_admin
+
+    assert set(AVISOS_ADMIN) == set(AVISOS_FASE3)
+    for evento, (assunto, campos) in AVISOS_FASE3.items():
+        assert AVISOS_ADMIN[evento].campos() == set(campos)
+        recebido, texto = aviso_admin(evento, **campos)
+        assert recebido == assunto
+        for valor in campos.values():
+            assert str(valor) in texto
+        assert (assunto + texto).isascii()
+        with pytest.raises(ValueError, match="faltam"):
+            aviso_admin(evento)
+        with pytest.raises(ValueError, match="sobram"):
+            aviso_admin(evento, **campos, extra=1)
+    with pytest.raises(FraseDesconhecida):
+        aviso_admin("nao_existe")
+
+
+def test_avisos_da_fase_3_sem_segredo_nem_promessa() -> None:
+    from mcp_claro.extrato.frases import AVISOS_ADMIN
+
+    for evento, a in AVISOS_ADMIN.items():
+        texto = (a.assunto + " " + a.texto).lower()
+        for proibida in ("token", "senha", "argumento", "resultado", "garant", "://"):
+            assert proibida not in texto, (evento, proibida)
+    # O aviso de quarentena diz "mudou, parou" e o caminho de volta, como o extrato.
+    assert "mudou, parou" in AVISOS_ADMIN["sistema_em_quarentena"].assunto
+    assert "conclua a revisao do servidor" in AVISOS_ADMIN["sistema_em_quarentena"].texto
+
+
+def test_frases_do_extrato_dos_avisos_da_fase_3() -> None:
+    assert "mudou, parou" in frase("sistema_em_quarentena", sistema="CRM")
+    assert "2 rodadas seguidas" in frase("sistema_em_quarentena_sem_resposta", sistema="CRM", rodadas=2)
+    for tipo in ("sistema_em_quarentena", "sistema_em_quarentena_sem_resposta", "sistema_saiu_da_quarentena"):
+        modelo = FRASES[tipo].modelo.lower()
+        for proibida in ("token", "senha", "argumento", "resultado", "e-mail", "cpf"):
+            assert proibida not in modelo, (tipo, proibida)

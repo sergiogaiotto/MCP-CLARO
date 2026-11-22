@@ -15,14 +15,17 @@ Leia primeiro: [proposta](docs/proposta.md), [plano](docs/plano.md), [decisões]
 
 ## Como roda
 
-Uma imagem, quatro papéis, escolhidos pelo comando de partida:
+Uma imagem, cinco papéis, escolhidos pelo comando de partida:
 
 | Papel | O que faz |
 | --- | --- |
 | `entrada` | Porteiro de versão, crachá, vitrine, regras e telas |
-| `despachante` | Único que fala com os sistemas e abre as chaves |
+| `despachante` | Único que abre as chaves. Fala com os sistemas próprios, com a sala de visitas e com a troca de chave (OAuth) dos servidores de terceiros |
+| `visitas` | Sala de visitas (Fase 3): a única que fala MCP com servidores de terceiros, sem banco e sem cofre, cada chamada num processo novo |
 | `rotinas` | Ronda das portas, vencimentos, avisos, fechamento e resumos |
 | `vigia` | Na segunda máquina: ronda de fora, alarme de silêncio e guarda do fechamento |
+
+Para ligar um servidor de terceiros, o ADMIN segue o roteiro [Ligar um servidor de terceiros](docs/terceiros.md).
 
 ## Começar em desenvolvimento
 
@@ -87,8 +90,9 @@ uv run mcp-claro conferir
 
 A partida recusa combinações inválidas: versão do MCP diferente de 2026-07-28, `EDGE_MODE=apigee`, banco sem
 `verify-full` em piloto ou produção, fases ligadas fora de ordem, ações de programas ligadas
-(`PROGRAM_ACTIONS_ENABLED`, decisão 9), entre outras. A lista completa está em
-`src/mcp_claro/config/settings.py` e no [plano](docs/plano.md#parâmetros).
+(`PROGRAM_ACTIONS_ENABLED`, decisão 9), servidores de terceiros ligados (`FEATURE_PHASE3_THIRD_PARTY`, até a decisão
+do dono) e, fora de desenvolvimento e teste, sala de visitas sem endereço https (`VISITS_INTERNAL_URL`), entre
+outras. A lista completa está em `src/mcp_claro/config/settings.py` e no [plano](docs/plano.md#parâmetros).
 
 ## Organização
 

@@ -603,7 +603,9 @@ async def test_admin_cadastra_sistema_da_geracao_antiga_e_ve_a_recusa_legivel(am
     nome = f"antigo-{sufixo()}"
     with sistema_geracao_antiga() as url:
         r = await nav.post(
-            "/telas/admin/sistemas", {"nome": nome, "endereco": url, "tipo_chave": "compartilhada"}, csrf=csrf
+            "/telas/admin/sistemas",
+            {"nome": nome, "endereco": url, "tipo_chave": "compartilhada", "origem": "proprio"},
+            csrf=csrf,
         )
     assert r.status_code == 303
     r = await nav.get(r.headers["location"])
@@ -635,7 +637,7 @@ async def test_admin_cadastra_sistema_bom_revisa_ferramenta_e_cria_modelo(amb: A
 
     r = await nav.post(
         "/telas/admin/sistemas",
-        {"nome": f"leitura-{s}", "endereco": "ftp://x", "tipo_chave": "por_pessoa"},
+        {"nome": f"leitura-{s}", "endereco": "ftp://x", "tipo_chave": "por_pessoa", "origem": "proprio"},
         csrf=csrf,
     )
     assert r.status_code == 400
@@ -647,6 +649,7 @@ async def test_admin_cadastra_sistema_bom_revisa_ferramenta_e_cria_modelo(amb: A
             "nome": f"leitura-{s}",
             "endereco": amb.url_sistema,
             "tipo_chave": "por_pessoa",
+            "origem": "proprio",
             "chave_sondagem": "chave-ana",
         },
         csrf=csrf,

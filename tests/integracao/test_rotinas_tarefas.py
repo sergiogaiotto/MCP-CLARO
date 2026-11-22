@@ -22,6 +22,7 @@ from mcp_claro.rotinas.agendador import Agendador, Desfecho, Tarefa
 from mcp_claro.rotinas.fechamento import fechar_agora, fechar_se_devido
 from mcp_claro.rotinas.limpeza import limpar_sessoes
 from mcp_claro.rotinas.medicoes import garantir_particoes, resumir_medicoes
+from mcp_claro.rotinas.ordens import LOTE as LOTE_ORDENS
 from mcp_claro.rotinas.ordens import avisar_ordens_a_vencer, vencer_ordens
 from mcp_claro.rotinas.politica import valor_politica
 from mcp_claro.rotinas.resumo_semanal import resumo_semanal, semana_anterior
@@ -138,6 +139,107 @@ async def test_avisa_uma_vez_antes_de_vencer(engine_rotinas: AsyncEngine, engine
         o=str(perto),
     )
     assert n == 1
+
+
+async def test_ordens_ja_avisadas_que_vencem_antes_nao_seguram_o_aviso_de_uma_nova(
+    engine_rotinas: AsyncEngine, engine_dono: AsyncEngine
+) -> None:
+    """Mais de um lote de ordens ja avisadas, todas vencendo antes, e uma ordem nova: ela e avisada na mesma rodada
+    (a busca deixa as avisadas de fora e segue de lote em lote ate o fim da janela)."""
+    cad = await cadastro_minimo(engine_dono)
+    async with engine_dono.begin() as c:
+        avisadas = [
+            uuid.UUID(str(i))
+            for i in (
+                await c.execute(
+                    text(
+                        "INSERT INTO ordens_servico (pessoa_id, aplicativo_id, modelo_id, inicio, fim, ultimo_uso)"
+                        " SELECT :p, :a, :m, now() - interval '1 day',"
+                        " now() + interval '1 day' + make_interval(secs => n), now() - interval '1 hour'"
+                        " FROM generate_series(1, :n) AS n RETURNING id"
+                    ),
+                    {"p": cad.pessoa_id, "a": cad.aplicativo_id, "m": cad.modelo_id, "n": LOTE_ORDENS + 1},
+                )
+            ).scalars()
+        ]
+        # Ja avisadas numa rodada anterior (e ja enviadas: o envio dos avisos de outros testes nao as ve).
+        await c.execute(
+            text(
+                "INSERT INTO avisos (canal, destino, evento, assunto, corpo, chave_unica, situacao, enviado_em)"
+                " SELECT 'email', :d, 'ordem_a_vencer', 'ja avisada', '{}', 'ordem_a_vencer:' || o::text, 'enviado',"
+                " now() FROM unnest(CAST(:o AS uuid[])) AS o"
+            ),
+            {"d": f"pessoa:{cad.pessoa_id}", "o": avisadas},
+        )
+    try:
+        nova = await ordem(engine_dono, cad, inicio="-1 day", fim="2 days", ultimo_uso="-1 hour")
+        assert await avisar_ordens_a_vencer(engine_rotinas) >= 1
+        assert (
+            await _contar(
+                engine_rotinas, "SELECT count(*) FROM avisos WHERE chave_unica = :k", k=f"ordem_a_vencer:{nova}"
+            )
+            == 1
+        )
+        # As ja avisadas nao ganham outro aviso nem outra linha no extrato.
+        assert (
+            await _contar(engine_rotinas, "SELECT count(*) FROM avisos WHERE destino = :d", d=f"pessoa:{cad.pessoa_id}")
+            == LOTE_ORDENS + 2
+        )
+        assert (
+            await _contar(
+                engine_rotinas,
+                "SELECT count(*) FROM extrato WHERE tipo = 'ordem_a_vencer' AND pessoa_id = :p",
+                p=cad.pessoa_id,
+            )
+            == 1
+        )
+    finally:
+        async with engine_dono.begin() as c:  # nao pesam nos outros testes da sessao
+            await c.execute(
+                text("UPDATE ordens_servico SET situacao = 'revogada' WHERE pessoa_id = :p"), {"p": cad.pessoa_id}
+            )
+
+
+async def test_mais_de_um_lote_de_ordens_a_avisar_sai_numa_rodada_so(
+    engine_rotinas: AsyncEngine, engine_dono: AsyncEngine
+) -> None:
+    """Mais ordens a avisar que um lote: a rodada segue de lote em lote ate o fim da janela, sem esperar a proxima."""
+    cad = await cadastro_minimo(engine_dono)
+    async with engine_dono.begin() as c:
+        ids = [
+            uuid.UUID(str(i))
+            for i in (
+                await c.execute(
+                    text(
+                        "INSERT INTO ordens_servico (pessoa_id, aplicativo_id, modelo_id, inicio, fim, ultimo_uso)"
+                        " SELECT :p, :a, :m, now() - interval '1 day',"
+                        " now() + interval '1 day' + make_interval(secs => n), now() - interval '1 hour'"
+                        " FROM generate_series(1, :n) AS n RETURNING id"
+                    ),
+                    {"p": cad.pessoa_id, "a": cad.aplicativo_id, "m": cad.modelo_id, "n": LOTE_ORDENS + 1},
+                )
+            ).scalars()
+        ]
+    try:
+        assert await avisar_ordens_a_vencer(engine_rotinas) >= LOTE_ORDENS + 1
+        async with engine_rotinas.connect() as c:
+            avisadas = set(
+                (
+                    await c.execute(
+                        text("SELECT chave_unica FROM avisos WHERE destino = :d"), {"d": f"pessoa:{cad.pessoa_id}"}
+                    )
+                ).scalars()
+            )
+        assert avisadas == {f"ordem_a_vencer:{i}" for i in ids}
+    finally:
+        async with engine_dono.begin() as c:  # nao pesam nos outros testes da sessao (nem o envio dos avisos)
+            await c.execute(
+                text("UPDATE ordens_servico SET situacao = 'revogada' WHERE pessoa_id = :p"), {"p": cad.pessoa_id}
+            )
+            await c.execute(
+                text("UPDATE avisos SET situacao = 'enviado', enviado_em = now() WHERE destino = :d"),
+                {"d": f"pessoa:{cad.pessoa_id}"},
+            )
 
 
 async def test_politica_vigente_muda_o_aviso(engine_rotinas: AsyncEngine, engine_dono: AsyncEngine) -> None:
@@ -372,7 +474,10 @@ async def test_resumo_semanal_do_admin_sem_dado_pessoal(engine_rotinas: AsyncEng
                 "INSERT INTO recusas_versao (minuto, lado, origem, versao_pedida, motivo, contagem) VALUES"
                 " (:m, 'aplicativo', 'app-velho', '2025-11-25', 'initialize', 3),"
                 " (:m, 'sistema', 'sistema-velho', 'geracao-antiga', 'cadastro', 2),"
-                " (:fora, 'aplicativo', 'app-velho', '2025-11-25', 'initialize', 100)"
+                " (:m, 'sistema', 'terceiro-velho', 'geracao-antiga', 'cadastro_terceiro', 4),"
+                " (:m, 'sistema', 'terceiro-velho', '2025-06-18', 'cadastro_terceiro', 1),"
+                " (:fora, 'aplicativo', 'app-velho', '2025-11-25', 'initialize', 100),"
+                " (:fora, 'sistema', 'terceiro-velho', 'geracao-antiga', 'cadastro_terceiro', 100)"
             ),
             {"m": no_meio, "fora": semana.fim + timedelta(hours=2)},
         )
@@ -401,7 +506,10 @@ async def test_resumo_semanal_do_admin_sem_dado_pessoal(engine_rotinas: AsyncEng
     assert corpo is not None
     n = corpo["contagens"]
     assert n["recusas_versao_aplicativos"] == 3
-    assert n["recusas_versao_sistemas"] == 2
+    assert n["recusas_versao_sistemas"] == 2  # so os sistemas proprios
+    assert n["recusas_versao_terceiros"] == 5  # servidores de terceiros a parte (D30)
+    assert "Recusas por versao antiga, lado dos sistemas proprios: 2" in corpo["linhas"]
+    assert "Recusas por versao antiga, servidores de terceiros: 5" in corpo["linhas"]
     assert n["crachas_recusados"] == 5
     assert n["leituras"] == 7
     assert n["leituras_recusadas"] == 3

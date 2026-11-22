@@ -18,4 +18,5 @@ CREATE DATABASE login   OWNER login;
 CREATE DATABASE grafana OWNER grafana;
 REVOKE ALL ON DATABASE cofre, login, grafana FROM PUBLIC;
 GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO mcp_claro_entrada, mcp_claro_despachante, mcp_claro_rotinas, grafana_leitor;
+REVOKE TEMPORARY ON DATABASE ${POSTGRES_DB} FROM PUBLIC;
 SQL

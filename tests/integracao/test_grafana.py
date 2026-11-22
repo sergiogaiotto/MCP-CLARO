@@ -31,7 +31,6 @@ from urllib.parse import urlsplit
 import asyncpg
 import httpx2
 import pytest
-import uvicorn
 import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -40,6 +39,7 @@ from starlette.routing import Route
 
 from mcp_claro.avisos.grafana import ler_alertas, senha_confere
 from mcp_claro.config.settings import Parametros
+from tests.apoio import porta_livre, servidor, soltar
 from tests.conftest import RAIZ
 from tests.integracao.test_continuidade import dsn, executar, migrar, parametros_do_banco
 
@@ -59,12 +59,6 @@ REGRAS = {
     "mcp-claro-recusas-chamada-subindo",
     "mcp-claro-leituras-pararam",
 }
-
-
-def porta_livre() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 # --- Certificados de teste: autoridade interna, autoridade de clientes das rotinas e os certificados ----
@@ -158,7 +152,13 @@ INSERT INTO recusas_versao (minuto, lado, origem, versao_pedida, motivo, contage
   (date_trunc('minute', now()) - interval '10 minutes', 'aplicativo', 'app-antigo', '2025-06-18',
    'versao_nao_aceita', 25),
   (date_trunc('minute', now()) - interval '10 minutes', 'sistema', 'sistema-velho', 'geracao-antiga',
-   'cadastro', 2);
+   'cadastro', 2),
+  (date_trunc('minute', now()) - interval '10 minutes', 'sistema', 'terceiro-velho', 'geracao-antiga',
+   'cadastro_terceiro', 3);
+INSERT INTO sistemas (nome, endereco, origem, tipo_chave, situacao) VALUES
+  ('terceiro-em-quarentena', 'https://t1.exemplo.teste/mcp', 'terceiro', 'por_pessoa', 'quarentena'),
+  ('terceiro-pendente', 'https://t2.exemplo.teste/mcp', 'terceiro', 'compartilhada', 'pendente'),
+  ('proprio-ativo', 'https://p1.exemplo.teste/mcp', 'proprio', 'por_pessoa', 'ativo');
 INSERT INTO medicoes.minuto (minuto, nome, rotulos, valor) VALUES
   (date_trunc('minute', now()) - interval '5 minutes', 'crachas_recusados', '{"motivo": "audiencia"}', 3),
   (date_trunc('minute', now()) - interval '5 minutes', 'leituras', '{"sistema": "agenda"}', 7),
@@ -197,12 +197,14 @@ async def popular(p: Parametros) -> None:
 @dataclass
 class Grafana:
     url: str
-    senha_admin: str
-    senha_webhook: str
+    senha_admin: str = field(repr=False)  # nunca na saida de falha do pytest
+    senha_webhook: str = field(repr=False)
     certificados: Certificados
     porta_webhook: int
     porta: int
     container: Any = field(repr=False)
+    medicoes: Parametros | None = field(default=None, repr=False)
+    """O banco de medicoes deste modulo (o dono), para os testes que mexem nos dados e devolvem no fim."""
 
     def logs(self) -> tuple[bytes, bytes]:
         saida, erros = self.container.get_logs()
@@ -269,6 +271,9 @@ def grafana(banco_migrado: Parametros) -> Iterator[Grafana]:
     for arquivo in segredos.iterdir():
         arquivo.chmod(0o644)
 
+    # As duas portas ficam reservadas (presas e fechadas) desde ja: a do Grafana ate logo antes de o conteiner subir
+    # (quem abre e ele), a do receptor ate ``receptor_das_rotinas`` escutar nela. Outra sessao de testes na mesma
+    # maquina nao as toma enquanto o Grafana fica saudavel (ate 3 minutos).
     porta, porta_webhook = porta_livre(), porta_livre()
     container = nucleo.DockerContainer(IMAGEM)
     for chave, valor in {
@@ -295,12 +300,14 @@ def grafana(banco_migrado: Parametros) -> Iterator[Grafana]:
         cap_drop=["ALL"],
         security_opt=["no-new-privileges:true"],
     )
+    soltar(porta)  # o Grafana (rede do hospedeiro) abre a porta dele
     container.start()
     url = f"https://127.0.0.1:{porta}"
     try:
         _esperar_saude(url, certificados.ca_interna, container)
-        yield Grafana(url, senha_admin, senha_webhook, certificados, porta_webhook, porta, container)
+        yield Grafana(url, senha_admin, senha_webhook, certificados, porta_webhook, porta, container, medicoes)
     finally:
+        soltar(porta_webhook)  # se nenhum receptor subiu nela, a reserva sai aqui
         container.stop()
         shutil.rmtree(pasta, ignore_errors=True)
         asyncio.run(
@@ -403,10 +410,16 @@ async def test_consultas_do_painel_rodam_como_grafana_leitor(grafana: Grafana) -
         assert quadros, f"{titulo}: sem dados"
         totais[titulo] = quadros
     assert totais["Aplicativos recusados por versao"] == [[[25]]]
-    assert totais["Sistemas recusados por versao"] == [[[2]]]
+    # O total da decisao 8 conta todos os sistemas, proprios e de terceiros.
+    assert totais["Sistemas recusados por versao"] == [[[5]]]
     assert totais["Versoes pedidas diferentes"] == [[[2]]]
     serie_por_lado = totais["Recusas por versao, dos dois lados"]
-    assert sum(v for quadro in serie_por_lado for campo in quadro[1:] for v in campo if v) == 27
+    assert sum(v for quadro in serie_por_lado for campo in quadro[1:] for v in campo if v) == 30
+    # Fase 3: o bloco dos servidores de terceiros, lido como grafana_leitor.
+    assert totais["Servidores de terceiros recusados por versao"] == [[[1]]]
+    assert totais["Servidores de terceiros em quarentena agora"] == [[[1]]]
+    ((situacoes, revisados, quantos),) = totais["Servidores de terceiros por situacao"]
+    assert sorted(zip(situacoes, revisados, quantos, strict=True)) == [("pendente", "nao", 1), ("quarentena", "nao", 1)]
 
 
 async def test_grafana_leitor_nao_le_tabelas_nem_escreve(grafana: Grafana) -> None:
@@ -443,7 +456,8 @@ async def test_alertas_provisionados_e_avaliados(grafana: Grafana) -> None:
         for ref, resposta in resultado["results"].items():
             assert "error" not in resposta, f"{regra['uid']} {ref}: {resposta.get('error')}"
         disparam[regra["uid"]] = valores(resultado, regra["condition"])[0][-1][0]
-    # Com os dados do teste: 25 recusas por versao na ultima hora e nenhuma antes; 2 sistemas recusados.
+    # Com os dados do teste: 30 recusas por versao na ultima hora e nenhuma antes; 2 recusas de sistema proprio e 3
+    # de servidor de terceiros.
     assert disparam == {
         "mcp-claro-recusas-versao-subindo": 1,
         "mcp-claro-sistema-recusado-versao": 1,
@@ -451,6 +465,44 @@ async def test_alertas_provisionados_e_avaliados(grafana: Grafana) -> None:
         "mcp-claro-recusas-chamada-subindo": 0,
         "mcp-claro-leituras-pararam": 0,
     }
+
+
+async def _avaliar(g: Grafana, uid: str) -> tuple[Any, Any]:
+    """Valor da consulta (A) e da condicao de uma regra de alerta, avaliadas pelo Grafana como grafana_leitor."""
+    async with g.cliente() as c:
+        regras = (await c.get("/api/v1/provisioning/alert-rules")).json()
+    (regra,) = (r for r in regras if r["uid"] == uid)
+    consultas = []
+    for passo in regra["data"]:
+        modelo = dict(passo["model"])
+        expressao = passo["datasourceUid"] == "__expr__"
+        modelo["datasource"] = {"uid": passo["datasourceUid"], "type": "__expr__"} if expressao else {"uid": FONTE}
+        consultas.append(modelo)
+    resultado = await consultar(g, consultas, "now-25h")
+    for ref, resposta in resultado["results"].items():
+        assert "error" not in resposta, f"{uid} {ref}: {resposta.get('error')}"
+    return valores(resultado, "A")[0][-1][0], valores(resultado, regra["condition"])[0][-1][0]
+
+
+async def test_recusa_de_terceiro_nao_dispara_o_alerta_alto_e_a_de_proprio_dispara(grafana: Grafana) -> None:
+    """D30: so a recusa de sistema proprio (motivo cadastro) dispara "Sistema recusado por versao"; a de servidor
+    de terceiros (cadastro_terceiro) fica no painel. Mexe nos dados do banco deste modulo e devolve no fim."""
+    uid = "mcp-claro-sistema-recusado-versao"
+    assert await _avaliar(grafana, uid) == (2, 1)  # as 3 recusas de terceiro nao contam
+    assert grafana.medicoes is not None
+    conexao = await asyncpg.connect(dsn(grafana.medicoes))
+    try:
+        # So recusas de terceiro na ultima hora (a de proprio vai para 3 horas atras): o alerta alto nao dispara.
+        await conexao.execute(
+            "UPDATE recusas_versao SET minuto = minuto - interval '3 hours' WHERE motivo = 'cadastro'"
+        )
+        assert await _avaliar(grafana, uid) == (0, 0)
+    finally:
+        await conexao.execute(
+            "UPDATE recusas_versao SET minuto = minuto + interval '3 hours' WHERE motivo = 'cadastro'"
+        )
+        await conexao.close()
+    assert await _avaliar(grafana, uid) == (2, 1)
 
 
 def test_arquivo_das_regras_sem_macros_trocadas_pelo_provisionamento() -> None:
@@ -478,31 +530,34 @@ async def receptor_das_rotinas(g: Grafana) -> AsyncIterator[list[dict[str, Any]]
         return JSONResponse({"aceitos": len(alertas_lidos)})
 
     app = Starlette(routes=[Route("/interno/alertas-grafana", alertas, methods=["POST"])])
-    config = uvicorn.Config(
+    # Na porta que o Grafana conhece (reservada pelo fixture): escuta no proprio socket da reserva, e o bloco so
+    # comeca com o receptor no ar.
+    async with servidor(
         app,
-        host="127.0.0.1",
-        port=g.porta_webhook,
-        log_level="warning",
-        lifespan="off",
+        g.porta_webhook,
         ssl_certfile=str(g.certificados.rotinas_cert),
         ssl_keyfile=str(g.certificados.rotinas_chave),
         ssl_ca_certs=str(g.certificados.ca_clientes),
         ssl_cert_reqs=ssl.CERT_REQUIRED,
-    )
-    srv = uvicorn.Server(config)
-    tarefa = asyncio.create_task(srv.serve())
-    for _ in range(200):
-        if srv.started:
-            break
-        await asyncio.sleep(0.02)
-    try:
+    ):
         yield recebidos
-    finally:
-        srv.should_exit = True
-        await tarefa
+
+
+def _outra_sessao_abre(porta: int) -> bool:
+    """Outra sessao de testes na mesma maquina (um uvicorn, com ``SO_REUSEADDR``) consegue abrir ``porta``?"""
+    with socket.socket() as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("127.0.0.1", porta))
+        except OSError:
+            return False
+    return True
 
 
 async def test_webhook_chega_as_rotinas_com_certificado_e_senha(grafana: Grafana) -> None:
+    # A porta do receptor ficou reservada desde o fixture, enquanto o Grafana subia: outra sessao de testes nao a
+    # toma nesse meio tempo (o Grafana manda os alertas para ela), e o receptor sobe nela logo abaixo.
+    assert not _outra_sessao_abre(grafana.porta_webhook)
     caminho = "/apis/notifications.alerting.grafana.app/v1beta1/namespaces/default/receivers"
     async with grafana.cliente() as c:
         receptores = (await c.get(caminho)).json()["items"]

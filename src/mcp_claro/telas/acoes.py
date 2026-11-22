@@ -16,14 +16,33 @@
 - Resultado nao confirmado: a pessoa registra o que apurou (aconteceu, nao aconteceu, nao sei). Nada e
   reenviado.
 
+Fase 3 (servidores de terceiros):
+
+- Resultado de estranhos (servidor de terceiros, ou ferramenta propria marcada "traz texto de fora"): a tela da
+  acao nao mostra o texto (critica A4). Diz que o servidor respondeu e que a resposta foi ao aplicativo marcada
+  como texto de estranhos. So se a pessoa pedir (``?ver=resposta``, atras de um aviso), o texto aparece como foi
+  ao aplicativo por dentro da moldura (``regras.estranhos.limpar_por_dentro``), escapado e sem link. Nem as
+  pendencias, nem a lista, nem o extrato mostram texto de um sistema.
+- A ficha de um terceiro avisa que o servidor e de terceiros; a ficha que nasceu com o alerta dos tres sinais
+  (``Operacao.ficha_sinais``) mostra o cartao do alerta, so com nomes do cadastro e horas de Brasilia.
+- O desfecho aparece com acento (``com_acento``), e os fins novos da porta (resposta funda demais, terceiros
+  desligados, quarentena, pedido fundo demais, sala fora, pedido barrado) ganham uma explicacao para leigo. O
+  desfecho e sempre texto nosso.
+- A acao que a retomada deu como nao confirmada, cujo fim (que chegou depois) foi um "nao saiu" sem envio (sala fora,
+  pedido fundo demais, chave que nao abriu...), nao diz que o pedido saiu uma vez: diz que foi dada como nao
+  confirmada antes de o envio terminar e que, pelo que o MCP-CLARO viu depois, o pedido nao chegou ao sistema
+  (``nao_chegou_depois_da_retomada``). A caixa de pendencias diz o mesmo dessa acao, no grupo "Estamos confirmando".
+
 As mudancas de estado sao todas de ``saida/fila.py``; aqui so se mostra e se pede.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import unicodedata
 import uuid
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -34,7 +53,14 @@ from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
 
 from mcp_claro.logs import logger
-from mcp_claro.regras import estado, politica
+from mcp_claro.regras import estado, estranhos, politica, sinais
+
+# A marca dos caracteres escondidos vem de ``regras/escondidos.py`` (sem copia aqui). Os nomes ficam exportados
+# daqui tambem, para quem ja os usava pelas telas (``paginas.criar_ambiente``, os limites).
+from mcp_claro.regras.escondidos import CATEGORIAS_ESCONDIDAS as CATEGORIAS_ESCONDIDAS
+from mcp_claro.regras.escondidos import ESCONDIDOS_DITOS as ESCONDIDOS_DITOS
+from mcp_claro.regras.escondidos import escondido as escondido
+from mcp_claro.regras.escondidos import marcar_escondidos as marcar_escondidos
 from mcp_claro.saida import fila
 from mcp_claro.saida.estados import FRASE, Estado
 from mcp_claro.saida.fila import DecisaoRecusada, Operacao
@@ -115,10 +141,8 @@ DECISOES: Final[dict[str, str]] = {
 RISCOS: Final[dict[str, str]] = {"baixo": "Risco baixo", "medio": "Risco médio", "alto": "Risco alto"}
 MAXIMO_OBSERVACAO: Final = 500
 SEGUNDOS_ENTRE_ATUALIZACOES: Final = 2
-
-
-def sem_acento(texto: str) -> str:
-    return "".join(ch for ch in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(ch))
+VER_RESPOSTA: Final = "resposta"
+"""``/telas/acoes/{id}?ver=resposta``: a pessoa pediu para ver o texto de estranhos (critica A4)."""
 
 
 def frase_do_estado(estado: Estado) -> str:
@@ -137,59 +161,102 @@ def recusa_legivel(erro: DecisaoRecusada) -> tuple[int, str]:
     return RECUSAS.get(erro.motivo, (409, erro.mensagem))
 
 
-# Caracteres escondidos: os que nao aparecem na tela ou mudam a ordem do texto. O escape do HTML nao mexe neles,
-# e o navegador os obedece (U+202E inverte o que vem depois). Na tela, viram uma marca visivel como [U+202E].
-CATEGORIAS_ESCONDIDAS: Final = frozenset({"Cc", "Cf", "Zl", "Zp", "Co", "Cn"})
-# Os de direcao (bidi) e de largura zero, ditos um a um (ja sao Cf, ficam aqui por clareza): U+061C, U+200B a
-# U+200F, U+202A a U+202E, U+2066 a U+2069. E os que o Unicode chama de letra, marca ou simbolo, mas nao desenham
-# nada ou desenham um branco: os "ignoraveis" do Unicode (preenchedores do hangul U+115F, U+1160, U+3164 e
-# U+FFA0; U+034F, que junta letras; U+17B4 e U+17B5, vogais do khmer que nao aparecem; seletores de variacao,
-# inclusive os do mongol, U+180B a U+180F) e U+2800, o braille em branco.
-ESCONDIDOS_DITOS: Final = frozenset(
-    {
-        0x034F,
-        0x061C,
-        0x115F,
-        0x1160,
-        0x17B4,
-        0x17B5,
-        *range(0x180B, 0x1810),
-        *range(0x200B, 0x2010),
-        *range(0x202A, 0x202F),
-        *range(0x2060, 0x2070),
-        0x2800,
-        0x3164,
-        *range(0xFE00, 0xFE10),
-        0xFEFF,
-        0xFFA0,
-        *range(0xE0000, 0xE1000),
-    }
+# Palavras e trechos das frases nossas (desfechos das acoes, motivos dos limites), escritos sem acento como o
+# extrato, com o acento que a tela poe. So troca a palavra inteira (ou o trecho inteiro), e so por ela mesma com
+# acento: ``sem_acento(com_acento(t)) == sem_acento(t)`` sempre. "esta" e "e" so dentro de trechos, porque
+# sozinhos tambem sao outras palavras ("esta acao", "e" de "e tambem").
+_COM_ACENTO: Final = (
+    "não",
+    "ação",
+    "ações",
+    "revisão",
+    "padrão",
+    "formulário",
+    "níveis",
+    "endereço",
+    "não é público",
+    "código",
+    "conferência",
+    "serviço",
+    "faça",
+    "só",
+    "já",
+    "até",
+    "também",
+    "será",
+    "você",
+    "autorização",
+    "definição",
+    "instalação",
+    "disponível",
+    "inalcançável",
+    "versão",
+    "versões",
+    "responsável",
+    "período",
+    "experiência",
+    "destinatário",
+    "destinatários",
+    "resposta válida",
+    "está trancado",
+    "está bloqueado",
+    "está pausado",
+    "está ativo",
+    "está ativa",
+    "está valendo",
+    "está disponível",
+    "está fechada",
 )
 
 
-def escondido(ch: str) -> bool:
-    """A quebra de linha fica: a tela a mostra como quebra (``white-space: pre-wrap``)."""
-    return ch != "\n" and (ord(ch) in ESCONDIDOS_DITOS or unicodedata.category(ch) in CATEGORIAS_ESCONDIDAS)
+def sem_acento(texto: str) -> str:
+    return "".join(ch for ch in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(ch))
 
 
-def marcar_escondidos(texto: str) -> str:
-    """Troca cada caractere escondido por uma marca visivel, no lugar exato onde ele esta: "12[U+202E]34"."""
-    return "".join(f"[U+{ord(ch):04X}]" if escondido(ch) else ch for ch in texto)
+def _variantes(trecho: str) -> dict[str, str]:
+    return {sem_acento(trecho): trecho, sem_acento(trecho[:1].upper() + trecho[1:]): trecho[:1].upper() + trecho[1:]}
+
+
+_TROCAS: Final[dict[str, str]] = {cru: certo for trecho in _COM_ACENTO for cru, certo in _variantes(trecho).items()}
+# Os trechos maiores primeiro: "nao esta valendo" vira "não está valendo", e nao "não esta valendo".
+_ACHAR: Final = re.compile(r"\b(" + "|".join(re.escape(cru) for cru in sorted(_TROCAS, key=len, reverse=True)) + r")\b")
+
+
+def com_acento(texto: str) -> str:
+    """Uma frase nossa, escrita sem acento (como o extrato), com o acento das palavras que a tela conhece.
+
+    So para texto do MCP-CLARO (desfecho de acao, motivo de limite): nunca para texto de um sistema."""
+    return _ACHAR.sub(lambda m: _TROCAS[m.group(1)], texto)
+
+
+def _cada_texto(valor: Any) -> Iterator[str]:
+    """Cada texto de um valor, com as chaves de objetos e os itens de listas, na ordem em que aparecem.
+
+    Sem recursao: uma pilha explicita. Um valor com milhares de niveis, um dentro do outro (os argumentos ou o
+    resultado guardado de uma acao), nao estoura a pilha do Python na tela."""
+    pilha: list[Any] = [valor]
+    while pilha:
+        atual = pilha.pop()
+        if isinstance(atual, str):
+            yield atual
+        elif isinstance(atual, dict):
+            itens: list[Any] = []
+            for chave, item in atual.items():
+                itens.append(str(chave))
+                itens.append(item)
+            pilha.extend(reversed(itens))
+        elif isinstance(atual, list | tuple):
+            pilha.extend(reversed(atual))
 
 
 def _textos(valor: Any) -> list[str]:
-    """Todos os textos de um valor, com as chaves de objetos e os itens de listas."""
-    if isinstance(valor, str):
-        return [valor]
-    if isinstance(valor, dict):
-        return [t for chave, v in valor.items() for t in (*_textos(str(chave)), *_textos(v))]
-    if isinstance(valor, list | tuple):
-        return [t for v in valor for t in _textos(v)]
-    return []
+    """Todos os textos de um valor, com as chaves de objetos e os itens de listas (sem recursao)."""
+    return list(_cada_texto(valor))
 
 
 def tem_escondidos(valor: Any) -> bool:
-    return any(escondido(ch) for texto in _textos(valor) for ch in texto)
+    """Algum texto do valor (chave ou item, em qualquer nivel) tem caractere escondido? Para no primeiro."""
+    return any(escondido(ch) for texto in _cada_texto(valor) for ch in texto)
 
 
 def valor_legivel(valor: Any) -> str:
@@ -227,6 +294,186 @@ def textos_do_resultado(resultado: dict[str, Any] | None) -> list[str]:
     return [
         b["text"] for b in blocos if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
     ]
+
+
+def textos_de_estranhos(resultado: dict[str, Any] | None) -> list[str]:
+    """O texto da resposta de estranhos (servidor de terceiros ou ferramenta marcada "traz texto de fora"), so para
+    quando a pessoa pede para ver (critica A4): como foi ao aplicativo por dentro da moldura, com CPF e e-mail
+    mascarados, os caracteres escondidos marcados e o comeco de moldura forjado (``[[estranhos``) neutralizado. O
+    escape do HTML fica com o modelo, e nada vira link."""
+    return [estranhos.limpar_por_dentro(t) for t in textos_do_resultado(resultado)]
+
+
+# Explicacao para leigo, alem do desfecho, dos fins que a Fase 3 trouxe (as constantes vem de quem as grava; aqui
+# so as chaves, para nao importar a porta de saida nas telas). O desfecho em si aparece com acento (``com_acento``).
+_EXPLICACOES: Final[dict[str, str]] = {
+    "o sistema respondeu; a resposta tem partes demais umas dentro das outras e o MCP-CLARO nao a guardou": (
+        "A ação saiu uma vez e o sistema respondeu, mas a resposta tinha partes demais umas dentro das outras."
+        " O MCP-CLARO não a guardou e não a mostra. Nada será reenviado: confira no próprio sistema."
+    ),
+    "servidores de terceiros desligados ou servidor sem revisao": (
+        "Os servidores de terceiros estão desligados nesta instalação, ou esta ferramenta não está na revisão do"
+        " servidor que vale agora. Nada chegou ao servidor."
+    ),
+    "o servidor entrou em quarentena (mudou, parou); nada seguiu": (
+        "O servidor mudou depois da revisão do ADMIN e entrou em quarentena. Nada chegou a ele. Depois da nova"
+        " revisão, peça de novo, se ainda precisar."
+    ),
+    "o pedido tem niveis demais, um dentro do outro, para o MCP-CLARO escrever; o pedido nao chegou ao sistema": (
+        "O pedido tinha partes demais umas dentro das outras para o MCP-CLARO escrever. Nada saiu."
+    ),
+    "a sala de visitas nao esta disponivel; o pedido nao chegou ao servidor de terceiros": (
+        "A sala de visitas, por onde o MCP-CLARO fala com servidores de terceiros, não estava disponível. Nada saiu."
+    ),
+    "a sala de visitas estava cheia; nada saiu": (
+        "A sala de visitas, por onde o MCP-CLARO fala com servidores de terceiros, estava cheia: muitas chamadas ao"
+        " mesmo tempo. Nada saiu. Peça de novo em instantes, se ainda precisar."
+    ),
+}
+# O pedido barrado (``saida.despachante._classificar``): ou e o fim inteiro (estado "o sistema pediu mais dados"),
+# ou vem depois do fim, como um rabo: "; antes pediu X e o MCP-CLARO recusou" numa acao enviada (com ou sem
+# resultado guardado) e "; o sistema pediu X e o MCP-CLARO recusou" nos outros fins.
+_PEDIU_NO_MEIO: Final = re.compile(r"^o sistema pediu .+ no meio da acao")
+_PEDIU_NO_FIM: Final = re.compile(r"; (antes|o sistema) pediu .+ e o MCP-CLARO recusou$")
+_EXPLICACAO_PEDIU: Final = (
+    "O MCP-CLARO não repassa a você o que o sistema pede no meio de uma chamada (dados, links, confirmações) e não"
+    " reenvia a ação."
+)
+
+
+def detalhe_do_desfecho(desfecho: str | None) -> tuple[str, str]:
+    """(o desfecho com acento, a explicacao para leigo ou ""). O desfecho e sempre texto nosso: o que o sistema
+    pediu no meio entra so com o nosso vocabulario (``ligacao.ponto.pedidos_legiveis``), nunca texto ou link dele.
+
+    Com o pedido barrado no rabo, a explicacao do fim (por exemplo, a resposta funda demais) vem antes da do
+    pedido: uma nao apaga a outra.
+
+    A resposta que chega depois de a retomada dar a acao como nao confirmada leva a marca
+    ``fila.DEPOIS_DA_RETOMADA`` no fim do desfecho. O rabo e o fim sao procurados sem a marca; o desfecho mostrado
+    continua inteiro, com ela."""
+    if not desfecho:
+        return "", ""
+    sem_marca = desfecho.removesuffix(fila.DEPOIS_DA_RETOMADA)
+    fim, pediu = sem_marca, bool(_PEDIU_NO_MEIO.search(sem_marca))
+    rabo = _PEDIU_NO_FIM.search(sem_marca)
+    if rabo is not None:
+        fim, pediu = sem_marca[: rabo.start()], True
+    partes = [_EXPLICACOES.get(fim, ""), _EXPLICACAO_PEDIU if pediu else ""]
+    return com_acento(desfecho), " ".join(p for p in partes if p)
+
+
+# Os fins de "nao saiu" da porta de saida em que o pedido nem saiu do MCP-CLARO para o sistema: os de
+# ``saida.despachante._NAO_ENVIADO``, o padrao dele (o "nao enviado" sem motivo conhecido) e as chaves que nao abriram
+# (``PortaDeSaida._chave``). Ficam de fora os fins em que o pedido saiu e o sistema recusou (na porta ou antes de
+# executar). Como em ``_EXPLICACOES``, so os textos, sem importar a porta de saida nas telas; o teste
+# ``test_telas_f5a_pessoa`` le os fins do codigo da porta e confere esta lista.
+_NAO_CHEGOU: Final[frozenset[str]] = frozenset(
+    {
+        "a sala de visitas nao esta disponivel; o pedido nao chegou ao servidor de terceiros",
+        "a sala de visitas estava cheia; nada saiu",
+        "o endereco do servidor de terceiros nao e publico ou nao usa https; o pedido nao chegou ao sistema",
+        "o pedido tem niveis demais, um dentro do outro, para o MCP-CLARO escrever; o pedido nao chegou ao sistema",
+        "o pedido nao cabe no contrato da sala de visitas; o pedido nao chegou ao sistema",
+        "o pedido nao chegou ao sistema",
+        "a pessoa ainda nao autorizou o sistema",
+        "a autorizacao no sistema venceu",
+        "nao deu para renovar a chave",
+        "o cofre de chaves esta trancado",
+        "o cofre de chaves nao respondeu",
+        "nao deu para abrir a chave no cofre",
+    }
+)
+
+
+def nao_chegou_depois_da_retomada(desfecho: str | None) -> bool:
+    """A retomada deu a acao como nao confirmada antes de o envio terminar, e o fim que chegou depois (o desfecho
+    com a marca ``fila.DEPOIS_DA_RETOMADA``) diz que o pedido nem saiu do MCP-CLARO (``_NAO_CHEGOU``). O rabo do
+    pedido barrado, se houver, nao muda o fim.
+
+    A tela da acao nao confirmada, nesse caso, nao diz "O pedido saiu uma vez": a explicacao do fim diz "Nada
+    saiu.", e e ela que vale pelo que a porta viu."""
+    if not desfecho or not desfecho.endswith(fila.DEPOIS_DA_RETOMADA):
+        return False
+    fim = desfecho.removesuffix(fila.DEPOIS_DA_RETOMADA)
+    rabo = _PEDIU_NO_FIM.search(fim)
+    if rabo is not None:
+        fim = fim[: rabo.start()]
+    return fim in _NAO_CHEGOU
+
+
+def janela_legivel(minutos: int) -> str:
+    """O comeco da frase do alerta: "Nas últimas 2 horas", "Nos últimos 30 minutos", "Na última hora"."""
+    minutos = max(1, int(minutos))
+    dias, resto_dia = divmod(minutos, 1440)
+    horas, resto = divmod(minutos, 60)
+    if not resto_dia:
+        return "No último dia" if dias == 1 else f"Nos últimos {dias} dias"
+    if not resto:
+        return "Na última hora" if horas == 1 else f"Nas últimas {horas} horas"
+    return "No último minuto" if minutos == 1 else f"Nos últimos {minutos} minutos"
+
+
+def hora_e_dia(momento: datetime | None) -> str:
+    """ "14:05 de 21/11/2026", na hora de Brasilia."""
+    if momento is None:
+        return "?"
+    return momento.astimezone(ZoneInfo(FUSO)).strftime("%H:%M de %d/%m/%Y")
+
+
+def hora_curta(momento: datetime, agora: datetime | None = None) -> str:
+    """ "14:05", na hora de Brasilia; com o dia ("14:05 de 22/11/2026") se nao for hoje."""
+    local = momento.astimezone(ZoneInfo(FUSO))
+    hoje = (agora or datetime.now(UTC)).astimezone(ZoneInfo(FUSO)).date()
+    return local.strftime("%H:%M") if local.date() == hoje else local.strftime("%H:%M de %d/%m/%Y")
+
+
+@dataclass(frozen=True, slots=True)
+class SinalVisto:
+    """Um dos sinais do alerta, como a ficha mostra: nomes do cadastro e a hora de Brasilia."""
+
+    ferramenta: str
+    sistema: str
+    hora: str
+
+
+@dataclass(frozen=True, slots=True)
+class AlertaDaFicha:
+    """O cartao do alerta dos tres sinais na ficha (``fichas.sinais``, o retrato de quando a ficha nasceu)."""
+
+    janela: str
+    de_fora: SinalVisto
+    privado: SinalVisto
+
+
+def _visto(retrato: Mapping[str, Any], sinal: str) -> SinalVisto:
+    vistos = retrato.get("vistos")
+    achado: Mapping[str, Any] = {}
+    for v in vistos if isinstance(vistos, list) else []:
+        if isinstance(v, Mapping) and v.get("sinal") == sinal:
+            achado = v
+            break
+    quando: datetime | None = None
+    bruto = achado.get("visto_em")
+    if isinstance(bruto, str):
+        try:
+            quando = datetime.fromisoformat(bruto)
+        except ValueError:
+            quando = None
+    return SinalVisto(str(achado.get("ferramenta", "?")), str(achado.get("sistema", "?")), hora_e_dia(quando))
+
+
+def alerta_da_ficha(retrato: Mapping[str, Any] | None) -> AlertaDaFicha | None:
+    """O cartao do alerta, do retrato gravado na ficha; None sem alerta. So nomes do cadastro e horas: o retrato
+    nunca leva argumento, resultado ou texto do sistema (``regras/sinais.py``)."""
+    if not isinstance(retrato, Mapping):
+        return None
+    janela = retrato.get("janela_minutos")
+    minutos = janela if isinstance(janela, int) and not isinstance(janela, bool) else 0
+    return AlertaDaFicha(
+        janela=janela_legivel(minutos) if minutos > 0 else "Há pouco",
+        de_fora=_visto(retrato, sinais.TEXTO_DE_FORA),
+        privado=_visto(retrato, sinais.DADO_PRIVADO),
+    )
 
 
 def hora_de_brasilia(momento: datetime | None) -> str:
@@ -277,6 +524,21 @@ class Acao:
     expira_em: str
     decisao: str
     como: str
+    de_estranhos: bool = False
+    """O resultado e texto de estranhos (``Operacao.de_estranhos``): a tela nao mostra o texto (critica A4)."""
+    respondeu: bool = False
+    """Ha resultado guardado (o sistema respondeu)."""
+    pode_ver: bool = False
+    """Resposta de estranhos com texto: a pessoa pode pedir para ver, atras do aviso."""
+    estranhos: tuple[str, ...] = ()
+    """O texto de estranhos, so quando a pessoa pediu para ver (``montar(..., ver_estranhos=True)``)."""
+    detalhe: str = ""
+    explicacao: str = ""
+    alerta: AlertaDaFicha | None = None
+    nao_chegou: bool = False
+    """Nao confirmada pela retomada, e o fim que chegou depois diz que o pedido nao saiu do MCP-CLARO
+    (``nao_chegou_depois_da_retomada``; a marca da retomada so vai no desfecho de uma acao nao confirmada): na acao
+    nao confirmada, a tela nao diz que o pedido saiu uma vez, e a caixa de pendencias diz que ele nao chegou."""
 
     @property
     def atualiza(self) -> bool:
@@ -293,16 +555,34 @@ class Acao:
         return self.op.ficha_exige_passkey or self.op.ficha_risco == "alto"
 
 
-def montar(op: Operacao, agora: datetime | None = None) -> Acao:
+def como_passou(op: Operacao) -> str:
+    """Por onde a acao passou. A ficha que nasceu com o retrato do alerta dos tres sinais diz isso (a rota
+    ``tres_sinais``). A de risco alto mantem a rota dela (``saida.pedidos._rota`` olha o risco antes do alerta) e
+    so diz que o alerta tambem valia. A operacao nao guarda a rota: a ficha do periodo de experiencia com o alerta
+    valendo tambem diz "alerta dos tres sinais", o que e verdade, mas nao e o unico motivo."""
+    if op.limite_id is not None:
+        return "Dentro de um limite seu, sem ficha"
+    if op.ficha_sinais is not None and op.ficha_exige_passkey:
+        return "Pela ficha, com passkey (valia o alerta dos três sinais)"
+    if op.ficha_sinais is not None and op.ficha_risco == "alto":
+        return "Pela ficha: risco alto (valia o alerta dos três sinais)"
+    if op.ficha_sinais is not None:
+        return "Pela ficha: alerta dos três sinais"
+    if op.ficha_exige_passkey:
+        return "Pela ficha, com passkey"
+    return "Pela ficha"
+
+
+def montar(op: Operacao, agora: datetime | None = None, *, ver_estranhos: bool = False) -> Acao:
+    """A operacao como as telas mostram. Resultado de estranhos (servidor de terceiros ou ferramenta marcada "traz
+    texto de fora"): ``textos`` fica vazio sempre; o texto so vem em ``estranhos``, com ``ver_estranhos`` (a
+    pessoa pediu para ver, atras do aviso)."""
     agora = agora or datetime.now(UTC)
     falta = _segundos_ate(op.hora_saida, agora) or 0
     prazo = _segundos_ate(op.ficha_expira_em, agora) or 0
-    if op.limite_id is not None:
-        como = "Dentro de um limite seu, sem ficha"
-    elif op.ficha_exige_passkey:
-        como = "Pela ficha, com passkey"
-    else:
-        como = "Pela ficha"
+    de_estranhos = op.de_estranhos
+    textos = textos_do_resultado(op.resultado)
+    detalhe, explicacao = detalhe_do_desfecho(op.desfecho)
     return Acao(
         op=op,
         rotulo=ROTULOS[op.estado],
@@ -311,7 +591,7 @@ def montar(op: Operacao, agora: datetime | None = None) -> Acao:
         escondidos=tem_escondidos(op.argumentos),
         diz=linhas_do_aplicativo(op.aplicativo_diz),
         diz_escondidos=tem_escondidos(op.aplicativo_diz),
-        textos=textos_do_resultado(op.resultado),
+        textos=[] if de_estranhos else textos,
         hora_saida=hora_de_brasilia(op.hora_saida),
         falta=falta,
         falta_texto=tempo_legivel(falta),
@@ -319,7 +599,15 @@ def montar(op: Operacao, agora: datetime | None = None) -> Acao:
         prazo_texto=tempo_legivel(prazo),
         expira_em=hora_de_brasilia(op.ficha_expira_em),
         decisao=DECISOES.get(op.decisao_pessoa or "", ""),
-        como=como,
+        como=como_passou(op),
+        de_estranhos=de_estranhos,
+        respondeu=isinstance(op.resultado, dict),
+        pode_ver=de_estranhos and bool(textos),
+        estranhos=tuple(textos_de_estranhos(op.resultado)) if de_estranhos and ver_estranhos else (),
+        detalhe=detalhe,
+        explicacao=explicacao,
+        alerta=alerta_da_ficha(op.ficha_sinais),
+        nao_chegou=nao_chegou_depois_da_retomada(op.desfecho),
     )
 
 
@@ -587,11 +875,13 @@ class TelasDeAcoes:
         op = await self._da_pessoa(pedido, operacao_id)
         if op is None:
             return self._nao_achada(pedido)
+        # A resposta de estranhos so aparece quando a pessoa pede ("Ver o texto mesmo assim", ``?ver=resposta``).
+        ver = pedido.query_params.get("ver") == VER_RESPOSTA
         return self.t.pagina(
             pedido,
             "acoes/acao.html",
             {
-                "a": montar(op),
+                "a": montar(op, ver_estranhos=ver),
                 "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES,
                 "saida_aberta": await self._saida_aberta(op),
                 "aviso": self._aviso(pedido),

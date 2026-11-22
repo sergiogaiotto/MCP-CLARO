@@ -26,6 +26,19 @@ para os destinatarios escolhidos (ou para qualquer destinatario, dito com clarez
   "Nao vale com a passkey ligada" e nao o amplia; a pessoa cria outro, com a passkey (o que nao vale nao conta
   como "limite igual"), e pode encerrar o antigo.
 - Encerrar cancela, na mesma transacao, o que o limite ja tinha liberado e ainda espera a hora de sair.
+
+Fase 3 (servidores de terceiros):
+
+- Os limites so oferecem ferramenta de terceiro que esta na vitrine da pessoa (``consultas.ferramentas_de_acao``,
+  com a condicao da vitrine): com a chave da Fase 3 ligada ou pessoa de teste, publicada na revisao do servidor que
+  vale agora e com a definicao declarada.
+- Enquanto vale o alerta dos tres sinais para um aplicativo (``sinais.alerta_agora``), os limites com ele nao
+  valem (as acoes vao para a ficha): a tela diz ate que horas, se nenhum sinal novo chegar (``Alerta.ate``).
+- Limite suspenso pela quarentena do servidor (``saida.quarentena.MOTIVO_LIMITE``) aparece com o motivo, com
+  acento, e o que fazer: criar outro depois da nova revisao.
+- Criar toma, antes de ler a vitrine, a trava consultiva do sistema, compartilhada (``travar_sistema``), a mesma
+  que a quarentena toma exclusiva: ou a quarentena entra antes (e a acao sai da lista), ou ela espera o COMMIT e
+  suspende o limite novo. Nenhum limite nasce ativo num servidor em quarentena.
 """
 
 from __future__ import annotations
@@ -39,19 +52,20 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from urllib.parse import urlencode
 
-from sqlalchemy import Row
+from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 from starlette.routing import BaseRoute, Route
 
 from mcp_claro.logs import logger
-from mcp_claro.regras import politica
-from mcp_claro.saida import fila
+from mcp_claro.regras import politica, sinais
+from mcp_claro.regras.escondidos import marcar_escondidos
+from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.protocolo import FUSO, canonico
 from mcp_claro.telas import consultas, passkeys
-from mcp_claro.telas.acoes import marcar_escondidos
+from mcp_claro.telas.acoes import com_acento, hora_curta
 from mcp_claro.telas.nucleo import LoginRefeito, Telas, tela, ver_depois
 from mcp_claro.telas.paginas import AVISOS
 from mcp_claro.telas.seguranca import Formulario
@@ -137,6 +151,11 @@ class Escolha:
     descricao: str
     risco: str
     campos: tuple[str, ...]
+    origem: str = "proprio"
+
+    @property
+    def de_terceiro(self) -> bool:
+        return self.origem != "proprio"
 
     @property
     def chave(self) -> str:
@@ -155,7 +174,16 @@ class Escolha:
             descricao=linha.descricao,
             risco=linha.risco,
             campos=campos_de_destinatario(linha.campos_destinatario),
+            origem=str(linha.origem),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AlertaDosLimites:
+    """O alerta dos tres sinais que vale agora para um aplicativo: os limites com ele nao valem ate ``ate``."""
+
+    aplicativo: str
+    ate: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +354,28 @@ class Limite:
             return "Não vale com a passkey ligada"
         return SITUACOES.get(str(self.linha.situacao), str(self.linha.situacao))
 
+    @property
+    def motivo(self) -> str:
+        """O motivo de ter terminado ou sido suspenso: sempre texto nosso, com acento."""
+        return com_acento(str(self.linha.motivo)) if self.linha.motivo else ""
+
+    @property
+    def de_terceiro(self) -> bool:
+        return str(self.linha.sistema_origem) != "proprio"
+
+    @property
+    def nome_de_fora(self) -> bool:
+        """O nome mostrado e o ``nome_original`` de um terceiro (nenhuma revisao ativa): texto do fornecedor."""
+        return self.de_terceiro and bool(self.linha.sem_revisao)
+
+
+async def travar_sistema(c: AsyncConnection, sistema_id: uuid.UUID) -> None:
+    """Trava consultiva compartilhada do sistema ate o fim da transacao que cria o limite: a mesma chave que a
+    quarentena (``saida.quarentena.por_em_quarentena``) toma exclusiva. Varias telas criam limites ao mesmo tempo;
+    a quarentena espera todas."""
+    for chave in travas.chaves_do_alcance("sistema", sistema_id=sistema_id):
+        await c.execute(text("SELECT pg_advisory_xact_lock_shared(:k)"), {"k": chave})
+
 
 async def cancelar_liberadas(c: AsyncConnection, limite_id: uuid.UUID, motivo: str, *, quem: str) -> int:
     """Na transacao que encerra o limite: cancela o que ele liberou e ainda espera a hora de sair.
@@ -383,9 +433,27 @@ class TelasDeLimites:
     def _falta_login(self, sessao: Sessao) -> bool:
         return not self.ligada and not self.t.login_recente(sessao)
 
-    async def _escolhas(self, c: AsyncConnection, pessoa_id: uuid.UUID) -> list[Escolha]:
-        linhas = await consultas.ferramentas_de_acao(c, pessoa_id, VERSAO_MCP)
+    def _terceiros(self, sessao: Sessao) -> bool:
+        """Servidores de terceiros contam para esta pessoa: a chave da Fase 3 ligada, ou pessoa de teste (o mesmo
+        criterio da entrada, ``terceiros_ligados``)."""
+        return bool(self.t.p.FEATURE_PHASE3_THIRD_PARTY) or bool(sessao.pessoa.teste)
+
+    async def _escolhas(self, c: AsyncConnection, sessao: Sessao) -> list[Escolha]:
+        linhas = await consultas.ferramentas_de_acao(c, sessao.pessoa.id, VERSAO_MCP, self._terceiros(sessao))
         return sorted((Escolha.da_linha(linha) for linha in linhas), key=lambda e: (e.aplicativo, e.nome_vitrine))
+
+    async def _alertas(
+        self, c: AsyncConnection, sessao: Sessao, aplicativos: Iterable[tuple[uuid.UUID, str]]
+    ) -> list[AlertaDosLimites]:
+        """O alerta dos tres sinais de cada aplicativo (sem repetir), na janela da politica vigente."""
+        alertas: list[AlertaDosLimites] = []
+        for aplicativo_id, nome in dict(aplicativos).items():
+            alerta = await sinais.alerta_agora(
+                c, pessoa_id=sessao.pessoa.id, aplicativo_id=aplicativo_id, terceiros=self._terceiros(sessao)
+            )
+            if alerta is not None:
+                alertas.append(AlertaDosLimites(nome, hora_curta(alerta.ate)))
+        return alertas
 
     async def _revisada(self, c: AsyncConnection, chave: str, escolhas: dict[str, Escolha]) -> Escolha | None:
         """A escolha que veio no formulario saiu da lista porque o ADMIN revisou a acao (a versao revisada mudou)?
@@ -411,9 +479,13 @@ class TelasDeLimites:
         sessao = await self.t.exigir_sessao(pedido)
         async with self.t.engine.connect() as c:
             linhas = await consultas.limites_da_pessoa(c, sessao.pessoa.id, FUSO)
-            escolhas = await self._escolhas(c, sessao.pessoa.id)
+            escolhas = await self._escolhas(c, sessao)
             maximo_dia, maximo_dias = await self._maximos(c)
-        limites = [_limite(linha, self.ligada) for linha in linhas]
+            limites = [_limite(linha, self.ligada) for linha in linhas]
+            # So os aplicativos com limite valendo: e deles que a frase fala.
+            alertas = await self._alertas(
+                c, sessao, ((x.linha.aplicativo_id, str(x.linha.aplicativo)) for x in limites if x.ativo)
+            )
         return self.t.pagina(
             pedido,
             "acoes/limites.html",
@@ -426,6 +498,7 @@ class TelasDeLimites:
                 "maximo_dias": maximo_dias,
                 "ligada": self.ligada,
                 "aviso": self._aviso(pedido),
+                "alertas": alertas,
             },
         )
 
@@ -442,7 +515,7 @@ class TelasDeLimites:
     ) -> Response:
         sessao = await self.t.exigir_sessao(pedido)
         async with self.t.engine.connect() as c:
-            escolhas = {e.chave: e for e in await self._escolhas(c, sessao.pessoa.id)}
+            escolhas = {e.chave: e for e in await self._escolhas(c, sessao)}
             maximo_dia, maximo_dias = await self._maximos(c)
             tem_passkey = await passkeys.tem_ativa(c, sessao.pessoa.id)
             revisada = await self._revisada(c, chave, escolhas)
@@ -491,7 +564,7 @@ class TelasDeLimites:
         if not self.ligada:
             return passkeys.resposta_desafio(None, "A passkey está desligada nesta instalação.", status=409)
         async with self.t.engine.begin() as c:
-            escolhas = {e.chave: e for e in await self._escolhas(c, sessao.pessoa.id)}
+            escolhas = {e.chave: e for e in await self._escolhas(c, sessao)}
             maximo_dia, maximo_dias = await self._maximos(c)
             lido, erros = ler_pedido(f, escolhas, maximo_dia=maximo_dia, maximo_dias=maximo_dias)
             if lido is None:
@@ -518,12 +591,18 @@ class TelasDeLimites:
         status = 400
         criado: uuid.UUID | None = None
         async with self.t.engine.begin() as c:
-            # Primeiro a trava da versao revisada escolhida: os campos de destinatario lidos aqui valem ate o
-            # COMMIT, e uma revisao do ADMIN que os mude espera (ou ja terminou, e a escolha antiga sai da lista).
             ferramenta_id = ferramenta_da_escolha(f.texto("escolha"))
             if ferramenta_id is not None:
+                # Primeiro a trava consultiva do sistema, compartilhada (a ordem da porta de saida: as consultivas
+                # antes das linhas). A quarentena toma a mesma, exclusiva: ou ela entrou antes, e a acao ja nao esta
+                # na lista, ou ela espera este COMMIT e suspende o limite novo (R6b-2).
+                revisao = await consultas.revisao_por_id(c, ferramenta_id)
+                if revisao is not None:
+                    await travar_sistema(c, uuid.UUID(str(revisao.sistema_id)))
+                # Depois a trava da versao revisada escolhida: os campos de destinatario lidos aqui valem ate o
+                # COMMIT, e uma revisao do ADMIN que os mude espera (ou ja terminou, e a escolha antiga sai da lista).
                 await consultas.travar_revisao(c, ferramenta_id)
-            escolhas = {e.chave: e for e in await self._escolhas(c, pessoa_id)}
+            escolhas = {e.chave: e for e in await self._escolhas(c, sessao)}
             maximo_dia, maximo_dias = await self._maximos(c)
             lido, erros = ler_pedido(f, escolhas, maximo_dia=maximo_dia, maximo_dias=maximo_dias)
             if lido is not None and await consultas.limite_igual_ativo(
@@ -594,6 +673,11 @@ class TelasDeLimites:
             linha = await consultas.limite_da_pessoa(c, sessao.pessoa.id, limite_id, FUSO)
             maximo_dia, maximo_dias = await self._maximos(c)
             tem_passkey = await passkeys.tem_ativa(c, sessao.pessoa.id)
+            alertas = (
+                await self._alertas(c, sessao, [(linha.aplicativo_id, str(linha.aplicativo))])
+                if linha is not None and str(linha.situacao) == "ativo"
+                else []
+            )
         if linha is None:
             return self.t.erro(pedido, 404, "Limite não encontrado", "Este limite não é seu ou não existe.")
         return self.t.pagina(
@@ -612,6 +696,7 @@ class TelasDeLimites:
                 " nesta instalação.",
                 "aviso": self._aviso(pedido),
                 "erros": erros or [],
+                "alertas": alertas,
             },
             status=status,
         )

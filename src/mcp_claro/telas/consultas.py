@@ -52,13 +52,14 @@ async def aplicativos_habilitados(c: AsyncConnection) -> Sequence[Row[Any]]:
 
 
 async def _ferramentas_dos_modelos(c: AsyncConnection, ids: list[uuid.UUID]) -> dict[uuid.UUID, list[Row[Any]]]:
+    """As ferramentas de cada modelo, com a origem do sistema (a tela marca "de terceiros")."""
     if not ids:
         return {}
     linhas = (
         await c.execute(
             text(
-                "SELECT mf.modelo_id, mf.nome_original, s.nome AS sistema, f.nome_vitrine, f.descricao, f.classe"
-                " FROM modelos_ordem_ferramentas mf JOIN sistemas s ON s.id = mf.sistema_id"
+                "SELECT mf.modelo_id, mf.nome_original, s.nome AS sistema, s.origem, f.nome_vitrine, f.descricao,"
+                " f.classe FROM modelos_ordem_ferramentas mf JOIN sistemas s ON s.id = mf.sistema_id"
                 " LEFT JOIN ferramentas_revisadas f ON f.sistema_id = mf.sistema_id"
                 " AND f.nome_original = mf.nome_original AND f.situacao = 'ativa'"
                 " WHERE mf.modelo_id = ANY(:ids) ORDER BY s.nome, f.nome_vitrine NULLS LAST, mf.nome_original"
@@ -169,12 +170,15 @@ async def revogar_ordem(c: AsyncConnection, pessoa_id: uuid.UUID, ordem_id: uuid
 async def linhas_extrato(
     c: AsyncConnection, pessoa_id: uuid.UUID, pagina: int, tamanho: int = TAMANHO_PAGINA
 ) -> tuple[Sequence[Row[Any]], bool]:
-    """Linhas do extrato da pessoa, mais novas primeiro. Devolve (linhas, ha_mais_antigas)."""
+    """Linhas do extrato da pessoa, mais novas primeiro. Devolve (linhas, ha_mais_antigas).
+
+    Com a origem do sistema de cada linha (``sistema_origem``): a tela marca "de terceiros" e da a dica fixa."""
     linhas = (
         await c.execute(
             text(
                 "SELECT e.id, e.criado_em, e.tipo, e.frase, e.protocolo, e.ferramenta, a.nome AS aplicativo,"
-                " s.nome AS sistema FROM extrato e LEFT JOIN aplicativos a ON a.id = e.aplicativo_id"
+                " s.nome AS sistema, s.origem AS sistema_origem FROM extrato e"
+                " LEFT JOIN aplicativos a ON a.id = e.aplicativo_id"
                 " LEFT JOIN sistemas s ON s.id = e.sistema_id WHERE e.pessoa_id = :p"
                 " ORDER BY e.criado_em DESC, e.id DESC LIMIT :n OFFSET :o"
             ),
@@ -517,11 +521,12 @@ async def estado_das_portas(c: AsyncConnection) -> tuple[Row[Any] | None, Row[An
 async def sistemas_para_autorizar(
     c: AsyncConnection, pessoa_id: uuid.UUID, sistema_id: uuid.UUID | None = None
 ) -> Sequence[Row[Any]]:
-    """Sistemas de chave por pessoa que entram nas ordens valendo da pessoa, com a ultima autorizacao feita."""
+    """Sistemas de chave por pessoa que entram nas ordens valendo da pessoa, com a ultima autorizacao feita e a origem
+    (o endereco de volta de um servidor de terceiros e so dele)."""
     return (
         await c.execute(
             text(
-                "SELECT s.id, s.nome, s.situacao, s.autorizacao IS NOT NULL AS configurado,"
+                "SELECT s.id, s.nome, s.situacao, s.origem, s.autorizacao IS NOT NULL AS configurado,"
                 " (SELECT max(e.criado_em) FROM extrato e WHERE e.pessoa_id = :p AND e.sistema_id = s.id"
                 " AND e.tipo = 'autorizacao_concluida') AS autorizado_em"
                 " FROM sistemas s WHERE s.tipo_chave = 'por_pessoa'"
@@ -642,14 +647,21 @@ async def detalhes_da_operacao(c: AsyncConnection, operacao_id: uuid.UUID) -> Ro
     ).first()
 
 
-async def ferramentas_de_acao(c: AsyncConnection, pessoa_id: uuid.UUID, versao: str) -> Sequence[Row[Any]]:
+async def ferramentas_de_acao(
+    c: AsyncConnection, pessoa_id: uuid.UUID, versao: str, terceiros: bool
+) -> Sequence[Row[Any]]:
     """Ferramentas de acao (classe diferente de "le") das ordens de servico que valem agora para a pessoa,
-    em sistemas de chave por pessoa: as unicas que podem entrar num limite por aproximacao."""
+    em sistemas de chave por pessoa: as unicas que podem entrar num limite por aproximacao.
+
+    Servidor de terceiros: a mesma condicao da vitrine (``cadastro.repositorio._SQL_VITRINE``). So com
+    ``terceiros`` (a chave da Fase 3 ligada, ou pessoa de teste), so com a ferramenta publicada na revisao do
+    servidor que vale agora e so com a definicao declarada gravada pela revisao da Fase 3. Assim o limite nunca
+    oferece um terceiro escondido nem uma ferramenta fora da vitrine."""
     return (
         await c.execute(
             text(
                 "SELECT DISTINCT ON (o.aplicativo_id, f.id) o.aplicativo_id, a.nome AS aplicativo,"
-                " f.id AS ferramenta_id, f.sistema_id, s.nome AS sistema, f.nome_original, f.nome_vitrine,"
+                " f.id AS ferramenta_id, f.sistema_id, s.nome AS sistema, s.origem, f.nome_original, f.nome_vitrine,"
                 " f.titulo, f.descricao, f.campos_destinatario, f.classe, f.risco"
                 " FROM ordens_servico o JOIN aplicativos a ON a.id = o.aplicativo_id AND a.situacao = 'ativo'"
                 " JOIN modelos_ordem m ON m.id = o.modelo_id AND m.ativo"
@@ -658,10 +670,13 @@ async def ferramentas_de_acao(c: AsyncConnection, pessoa_id: uuid.UUID, versao: 
                 " AND f.situacao = 'ativa' AND f.classe <> 'le'"
                 " JOIN sistemas s ON s.id = f.sistema_id AND s.situacao = 'ativo' AND s.versao_mcp = :v"
                 " AND s.tipo_chave = 'por_pessoa'"
+                " LEFT JOIN revisoes_servidor rs ON rs.id = s.revisao_servidor_id AND rs.sistema_id = s.id"
                 " WHERE o.pessoa_id = :p AND o.situacao = 'ativa' AND o.inicio <= now() AND o.fim > now()"
+                " AND (s.origem = 'proprio'"
+                " OR (CAST(:t AS boolean) AND f.id = ANY (rs.publicadas) AND f.definicao_declarada IS NOT NULL))"
                 " ORDER BY o.aplicativo_id, f.id"
             ),
-            {"p": pessoa_id, "v": versao},
+            {"p": pessoa_id, "v": versao, "t": terceiros},
         )
     ).all()
 
@@ -671,7 +686,8 @@ _SQL_LIMITES = (
     " CASE WHEN l.dia = (now() AT TIME ZONE :fuso)::date THEN l.usados_hoje ELSE 0 END AS usados_hoje,"
     " l.valido_ate, l.com_passkey, l.motivo, l.criado_em,"
     " CASE WHEN l.situacao = 'ativo' AND l.valido_ate <= now() THEN 'vencido' ELSE l.situacao END AS situacao,"
-    " a.nome AS aplicativo, s.nome AS sistema, coalesce(f.nome_vitrine, l.nome_original) AS ferramenta"
+    " a.nome AS aplicativo, s.nome AS sistema, s.origem AS sistema_origem,"
+    " coalesce(f.nome_vitrine, l.nome_original) AS ferramenta, f.nome_vitrine IS NULL AS sem_revisao"
     " FROM limites l JOIN aplicativos a ON a.id = l.aplicativo_id JOIN sistemas s ON s.id = l.sistema_id"
     " LEFT JOIN ferramentas_revisadas f ON f.sistema_id = l.sistema_id AND f.nome_original = l.nome_original"
     " AND f.situacao = 'ativa'"
@@ -845,6 +861,22 @@ async def liberadas_pelo_limite(c: AsyncConnection, limite_id: uuid.UUID) -> lis
     ]
 
 
+SQL_ENCERRAR_SEM_OS_CAMPOS = """
+WITH alvo AS (
+  SELECT id FROM limites
+  WHERE sistema_id = :s AND nome_original = :n AND situacao IN ('ativo', 'suspenso')
+    AND jsonb_array_length(destinatarios) > 0
+    AND NOT (CAST(:campos AS text[]) <@ ARRAY(SELECT item ->> 'campo' FROM jsonb_array_elements(destinatarios) AS item))
+  ORDER BY id FOR UPDATE
+), mudou AS (
+  UPDATE limites l SET situacao = 'encerrado', motivo = :m
+  FROM alvo WHERE l.id = alvo.id AND l.situacao IN ('ativo', 'suspenso')
+  RETURNING l.id, l.pessoa_id, l.aplicativo_id, l.sistema_id
+)
+SELECT id, pessoa_id, aplicativo_id, sistema_id FROM mudou ORDER BY id
+"""
+
+
 async def encerrar_limites_sem_os_campos(
     c: AsyncConnection, *, sistema_id: uuid.UUID, nome_original: str, campos: list[str], motivo: str
 ) -> Sequence[Row[Any]]:
@@ -853,18 +885,15 @@ async def encerrar_limites_sem_os_campos(
     O ADMIN marcou um campo de destinatario novo (por exemplo, a copia): um limite criado antes nao o fecha, e
     um pedido com copia para fora sairia sem ficha. Ele termina aqui; a pessoa cria outro, ja com o campo novo.
     Limite "qualquer destinatario" (lista vazia) nao muda. Desmarcar um campo tambem nao: o limite segue mais
-    fechado do que precisa."""
+    fechado do que precisa.
+
+    Trava os limites em ordem de ``id`` antes de mudar (``SQL_ENCERRAR_SEM_OS_CAMPOS``), como a quarentena
+    (``saida.fila.SQL_SUSPENDER_LIMITES``): a revisao do ADMIN e a quarentena do mesmo servidor ao mesmo tempo
+    nao se travam uma a outra. Devolve em ordem de ``id``; quem chama cancela, depois, o que cada um liberou (a
+    linha do limite antes da linha da fila, a ordem escrita em ``saida/fila.py``)."""
     return (
         await c.execute(
-            text(
-                "UPDATE limites SET situacao = 'encerrado', motivo = :m"
-                " WHERE sistema_id = :s AND nome_original = :n AND situacao IN ('ativo', 'suspenso')"
-                " AND jsonb_array_length(destinatarios) > 0"
-                " AND NOT (CAST(:campos AS text[]) <@ ARRAY(SELECT item ->> 'campo'"
-                " FROM jsonb_array_elements(destinatarios) AS item))"
-                " RETURNING id, pessoa_id, aplicativo_id, sistema_id"
-            ),
-            {"s": sistema_id, "n": nome_original, "campos": campos, "m": motivo},
+            text(SQL_ENCERRAR_SEM_OS_CAMPOS), {"s": sistema_id, "n": nome_original, "campos": campos, "m": motivo}
         )
     ).all()
 

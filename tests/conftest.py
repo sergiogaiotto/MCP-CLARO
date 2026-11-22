@@ -10,6 +10,7 @@ import pytest
 
 IMAGEM_POSTGRES = os.environ.get("MCP_CLARO_TESTE_POSTGRES", "postgres:18.7")
 RAIZ = Path(__file__).resolve().parents[1]
+REVOGAR = "REVOKE TEMPORARY ON DATABASE mcp_claro FROM PUBLIC"
 
 
 @pytest.fixture(scope="session")
@@ -24,6 +25,11 @@ def postgres_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[str
     with testcontainers.PostgresContainer(
         IMAGEM_POSTGRES, username="mcp_claro_migracao", password="senha-de-teste", dbname="mcp_claro"
     ) as pg:
+        # Como o docker/postgres/iniciar/10-papeis.sh: nenhum papel cria tabela temporaria pelo PUBLIC.
+        revogar = pg.exec(
+            ["psql", "-v", "ON_ERROR_STOP=1", "-U", "mcp_claro_migracao", "-d", "mcp_claro", "-c", REVOGAR]
+        )
+        assert revogar.exit_code == 0, revogar.output
         host = pg.get_container_host_ip()
         porta = pg.get_exposed_port(5432)
         senha = tmp_path_factory.mktemp("segredos") / "db"

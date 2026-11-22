@@ -4,14 +4,19 @@
 <p><a href="/telas/admin">Área do ADMIN</a></p>
 <h1>Sistemas</h1>
 <p>Um sistema só entra se falar a versão 2026-07-28 do MCP. O MCP-CLARO confere isso na hora do cadastro.</p>
+{% if not terceiros_ligados %}
+<p class="dica">Servidores de terceiros ficam desligados até a Fase 3 passar nas provas. Você pode cadastrar, conferir e revisar; só pessoas de teste os veem.</p>
+{% endif %}
 {% if sistemas %}
 <table>
-  <thead><tr><th>Nome</th><th>Endereço</th><th>Chave</th><th>Situação</th></tr></thead>
+  <thead><tr><th>Nome</th><th>De quem</th><th>Endereço</th><th>Chave</th><th>Situação</th></tr></thead>
   <tbody>
   {% for s in sistemas %}
-    <tr><td><a href="/telas/admin/sistemas/{{ s.id }}">{{ s.nome }}</a></td><td><code>{{ s.endereco }}</code></td>
+    <tr><td><a href="/telas/admin/sistemas/{{ s.id }}">{{ s.nome }}</a></td>
+      <td>{{ s.origem | origem }}</td>
+      <td><code>{{ s.endereco }}</code></td>
       <td>{{ s.tipo_chave | tipo_chave }}</td>
-      <td><span class="etiqueta {% if s.situacao == 'ativo' %}bom{% elif s.situacao == 'recusado' %}ruim{% endif %}">{{ s.situacao | situacao }}</span></td></tr>
+      <td><span class="etiqueta {% if s.situacao == 'ativo' %}bom{% elif s.situacao in ('recusado', 'quarentena') %}ruim{% endif %}">{{ s.situacao | situacao }}</span></td></tr>
   {% endfor %}
   </tbody>
 </table>
@@ -24,11 +29,19 @@
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label for="nome">Nome do sistema</label>
   <input type="text" id="nome" name="nome" required maxlength="80" value="{{ valores.get('nome', '') }}">
+  <fieldset>
+    <legend>De quem é este servidor?</legend>
+    {% for valor, texto in origens.items() %}
+    <label class="opcao"><input type="radio" name="origem" value="{{ valor }}" required {% if valores.get('origem') == valor %}checked{% endif %}> {{ texto }}</label>
+    {% endfor %}
+    <p class="dica">Esta escolha não muda depois. Um servidor de terceiros é atendido na sala de visitas: só no endereço combinado, sem seguir desvios, com a chave guardada à parte e sem dados de rastreio. Ele só aparece para as pessoas depois que você revisar o servidor inteiro.</p>
+  </fieldset>
   <label for="endereco">Endereço MCP do sistema</label>
   <input type="url" id="endereco" name="endereco" required maxlength="500" placeholder="https://sistema.exemplo/mcp" value="{{ valores.get('endereco', '') }}">
+  <p class="dica">Servidor de terceiros: só endereço https da internet.</p>
   <label for="tipo_chave">Tipo de chave</label>
   <select id="tipo_chave" name="tipo_chave" required>
-    {% for valor, texto in [("por_pessoa", "Uma chave por pessoa (cada pessoa autoriza)"), ("compartilhada", "Uma chave para todos (só leitura)"), ("programa", "Chave do programa")] %}
+    {% for valor, texto in [("por_pessoa", "Uma chave por pessoa (cada pessoa autoriza)"), ("compartilhada", "Uma chave para todos (só leitura)"), ("programa", "Chave do programa (só sistema próprio)")] %}
     <option value="{{ valor }}" {% if valores.get('tipo_chave') == valor %}selected{% endif %}>{{ texto }}</option>
     {% endfor %}
   </select>

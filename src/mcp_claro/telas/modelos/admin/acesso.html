@@ -9,8 +9,25 @@
 {% if sistema.tipo_chave == "por_pessoa" %}
 <h2>Autorização de cada pessoa</h2>
 <p>Cada pessoa autoriza o MCP-CLARO na página do sistema (OAuth com PKCE). Preencha com os dados que o sistema deu ao MCP-CLARO.</p>
+{% if sistema.origem != "proprio" %}
+<p>No servidor de autorização deste fornecedor, cadastre este endereço de volta. Ele é só deste servidor: <code>{{ redirect_uri }}</code></p>
+{% else %}
 <p>No sistema, cadastre este endereço de volta: <code>{{ redirect_uri }}</code></p>
+{% endif %}
 {% if not configurada %}<p class="atencao">Ainda não configurada: as pessoas não conseguem autorizar este sistema.</p>{% endif %}
+{% if sistema.origem != "proprio" %}
+<p class="dica">Servidor de terceiros: a troca do código e a renovação da chave só vão a endereços https da internet. Depois de guardada, esta configuração não muda; para mudar, cadastre o servidor de novo.</p>
+{% endif %}
+{% if travada %}
+<div class="cartao">
+  <p>{{ terceiro_ja_configurado }}</p>
+  <dl class="comprovante">
+    <dt>Página de autorização</dt><dd><code>{{ guardada.get('authorization_endpoint', '') }}</code></dd>
+    <dt>Troca do código</dt><dd><code>{{ guardada.get('token_endpoint', '') }}</code></dd>
+    <dt>client_id</dt><dd><code>{{ guardada.get('client_id', '') }}</code></dd>
+  </dl>
+</div>
+{% else %}
 <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/autorizacao" class="cartao">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label for="authorization_endpoint">Endereço da página de autorização</label>
@@ -32,6 +49,7 @@
   <p class="dica">Vazio: vale o endereço MCP do sistema.</p>
   <button type="submit">Guardar a configuração</button>
 </form>
+{% endif %}
 
 <h2>Segredo do MCP-CLARO no sistema</h2>
 <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/segredo" class="cartao">

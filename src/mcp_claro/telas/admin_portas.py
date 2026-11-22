@@ -21,12 +21,16 @@ from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
 
 from mcp_claro.despachante import autorizacao
-from mcp_claro.despachante.autorizacao import AUTENTICACOES, ConfiguracaoAutorizacaoInvalida
+from mcp_claro.despachante.autorizacao import (
+    AUTENTICACOES,
+    MENSAGEM_TERCEIRO_JA_CONFIGURADO,
+    ConfiguracaoAutorizacaoInvalida,
+    caminho_da_volta,
+)
 from mcp_claro.logs import logger
 from mcp_claro.regras import bloqueios, estado
 from mcp_claro.regras.bloqueios import ALCANCES, CAMPOS_POR_ALCANCE, TIPOS, BloqueioInvalido, SemPermissao
 from mcp_claro.telas import consultas
-from mcp_claro.telas.autorizar import CAMINHO_VOLTA
 from mcp_claro.telas.bloqueio import ALCANCES_LEGIVEIS, parada, quem_legivel
 from mcp_claro.telas.nucleo import Interrompe, Telas, tela, uuid_ou_none, ver_depois
 from mcp_claro.telas.seguranca import Formulario
@@ -38,6 +42,11 @@ CONTROLE: Final = re.compile(r"[\x00-\x1f\x7f]")
 VISIVEL: Final = re.compile(r"^[\x21-\x7e]{1,8192}$")
 NIVEIS_LEGIVEIS: Final[dict[str, str]] = {"aberta": "aberta", "so_leitura": "so de leitura", "fechada": "fechada"}
 MOTIVO_DESATIVACAO: Final = "pessoa desativada"
+TERCEIRO_JA_CONFIGURADO: Final = (
+    "A autorização de um servidor de terceiros não muda depois de configurada: os endereços de troca de chave"
+    " ficam presos ao servidor que você revisou. Nada mudou. Para mudar, cadastre o servidor de novo."
+)
+"""A recusa de ``autorizacao.configurar`` num terceiro ja configurado (critica M1), com acento."""
 # Tipo de chave pedido na tela -> (tipo_chave do sistema que aceita, tipo na tabela, dono no extrato).
 CHAVES: Final[dict[str, tuple[str | None, str, str]]] = {
     "compartilhada": ("compartilhada", "acesso", "compartilhada"),
@@ -353,10 +362,15 @@ class TelasDoAdminPortas:
             {
                 "sistema": sistema,
                 "configurada": config is not None,
+                "travada": config is not None and sistema.origem != "proprio",
+                "guardada": dict(config or {}),
+                "terceiro_ja_configurado": TERCEIRO_JA_CONFIGURADO,
                 "entregas": entregas,
                 "programas": programas,
                 "autenticacoes": AUTENTICACOES,
-                "redirect_uri": self.t.p.PUBLIC_BASE_URL + CAMINHO_VOLTA,
+                # O endereco de volta que o ADMIN cadastra: o de um servidor de terceiros e so dele.
+                "redirect_uri": self.t.p.PUBLIC_BASE_URL
+                + caminho_da_volta(sistema.id if sistema.origem != "proprio" else None),
                 "erros": erros or [],
                 "valores": valores,
             },
@@ -394,7 +408,8 @@ class TelasDoAdminPortas:
                     dados={"autenticacao_cliente": dados["autenticacao_cliente"]},
                 )
         except ConfiguracaoAutorizacaoInvalida as erro:
-            return await self._pagina_acesso(pedido, erros=[str(erro)], valores=valores)
+            mensagem = TERCEIRO_JA_CONFIGURADO if str(erro) == MENSAGEM_TERCEIRO_JA_CONFIGURADO else str(erro)
+            return await self._pagina_acesso(pedido, erros=[mensagem], valores=valores)
         log.info("telas_admin_autorizacao_configurada")
         return ver_depois(f"/telas/admin/sistemas/{sistema.id}/acesso", "autorizacao_configurada")
 

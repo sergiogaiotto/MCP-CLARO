@@ -5,16 +5,24 @@ dizem o estado de partida (``UPDATE ... WHERE estado = ...``): quem chega depois
 a recusa com o estado atual. O banco tem a mesma tabela de transicoes (``transicoes_saida``) como
 segunda barreira.
 
-Ordem das travas, para nunca haver impasse: consultivas de alcance (ver ``travas``), depois a linha da
-ficha, depois a linha da fila. Quem nao precisa de uma delas simplesmente pula. Quem trava varias linhas
-da fila de uma vez (bloqueio, restauracao, retomada, vencimento) trava em ordem de ``id``.
+Ordem das travas, para nunca haver impasse: consultivas de alcance (ver ``travas``), depois a linha do
+limite, depois a linha da ficha, depois a linha da fila. Quem nao precisa de uma delas simplesmente pula. Quem
+trava varias linhas de uma vez (bloqueio, restauracao, retomada, vencimento, quarentena) trava em ordem de ``id``.
+A linha do limite vem antes da linha da fila porque a tela que encerra um limite (sem trava consultiva) trava o
+limite e depois cancela o que ele liberou; a quarentena faz o mesmo (``suspender_limites`` antes de
+``parar_por_quarentena``).
+
+Fase 3: a operacao sabe a origem do sistema e se a ferramenta traz texto de fora (``Operacao.de_estranhos``);
+a ficha guarda o retrato do alerta dos tres sinais (``fichas.sinais``), quando nasceu com ele; a quarentena de
+um servidor de terceiros para o que esperava (``parar_por_quarentena``) e suspende os limites dele
+(``suspender_limites``).
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
@@ -24,11 +32,13 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine
 from mcp_claro.extrato import registrar
-from mcp_claro.regras import programas
+from mcp_claro.regras import programas, sinais
 from mcp_claro.regras.bloqueios import Bloqueio, quem_rotina
+from mcp_claro.regras.estranhos import vem_de_estranhos
 from mcp_claro.saida import travas
 from mcp_claro.saida.estados import ANTES_DE_SAIR, FRASE, Estado
 from mcp_claro.saida.protocolo import FUSO, chave_pedido_igual, codigo_conferencia, novo_protocolo
+from mcp_claro.versao import PREFIXO_META
 
 JA_SAIRAM: Final = (Estado.ENVIANDO, Estado.ENVIADA, Estado.NAO_CONFIRMADA, Estado.SISTEMA_PEDIU_DADOS)
 QUEM_TETO: Final = quem_rotina("teto_confirmacoes")
@@ -45,6 +55,12 @@ DECISOES_NAO_CONFIRMADA: Final = {
     "nao_aconteceu": "nao aconteceu no sistema",
     "nao_sei": "nao sabe ainda",
 }
+META_RETIRADAS: Final = PREFIXO_META + "retiradas"
+"""Chave nossa no ``_meta`` de ``operacoes.resultado`` (o ``_meta`` do sistema nunca e guardado): quantas partes sem
+texto a leitura com medida tirou do resultado. Quem grava e a porta de saida, com a conta de
+``regras.estranhos.retiradas_pela_medida`` feita ANTES de ``medida.aplicar``, nunca pelo texto de um bloco (o
+sistema pode escrever um bloco igual ao aviso). ``pedidos.resposta`` passa a conta a ``estranhos.marcar``, que poe o
+aviso de partes retiradas fora da moldura (critica B4), e nunca devolve a chave ao aplicativo."""
 
 
 class DecisaoRecusada(Exception):
@@ -86,6 +102,26 @@ class Operacao:
     ficha_exige_passkey: bool = False
     ficha_risco: str | None = None
     ficha_decisao: str | None = None
+    sistema_origem: str = "proprio"
+    texto_de_fora: bool = False
+    ficha_sinais: dict[str, Any] | None = None
+    """Retrato do alerta dos tres sinais na ficha (``sinais.Alerta.retrato``); None sem alerta."""
+
+    @property
+    def de_estranhos(self) -> bool:
+        """O resultado e texto de estranhos: servidor de terceiros ou ferramenta marcada "traz texto de fora"."""
+        return vem_de_estranhos(self.sistema_origem, self.texto_de_fora)
+
+    @property
+    def de_terceiro(self) -> bool:
+        return self.sistema_origem != "proprio"
+
+    @property
+    def retiradas(self) -> int:
+        """Partes sem texto que a leitura com medida tirou do resultado (``META_RETIRADAS``); 0 sem a conta."""
+        meta = (self.resultado or {}).get("_meta")
+        quantas = meta.get(META_RETIRADAS) if isinstance(meta, dict) else None
+        return quantas if isinstance(quantas, int) and not isinstance(quantas, bool) and quantas > 0 else 0
 
     @property
     def antes_de_sair(self) -> bool:
@@ -104,7 +140,7 @@ SELECT o.id, o.protocolo, o.codigo_conferencia, o.pessoa_id, o.aplicativo_id, o.
        f.id AS fila_id, f.estado, f.ficha_id, f.limite_id, f.hora_saida, f.enviada_em, f.mudou_em, f.mudou_por,
        r.nome_vitrine, s.nome AS sistema_nome, d.decisao AS decisao_pessoa,
        fi.expira_em AS ficha_expira_em, fi.exige_passkey AS ficha_exige_passkey, fi.risco AS ficha_risco,
-       fi.decisao AS ficha_decisao
+       fi.decisao AS ficha_decisao, s.origem AS sistema_origem, r.texto_de_fora, fi.sinais AS ficha_sinais
 FROM operacoes o
 JOIN fila_saida f ON f.operacao_id = o.id
 JOIN ferramentas_revisadas r ON r.id = o.ferramenta_id
@@ -154,6 +190,9 @@ def _operacao(linha: Row[Any]) -> Operacao:
         ficha_exige_passkey=bool(linha.ficha_exige_passkey),
         ficha_risco=linha.ficha_risco,
         ficha_decisao=linha.ficha_decisao,
+        sistema_origem=linha.sistema_origem,
+        texto_de_fora=bool(linha.texto_de_fora),
+        ficha_sinais=_json(linha.ficha_sinais),
     )
 
 
@@ -364,11 +403,15 @@ async def gastar_limite(
 
 @dataclass(frozen=True, slots=True)
 class Rota:
-    """Por onde a acao passa: ficha (com ou sem passkey) ou limite ja gasto."""
+    """Por onde a acao passa: ficha (com ou sem passkey) ou limite ja gasto.
+
+    ``sinais``: retrato do alerta dos tres sinais (``sinais.Alerta.retrato``), gravado na ficha. Vem na rota
+    ``tres_sinais`` e tambem nas de risco alto e de experiencia, quando o alerta valia; nunca num limite."""
 
     limite_id: uuid.UUID | None = None
     exige_passkey: bool = False
     motivo: str = "ficha"
+    sinais: dict[str, Any] | None = None
 
     @property
     def por_limite(self) -> bool:
@@ -390,7 +433,12 @@ async def registrar_pedido(
     trace_id: str | None = None,
     aplicativo: Aplicativo | None = None,
 ) -> Operacao:
-    """``aplicativo`` (opcional, o mesmo de ``aplicativo_id``) poupa a consulta do extrato para um assistente."""
+    """``aplicativo`` (opcional, o mesmo de ``aplicativo_id``) poupa a consulta do extrato para um assistente.
+
+    Com ``rota.sinais`` (alerta dos tres sinais), a ficha guarda o retrato, ``acao_pedida`` leva
+    ``dados.tres_sinais`` e o extrato ganha a linha ``tres_sinais``. Um limite nunca leva o retrato."""
+    if rota.por_limite and rota.sinais is not None:
+        raise ValueError("Com o alerta dos tres sinais nenhum limite vale: a acao vai para a ficha.")
     protocolo = await novo_protocolo(c)
     codigo = codigo_conferencia(ferramenta.sistema.id, ferramenta.nome_original, argumentos)
     operacao_id = (
@@ -426,8 +474,8 @@ async def registrar_pedido(
         ficha_id = (
             await c.execute(
                 text(
-                    "INSERT INTO fichas (operacao_id, codigo_conferencia, expira_em, risco, exige_passkey)"
-                    " VALUES (:o, :co, now() + make_interval(mins => :m), :r, :pk) RETURNING id"
+                    "INSERT INTO fichas (operacao_id, codigo_conferencia, expira_em, risco, exige_passkey, sinais)"
+                    " VALUES (:o, :co, now() + make_interval(mins => :m), :r, :pk, CAST(:si AS jsonb)) RETURNING id"
                 ),
                 {
                     "o": operacao_id,
@@ -435,6 +483,7 @@ async def registrar_pedido(
                     "m": prazo_ficha_minutos,
                     "r": ferramenta.risco,
                     "pk": rota.exige_passkey,
+                    "si": json.dumps(rota.sinais, ensure_ascii=False) if rota.sinais is not None else None,
                 },
             )
         ).scalar_one()
@@ -462,9 +511,29 @@ async def registrar_pedido(
         pessoa_id=pessoa_id,
         sistema_id=ferramenta.sistema.id,
         ferramenta=ferramenta.nome_vitrine,
-        dados={"rota": rota.motivo, "risco": ferramenta.risco, "passkey": rota.exige_passkey},
+        dados={
+            "rota": rota.motivo,
+            "risco": ferramenta.risco,
+            "passkey": rota.exige_passkey,
+            "tres_sinais": rota.sinais is not None,
+        },
         trace_id=trace_id,
     )
+    if rota.sinais is not None:
+        de_fora, privado = sinais.nomes_do_retrato(rota.sinais)
+        await registrar(
+            c,
+            papel="entrada",
+            tipo="tres_sinais",
+            campos={"protocolo": protocolo, "de_fora": de_fora, "privado": privado},
+            protocolo=protocolo,
+            aplicativo_id=aplicativo_id,
+            pessoa_id=pessoa_id,
+            sistema_id=ferramenta.sistema.id,
+            ferramenta=ferramenta.nome_vitrine,
+            dados={"rota": rota.motivo, "janela_minutos": rota.sinais.get("janela_minutos")},
+            trace_id=trace_id,
+        )
     op = _existe(await por_id(c, operacao_id))
     return op
 
@@ -830,9 +899,20 @@ _TIPO_FINAL: Final = {
 
 
 async def finalizar(
-    c: AsyncConnection, op: Operacao, estado: Estado, resultado: dict[str, Any] | None, desfecho: str
+    c: AsyncConnection,
+    op: Operacao,
+    estado: Estado,
+    resultado: dict[str, Any] | None,
+    desfecho: str,
+    *,
+    pedidos: Sequence[str] = (),
 ) -> bool:
     """Grava o fim do envio. Se outra copia ja deu a acao como nao confirmada, so guarda a resposta.
+
+    ``pedidos``: as categorias do que o sistema pediu no meio da chamada (``Resposta.pedidos``, nosso vocabulario),
+    em ``dados.pedidos`` da linha do fim, para a tela de pedidos recusados do ADMIN mostrar tambem as acoes: sempre
+    em ``acao_sistema_pediu_dados`` e ``acao_enviada`` (como antes, lista vazia sem pedido) e, com pedido, tambem em
+    ``acao_nao_confirmada`` e ``acao_nao_saiu`` (contrato K9).
 
     Nova tentativa depois de um COMMIT que deu certo, mas cuja confirmacao se perdeu: a linha ja tem o que este
     fim gravou (``_fim_ja_gravado``), antes ou depois de uma retomada. Nada e gravado de novo."""
@@ -861,10 +941,14 @@ async def finalizar(
     )
     tipo = _TIPO_FINAL[estado]
     campos: dict[str, object] = {"protocolo": op.protocolo}
+    dados: dict[str, Any] = {"desfecho": desfecho[:120], "gravado": mudou is not None}
     if tipo == "acao_enviada":
         campos["ferramenta"] = op.nome_vitrine
+        dados["texto_de_fora"] = op.de_estranhos
     elif tipo == "acao_nao_saiu":
         campos["motivo"] = desfecho
+    if pedidos or tipo in ("acao_enviada", "acao_sistema_pediu_dados"):
+        dados["pedidos"] = list(pedidos)
     await registrar(
         c,
         papel="despachante",
@@ -875,7 +959,7 @@ async def finalizar(
         aplicativo_id=op.aplicativo_id,
         sistema_id=op.sistema_id,
         ferramenta=op.nome_vitrine,
-        dados={"desfecho": desfecho[:120], "gravado": mudou is not None},
+        dados=dados,
     )
     return mudou is not None
 
@@ -1063,6 +1147,77 @@ async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, jan
         dados={"bloqueio_id": str(b.id)},
     )
     return comprovante
+
+
+# Quarentena de um servidor de terceiros (Fase 3)
+
+
+async def parar_por_quarentena(
+    c: AsyncConnection, sistema_id: uuid.UUID, *, motivo: str, papel: str, quem: str
+) -> list[str]:
+    """Na transacao que poe o servidor em quarentena (com a trava exclusiva do sistema ja tomada e, antes, os
+    limites suspensos por ``suspender_limites``): o que espera a ficha ou esta liberado vira ``cancelada``, com
+    ``motivo`` no desfecho e ``acao_parada`` no extrato de cada pessoa. O que ja esta "enviando" segue: ja saiu. As
+    linhas sao travadas em ordem de ``id``.
+
+    A ficha nao muda: confirmar depois nao libera nada, porque a linha da fila ja nao espera a ficha.
+    Devolve os protocolos parados."""
+    linhas = (
+        await c.execute(
+            text(
+                _SQL_OPERACAO + " WHERE o.sistema_id = :s AND f.estado IN ('aguardando_ficha', 'liberada')"
+                " ORDER BY f.id FOR UPDATE OF f"
+            ),
+            {"s": sistema_id},
+        )
+    ).all()
+    paradas: list[str] = []
+    for linha in linhas:
+        op = _operacao(linha)
+        if await parar(c, op, Estado.CANCELADA, motivo, quem=quem, papel=papel):
+            paradas.append(op.protocolo)
+    return paradas
+
+
+SQL_SUSPENDER_LIMITES = """
+WITH alvo AS (
+  SELECT id FROM limites WHERE sistema_id = :s AND situacao = 'ativo' ORDER BY id FOR UPDATE
+), mudou AS (
+  UPDATE limites l SET situacao = 'suspenso', motivo = :m
+  FROM alvo WHERE l.id = alvo.id AND l.situacao = 'ativo'
+  RETURNING l.id, l.pessoa_id, l.aplicativo_id, l.nome_original
+)
+SELECT mudou.id, mudou.pessoa_id, mudou.aplicativo_id,
+       coalesce(
+         (SELECT r.nome_vitrine FROM ferramentas_revisadas r
+          WHERE r.sistema_id = :s AND r.nome_original = mudou.nome_original
+          ORDER BY (r.situacao = 'ativa') DESC, r.versao DESC LIMIT 1),
+         mudou.nome_original) AS ferramenta
+FROM mudou
+ORDER BY mudou.id
+"""
+
+
+async def suspender_limites(c: AsyncConnection, sistema_id: uuid.UUID, *, motivo: str, papel: str) -> int:
+    """Suspende todos os limites ativos do sistema (critica M2), com ``motivo`` e ``limite_suspenso`` no extrato
+    de cada pessoa. So de ``ativo`` para ``suspenso`` (a guarda do banco so deixa o despachante fazer isso). A
+    pessoa refaz o limite depois da nova revisao. Devolve quantos foram suspensos.
+
+    Chamada antes de ``parar_por_quarentena`` (a linha do limite antes da linha da fila: ver o topo do modulo)."""
+    linhas = (await c.execute(text(SQL_SUSPENDER_LIMITES), {"s": sistema_id, "m": motivo})).all()
+    for linha in linhas:
+        await registrar(
+            c,
+            papel=papel,
+            tipo="limite_suspenso",
+            campos={"ferramenta": linha.ferramenta, "motivo": motivo},
+            pessoa_id=uuid.UUID(str(linha.pessoa_id)),
+            aplicativo_id=uuid.UUID(str(linha.aplicativo_id)),
+            sistema_id=sistema_id,
+            ferramenta=linha.ferramenta,
+            dados={"limite_id": str(linha.id), "situacao": "suspenso"},
+        )
+    return len(linhas)
 
 
 async def comprovante_do_bloqueio(c: AsyncConnection, bloqueio_id: uuid.UUID) -> Comprovante | None:

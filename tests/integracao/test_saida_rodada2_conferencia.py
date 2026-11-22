@@ -207,7 +207,7 @@ async def test_argumento_com_caractere_nulo_e_recusado_antes_de_virar_protocolo(
     f = await vitrine(amb)
     antes = await contar_operacoes(amb)
     with pytest.raises(AcaoRecusada) as recusa:
-        await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, argumentos, None))
+        await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, argumentos, None, terceiros=False))
     assert (recusa.value.motivo, recusa.value.mensagem) == ("caractere_nulo", RECUSA_NULO)
     assert "Nada foi enviado." in recusa.value.mensagem
     assert await contar_operacoes(amb) == antes

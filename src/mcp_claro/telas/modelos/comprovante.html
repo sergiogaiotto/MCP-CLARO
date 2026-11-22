@@ -4,7 +4,7 @@
 <h1>Comprovante {% if p.tipo == "bloqueio" %}do bloqueio{% else %}da pausa{% endif %}</h1>
 <section class="cartao comprovante">
   <dl>
-    <dt>O que parou</dt><dd>{{ p.o_que }}</dd>
+    <dt>O que parou</dt><dd><bdi>{{ p.o_que | escondidos }}</bdi></dd>
     <dt>Como</dt><dd>{% if p.tipo == "bloqueio" %}Bloqueado{% else %}Pausado{% endif %}</dd>
     <dt>Desde</dt><dd>{{ p.desde | data_hora }}</dd>
     <dt>Quem ligou</dt><dd>{{ p.quem }}</dd>

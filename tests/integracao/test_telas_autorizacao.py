@@ -34,6 +34,8 @@ from mcp_claro.despachante import autorizacao, chaves
 from mcp_claro.despachante.app import criar_app_despachante
 from mcp_claro.entrada.app import criar_app_entrada
 from mcp_claro.entrada.despachante_cliente import ClienteDespachante
+from mcp_claro.telas import autorizar
+from tests import apoio_terceiros as t3
 from tests.apoio import cliente_mcp, porta_livre, servidor
 from tests.cifra_falsa import CifraFalsa
 from tests.idp_oidc_falso import IdpOidcFalso
@@ -450,6 +452,66 @@ async def test_volta_com_estado_de_outra_pessoa_e_recusada(amb: Ambiente) -> Non
     r = await ana.get("/telas/autorizar/volta?state=x&error=access_denied")
     assert r.status_code == 403
     assert "Nada foi guardado" in r.text
+
+
+async def test_terceiro_com_a_chave_da_fase_3_desligada_tem_frase_propria(amb: Ambiente) -> None:
+    """Servidor de terceiros com a chave da Fase 3 desligada: so pessoa de teste autoriza. A pessoa real ve a frase
+    com acento (``telas.autorizar.MENSAGENS``), no comeco e na volta, e nada fica guardado."""
+    frase = autorizar.MENSAGENS["terceiros_desligados"]
+    assert amb.p.FEATURE_PHASE3_THIRD_PARTY is False
+    async with amb.admin.begin() as c:
+        terceiro_id = await t3.cadastrar_terceiro(
+            c,
+            nome=f"terceiro-{sufixo()}",
+            tipo_chave="por_pessoa",
+            autorizacao={
+                "authorization_endpoint": f"{amb.url_oauth}/authorize",
+                "token_endpoint": f"{amb.url_oauth}/token",
+                "client_id": amb.oauth.client_id,
+                "escopos": ["leitura"],
+                "autenticacao_cliente": "none",
+            },
+        )
+    async with amb.entrada_db.begin() as c:
+        modelo_id = await repositorio.criar_modelo_ordem(
+            c,
+            nome=f"Terceiro {sufixo()}",
+            descricao="Deixa o aplicativo ler no servidor de terceiros.",
+            ferramentas=[(terceiro_id, "ler")],
+            validade_dias=30,
+            criado_por="admin-teste",
+        )
+    nav, _, pessoa_id = await amb.nova_pessoa("Ana")  # nasce de teste
+    async with amb.entrada_db.begin() as c:
+        await repositorio.conceder_ordem(
+            c, pessoa_id=pessoa_id, aplicativo_id=amb.aplicativo_id, modelo_id=modelo_id, dias=7, max_dias=30
+        )
+    r = await nav.get("/telas/autorizar")
+    achado = re.search(rf'href="(/telas/autorizar/{terceiro_id}/ir\?ficha=[0-9a-f]+)"', r.text)
+    assert achado, "a lista nao trouxe o terceiro"
+    link = achado.group(1)
+    # De teste, comeca: o estado fica guardado no despachante.
+    r = await nav.get(link)
+    assert r.status_code == 303, r.text
+    estado = parse_qs(urlsplit(r.headers["location"]).query)["state"][0]
+    async with amb.admin.begin() as c:
+        await c.execute(text("UPDATE pessoas SET teste = false WHERE id = :p"), {"p": pessoa_id})
+    # Pessoa real: o comeco e recusado com a frase propria.
+    r = await nav.get(link)
+    assert r.status_code == 403
+    assert frase in r.text
+    assert "estao desligados" not in r.text  # nunca a mensagem sem acento do despachante
+    # E a volta do estado que ja estava guardado tambem.
+    r = await nav.get(f"/telas/autorizar/volta?{urlencode({'state': estado, 'code': 'codigo-qualquer'})}")
+    assert r.status_code == 403
+    assert frase in r.text
+    async with amb.admin.connect() as c:
+        guardadas = (
+            await c.execute(text("SELECT count(*) FROM chaves_cifradas WHERE sistema_id = :s"), {"s": terceiro_id})
+        ).scalar_one()
+    assert guardadas == 0
+    recusas = await amb.extrato("autorizacao_recusada", pessoa_id)
+    assert any("terceiros_desligados" in linha.frase for linha in recusas)  # a volta gastou o estado e registrou
 
 
 async def test_ficha_do_link_impede_comecar_por_outro_site(amb: Ambiente) -> None:

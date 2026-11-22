@@ -2,7 +2,8 @@
 {% block titulo %}Revisar {{ nome | escondidos }}{% endblock %}
 {% block conteudo %}
 <p><a href="/telas/admin/sistemas/{{ sistema.id }}">Sistema {{ sistema.nome }}</a></p>
-<h1>Revisar a ferramenta <code>{{ nome | escondidos }}</code></h1>
+<h1>Revisar a ferramenta <code class="estranho">{{ nome | escondidos }}</code></h1>
+{% if terceiro %}<p class="dica">Ferramenta de um servidor de terceiros ({{ sistema.origem | origem }}).</p>{% endif %}
 {% if mudou %}
 <p class="recusa">O sistema mudou esta ferramenta desde a última revisão. Confira tudo de novo.</p>
 {% endif %}
@@ -12,21 +13,59 @@
   <p class="dica">Este texto vem do sistema. Ele não é mostrado às pessoas nem aos aplicativos.</p>
   <p class="estranho">{{ definicao.get("description", "(sem descrição)") | escondidos }}</p>
   <p><strong>Campos que a ferramenta pede:</strong></p>
-  <pre>{{ esquema_entrada | escondidos }}</pre>
+  <pre class="estranho">{{ esquema_entrada | escondidos }}</pre>
 </section>
+
+{% if antes %}
+<section class="cartao antes-depois">
+  <h2>Antes e depois</h2>
+  <p class="dica">O que o servidor declarava na sua última revisão, para comparar com o que ele declara agora (acima). Este texto também vem do sistema.</p>
+  <p><strong>Descrição na sua revisão:</strong></p>
+  <p class="estranho">{{ antes.get("description", "(sem descrição)") | escondidos }}</p>
+  <p><strong>Campos na sua revisão:</strong></p>
+  <pre class="estranho">{{ antes_esquema | escondidos }}</pre>
+</section>
+{% endif %}
+
+{% if terceiro %}
+<section class="cartao">
+  <h2>O que o aplicativo vai ver</h2>
+  <p>Nada do texto escrito pelo fornecedor vai para o aplicativo, nem as dicas como “só leitura”.</p>
+  {% if recusa_previa %}
+  <p class="recusa">{{ recusa_previa }}</p>
+  {% else %}
+  <p class="dica">Os campos que o aplicativo preenche, sem as descrições do fornecedor e com as descrições que você escrever abaixo:</p>
+  <pre class="estranho">{{ previa | escondidos }}</pre>
+  {% endif %}
+  <p class="dica">O MCP-CLARO não confere as regras de formato (pattern) nem a regra de itens sem repetição (uniqueItems) deste servidor: quem confere é o próprio servidor.</p>
+</section>
+{% endif %}
 
 <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/ferramenta" class="cartao">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="nome" value="{{ nome }}">
+  {# A impressao do que esta pagina mostrou: a revisao recusa (409) se a ferramenta mudou depois. Vazia, segue. #}
+  <input type="hidden" name="impressao_vista" value="{{ impressao_vista | default('') }}">
   <h2>Sua revisão</h2>
   <label for="nome_vitrine">Nome na vitrine</label>
   <input type="text" id="nome_vitrine" name="nome_vitrine" required maxlength="128" value="{{ valores.nome_vitrine }}">
   <p class="dica">É o nome que o aplicativo de IA vê. Use letras sem acento, números e _ . -</p>
+  {% if terceiro %}<p class="dica">Escreva um nome seu: o nome declarado é texto do fornecedor.</p>{% endif %}
   <label for="titulo">Título (opcional)</label>
   <input type="text" id="titulo" name="titulo" maxlength="120" value="{{ valores.titulo }}">
   <label for="descricao">Descrição própria</label>
   <textarea id="descricao" name="descricao" required maxlength="1000">{{ valores.descricao }}</textarea>
   <p class="dica">Escreva com suas palavras o que a ferramenta faz. Este é o texto que as pessoas veem.</p>
+  {% if terceiro and campos_entrada %}
+  <fieldset>
+    <legend>Descrição de cada campo (opcional)</legend>
+    <p class="dica">O aplicativo vê só estas descrições, escritas por você, até {{ descricao_maxima }} letras cada. Deixe em branco o que não precisa de explicação.</p>
+    {% for campo in campos_entrada %}
+    <label for="desc-{{ loop.index }}">Descrição do campo <code class="estranho">{{ campo | escondidos }}</code></label>
+    <input type="text" id="desc-{{ loop.index }}" name="{{ prefixo_descricao }}{{ campo }}" maxlength="{{ descricao_maxima }}" value="{{ valores.get('descricoes', {}).get(campo, '') }}">
+    {% endfor %}
+  </fieldset>
+  {% endif %}
   <fieldset>
     <legend>Classe</legend>
     <label class="opcao"><input type="radio" name="classe" value="le" {% if valores.classe == "le" %}checked{% endif %}> Só lê: não muda nada no sistema.</label>
@@ -40,10 +79,20 @@
     {% endfor %}
   </fieldset>
   <fieldset>
+    <legend>Texto de fora</legend>
+    {% if terceiro %}
+    <label class="opcao"><input type="checkbox" name="texto_de_fora" value="sim" checked disabled> Traz texto escrito por gente de fora (e-mail, página, comentário)</label>
+    <p class="dica">Sempre, em servidor de terceiros: a resposta conta como texto de fora.</p>
+    {% else %}
+    <label class="opcao"><input type="checkbox" name="texto_de_fora" value="sim" {% if valores.get("texto_de_fora") %}checked{% endif %}> Traz texto escrito por gente de fora (e-mail, página, comentário)</label>
+    <p class="dica">Marcada, a resposta chega ao aplicativo dentro de uma moldura, com um aviso de que é texto de fora e pode trazer instruções falsas.</p>
+    {% endif %}
+  </fieldset>
+  <fieldset>
     <legend>Campos pessoais da resposta</legend>
     <p class="dica">Estes campos são mascarados antes de chegar ao aplicativo.</p>
     {% for campo in campos_saida %}
-    <label class="opcao"><input type="checkbox" name="campos" value="{{ campo }}" {% if campo in valores.campos %}checked{% endif %}> <code>{{ campo | escondidos }}</code></label>
+    <label class="opcao"><input type="checkbox" name="campos" value="{{ campo }}" {% if campo in valores.campos %}checked{% endif %}> <code{% if terceiro %} class="estranho"{% endif %}>{{ campo | escondidos }}</code></label>
     {% endfor %}
     <label for="outros_campos">Outros campos (separados por vírgula)</label>
     <input type="text" id="outros_campos" name="outros_campos" maxlength="1000" value="{{ outros_campos }}">
@@ -54,12 +103,13 @@
     <p class="dica">Para que serve: uma pessoa pode criar um limite "só estes destinatários" para esta ação. O MCP-CLARO confere só os campos marcados aqui: um deles precisa trazer um destinatário que a pessoa aceitou, e os outros marcados precisam vir vazios. O resto do pedido fica livre. Sem nenhum campo marcado, o limite desta ação só pode valer para qualquer destinatário.</p>
     <p class="dica">Se você marcar um campo que não estava marcado, os limites "só estes destinatários" desta ação criados antes terminam agora (eles não conferem o campo novo), e o que eles liberaram e ainda espera a hora de sair é cancelado. Cada pessoa vê isso no extrato e pode criar outro limite.</p>
     {% for campo in campos_entrada %}
-    <label class="opcao"><input type="checkbox" name="destinatario" value="{{ campo }}" {% if campo in valores.get("destinatario", []) %}checked{% endif %}> <code>{{ campo | escondidos }}</code></label>
+    <label class="opcao"><input type="checkbox" name="destinatario" value="{{ campo }}" {% if campo in valores.get("destinatario", []) %}checked{% endif %}> <code{% if terceiro %} class="estranho"{% endif %}>{{ campo | escondidos }}</code></label>
     {% else %}
     <p>Esta ferramenta não pede nenhum campo.</p>
     {% endfor %}
   </fieldset>
   <button type="submit">Gravar a revisão</button>
   {% if revisao %}<p class="dica">Revisão atual: versão {{ revisao.versao }}. Gravar cria a versão seguinte.</p>{% endif %}
+  {% if terceiro %}<p class="dica">Num servidor de terceiros, gravar uma revisão nova tira esta ferramenta da vitrine até você concluir a revisão do servidor de novo.</p>{% endif %}
 </form>
 {% endblock %}

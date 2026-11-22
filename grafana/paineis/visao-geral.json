@@ -44,7 +44,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "So contagens, sem pessoa e sem conteudo. O MCP-CLARO fala **so a versao 2026-07-28** do MCP, dos dois lados: aplicativo ou sistema que pede outra versao e recusado e aparece logo abaixo. Os numeros chegam a cada 30 segundos."
+        "content": "So contagens, sem pessoa e sem conteudo. O MCP-CLARO fala **so a versao 2026-07-28** do MCP, dos dois lados: aplicativo ou sistema que pede outra versao e recusado e aparece logo abaixo. Servidores de terceiros tem um bloco proprio no fim do painel. Os numeros chegam a cada 30 segundos."
       }
     },
     {
@@ -1045,6 +1045,187 @@
           "mode": "multi",
           "sort": "desc"
         }
+      }
+    },
+    {
+      "type": "row",
+      "id": 22,
+      "title": "Servidores de terceiros (Fase 3)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 79
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 23,
+      "title": "Servidores de terceiros recusados por versao",
+      "description": "Quantos servidores de terceiros diferentes foram recusados porque nao falam a versao 2026-07-28 do MCP, no cadastro ou numa nova sondagem, no periodo escolhido. Fica fora do alerta alto de sistema recusado: o ADMIN ve aqui e no resumo semanal.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 80,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(DISTINCT sistema) AS \"Servidores\"\nFROM medicoes.v_recusas_versao_sistema\nWHERE motivo = 'cadastro_terceiro' AND $__timeFilter(minuto)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "id": 24,
+      "title": "Servidores de terceiros em quarentena agora",
+      "description": "Servidores de terceiros em quarentena (mudou, parou): mudaram o que declaram depois da revisao, ou nao responderam a conferencia em rodadas seguidas. Nada deles chega as pessoas ate o ADMIN revisar de novo.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 80,
+        "w": 6,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(sum(sistemas), 0) AS \"Servidores\"\nFROM medicoes.v_terceiros\nWHERE situacao = 'quarentena'"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "table",
+      "id": 25,
+      "title": "Servidores de terceiros por situacao",
+      "description": "Quantos servidores de terceiros ha em cada situacao, e se tem revisao do servidor vigente. So um servidor ativo e revisado aparece para as pessoas.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 80,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT situacao AS \"Situacao\",\n       CASE WHEN revisado THEN 'sim' ELSE 'nao' END AS \"Revisao do servidor vigente\",\n       sistemas AS \"Servidores\"\nFROM medicoes.v_terceiros\nORDER BY 1, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
       }
     }
   ]

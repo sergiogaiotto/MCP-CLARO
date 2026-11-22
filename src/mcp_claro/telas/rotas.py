@@ -188,6 +188,8 @@ class TelasDaPessoa:
                 "aplicativos": aplicativos,
                 "modelos": modelos,
                 "maximo_dias": maximo,
+                # A chave da Fase 3: com ela desligada, a pessoa real ouve que os terceiros nao valem para ela.
+                "terceiros_ligados": bool(self.t.p.FEATURE_PHASE3_THIRD_PARTY),
                 "erros": erros or [],
                 "valores": valores or {},
             },

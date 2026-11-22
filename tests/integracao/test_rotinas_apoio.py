@@ -12,7 +12,6 @@ import asyncio
 import contextlib
 import datetime as dt
 import ipaddress
-import socket
 import ssl
 import time
 import uuid
@@ -23,12 +22,12 @@ from typing import Any
 
 import httpx2
 import pytest
-import uvicorn
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mcp_claro.config.settings import Parametros
 from mcp_claro.db.engine import criar_engine
+from tests.apoio import servidor
 
 IMAGEM_MAILPIT = "axllent/mailpit:v1.34.0"
 
@@ -173,35 +172,14 @@ def certificado_local(pasta: Path) -> tuple[Path, Path]:
     return caminho_cert, caminho_chave
 
 
-def _porta_livre() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
 @contextlib.asynccontextmanager
 async def servidor_https(app: Any, cert: Path, chave: Path) -> AsyncIterator[str]:
-    porta = _porta_livre()
-    config = uvicorn.Config(
-        app,
-        host="127.0.0.1",
-        port=porta,
-        log_level="warning",
-        lifespan="off",
-        ssl_certfile=str(cert),
-        ssl_keyfile=str(chave),
-    )
-    srv = uvicorn.Server(config)
-    tarefa = asyncio.create_task(srv.serve())
-    for _ in range(200):
-        if srv.started:
-            break
-        await asyncio.sleep(0.02)
-    try:
-        yield f"https://127.0.0.1:{porta}"
-    finally:
-        srv.should_exit = True
-        await tarefa
+    """Sobe ``app`` em https://127.0.0.1:<porta> com o certificado dado, por ``tests.apoio.servidor``: a porta fica
+    reservada desde a escolha ate o servidor escutar nela (outra sessao de testes nao a toma no meio), e a URL so
+    sai com o servidor no ar. Se ele nao sobe, o teste para aqui, com o erro da partida ou um ``RuntimeError`` com
+    o endereco, em vez de seguir com a porta fechada."""
+    async with servidor(app, ssl_certfile=str(cert), ssl_keyfile=str(chave)) as url:
+        yield url
 
 
 def confia_em(cert: Path) -> ssl.SSLContext:

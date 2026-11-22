@@ -1,14 +1,22 @@
 # MCP-CLARO: ambiente de desenvolvimento e teste.
 # Antes de subir: scripts/gerar-segredos-dev.sh (segredos SO de teste, em .segredos/).
 #   docker compose -f docker/compose.yml up --build
-# Redes: borda (sai para a internet), interna (sem saida), saida (so quem chama para fora).
+# Redes: borda (sai para a internet), interna (sem saida), saida (so quem chama para fora), visitas (so o
+# despachante e a sala de visitas, sem saida) e saida_visitas (so a sala, para os servidores de terceiros).
+# A imagem do gateway pode vir pronta: MCP_CLARO_IMAGEM=<nome:etiqueta> (padrao mcp-claro:dev, construida aqui).
 name: mcp-claro
+
+# O ambiente (APP_ENV) de todos os papeis, a sala de visitas incluida, num lugar so. A sala nao recebe o resto do
+# ambiente do gateway (ele tem DATABASE_* e VAULT_*), e a partida dela recusa subir sem APP_ENV escrito: sem ele,
+# ela subiria como desenvolvimento e aceitaria enderecos locais.
+x-app-env: &app_env
+  APP_ENV: teste
 
 x-gateway: &gateway
   build:
     context: ..
     dockerfile: docker/Dockerfile
-  image: mcp-claro:dev
+  image: ${MCP_CLARO_IMAGEM:-mcp-claro:dev}
   read_only: true
   restart: unless-stopped
   security_opt: ["no-new-privileges:true"]
@@ -16,7 +24,7 @@ x-gateway: &gateway
   logging:
     driver: local
   environment: &ambiente
-    APP_ENV: teste
+    <<: *app_env
     PUBLIC_BASE_URL: https://mcp-claro.localhost
     DATABASE_URL: postgresql://mcp_claro_entrada@banco:5432/mcp_claro
     DB_SSLMODE: verify-full
@@ -27,6 +35,8 @@ x-gateway: &gateway
     # A entrada busca a lista JWKS pela rede interna, sem passar pelo portao.
     IDP_JWKS_URL: http://login:8080/login/realms/mcp-claro/protocol/openid-connect/certs
     DISPATCHER_INTERNAL_URL: https://despachante:9443
+    # Sala de visitas (Fase 3): so o despachante fala com ela; fora de desenvolvimento e teste, e obrigatoria.
+    VISITS_INTERNAL_URL: https://visitas:9446
     VAULT_ADDR: https://cofre:8200
     VAULT_SEAL_MODE: static
     # Avisos ao ADMIN: as rotinas (fichas, programas, ronda) e o despachante (cofre trancado fecha a saida).
@@ -128,15 +138,113 @@ services:
       INTERNAL_HEALTH_KEY_FILE: /run/secrets/despachante_saude_key.pem
       VAULT_ROLE_ID_FILE: /run/secrets/cofre_despachante_role_id
       VAULT_SECRET_ID_FILE: /run/secrets/cofre_despachante_secret_id
+      # mTLS com a sala de visitas: confia so na ca_visitas e leva o certificado da ca_clientes_visitas.
+      VISITS_CA_FILE: /run/secrets/ca_visitas.pem
+      VISITS_CLIENT_CERT_FILE: /run/secrets/despachante_visitas_cliente_cert.pem
+      VISITS_CLIENT_KEY_FILE: /run/secrets/despachante_visitas_cliente_key.pem
     secrets: [db_despachante, ca_interna.pem, despachante_cert.pem, despachante_key.pem, ca_clientes_despachante.pem,
               despachante_saude_cert.pem, despachante_saude_key.pem, cofre_despachante_role_id,
-              cofre_despachante_secret_id]
+              cofre_despachante_secret_id, ca_visitas.pem, despachante_visitas_cliente_cert.pem,
+              despachante_visitas_cliente_key.pem]
     depends_on:
       migrar:
         condition: service_completed_successfully
       cofre-iniciar:
         condition: service_completed_successfully
-    networks: [interna, saida]
+    # interna: banco, cofre e quem o chama. saida: sistemas proprios e a troca de chave (OAuth) dos terceiros.
+    # visitas: a sala de visitas, que fala com os servidores de terceiros.
+    networks: [interna, saida, visitas]
+
+  visitas:
+    # Sala de visitas (Fase 3; ajustes D1, A1 e M4): fala com os servidores de terceiros, cada chamada num processo
+    # filho novo. Sem banco, sem cofre e sem extrato: nenhum segredo alem do proprio certificado (a partida recusa
+    # DATABASE_*, DB_*, VAULT_* e outros *_FILE). A porta 9446 so aceita o certificado de cliente do despachante.
+    # A rede e a do visitas-muro: so o despachante (rede visitas) e enderecos publicos (rede saida_visitas).
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: ${MCP_CLARO_IMAGEM:-mcp-claro:dev}
+    # Partida por "python -m mcp_claro", nao pelo script mcp-claro da imagem: o spawn roda de novo, em cada filho e
+    # antes do isolamento, o programa principal do pai quando ele e um script (e com ele o mcp_claro.__main__ e o
+    # que ele importa); o __main__ de um pacote, o spawn pula. Medido na imagem: 60 modulos e cerca de 5 MB a menos
+    # por filho.
+    entrypoint: ["/app/.venv/bin/python", "-m", "mcp_claro"]
+    command: ["visitas"]
+    read_only: true
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs: ["/tmp"]
+    environment:
+      <<: *app_env
+      VISITS_INTERNAL_PORT: "9446"
+      # Certificado de servidor da ca_visitas (so serverAuth) e, como autoridade de clientes, a ca_clientes_visitas.
+      # INTERNAL_CA_FILE e a ca_visitas: so a conferencia de saude a usa.
+      INTERNAL_CA_FILE: /run/secrets/ca_visitas.pem
+      INTERNAL_CERT_FILE: /run/secrets/visitas_cert.pem
+      INTERNAL_KEY_FILE: /run/secrets/visitas_key.pem
+      INTERNAL_CLIENT_CA_FILE: /run/secrets/ca_clientes_visitas.pem
+    secrets: [ca_visitas.pem, visitas_cert.pem, visitas_key.pem, ca_clientes_visitas.pem]
+    healthcheck:
+      test: ["CMD", "python", "-m", "mcp_claro.visitas.saude"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    depends_on:
+      visitas-muro:
+        condition: service_healthy
+    network_mode: "service:visitas-muro"
+    logging:
+      driver: local
+
+  visitas-muro:
+    # Dono da rede da sala de visitas (a sala usa network_mode: service:visitas-muro, e o nome visitas aponta para
+    # ca). Na partida, tira da tabela de rotas todo destino que nao e publico: link-local (169.254.0.0/16, onde fica o
+    # servico de metadados das nuvens), redes privadas, CGNAT, reservadas e multicast, a propria rede saida_visitas
+    # (o host e os vizinhos) e o lado do host da rede visitas. Ficam o despachante (rede visitas) e a saida para
+    # enderecos publicos. As redes da sala nao tem IPv6. So este conteiner tem NET_ADMIN, e depois ele so dorme;
+    # a sala nao tem capacidade nenhuma e nao muda as rotas.
+    image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+    init: true
+    read_only: true
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_ADMIN"]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        falhar() { echo "visitas-muro: $$*" >&2; exit 1; }
+        gw=$$(ip route | awk '$$1=="default" {print $$3; exit}')
+        dev=$$(ip route | awk '$$1=="default" {print $$5; exit}')
+        [ -n "$$gw" ] && [ -n "$$dev" ] || falhar "sem rota de saida (rede saida_visitas)"
+        saida=$$(ip route | awk -v d="$$dev" '$$1!="default" && $$2=="dev" && $$3==d {print $$1; exit}')
+        visitas=$$(ip route | awk -v d="$$dev" '$$1!="default" && $$2=="dev" && $$3!=d {print $$1; exit}')
+        [ -n "$$saida" ] && [ -n "$$visitas" ] || falhar "faltam as redes visitas e saida_visitas"
+        rede=$$(ipcalc -n "$$visitas" | sed 's/^NETWORK=//')
+        host_visitas="$${rede%.*}.$$(( $${rede##*.} + 1 ))"
+        for destino in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 \
+          192.88.99.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 \
+          "$$saida" "$$host_visitas/32"; do
+          ip route replace unreachable "$$destino"
+        done
+        ip route replace default via "$$gw" dev "$$dev" onlink
+        echo "visitas-muro: so o despachante ($$visitas) e enderecos publicos"
+        trap 'exit 0' TERM INT
+        while :; do sleep 3600 & wait $$!; done
+    healthcheck:
+      test: ["CMD-SHELL", "ip route | grep -q '^unreachable 169.254.0.0/16' && ip route | grep -q '^default .* onlink'"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      visitas:
+        aliases: [visitas]
+      saida_visitas: {}
+    logging:
+      driver: local
 
   rotinas:
     <<: *gateway
@@ -430,6 +538,11 @@ networks:
   interna:
     internal: true
   saida: {}
+  # So o despachante e a sala de visitas; sem saida.
+  visitas:
+    internal: true
+  # So a sala de visitas, para os servidores de terceiros (a rota fica so para enderecos publicos: visitas-muro).
+  saida_visitas: {}
 
 volumes:
   banco: {}
@@ -495,3 +608,10 @@ secrets:
   db_backup: { file: ../.segredos/db_backup }
   backup_cert.pem: { file: ../.segredos/backup_cert.pem }
   backup_key.pem: { file: ../.segredos/backup_key.pem }
+  # Sala de visitas (critica M4): autoridade propria da sala e a autoridade dos clientes dela (so o despachante).
+  ca_visitas.pem: { file: ../.segredos/ca_visitas.pem }
+  visitas_cert.pem: { file: ../.segredos/visitas_cert.pem }
+  visitas_key.pem: { file: ../.segredos/visitas_key.pem }
+  ca_clientes_visitas.pem: { file: ../.segredos/ca_clientes_visitas.pem }
+  despachante_visitas_cliente_cert.pem: { file: ../.segredos/despachante_visitas_cliente_cert.pem }
+  despachante_visitas_cliente_key.pem: { file: ../.segredos/despachante_visitas_cliente_key.pem }

@@ -11,6 +11,15 @@
 <p class="atencao">A passkey está desligada nesta instalação. No lugar dela, criar e ampliar um limite pedem um login refeito na hora. Encerrar não pede.</p>
 {% endif %}
 
+{% if alertas is defined and alertas %}
+<div class="atencao" role="status" id="alerta-tres-sinais">
+  {% for x in alertas %}
+  <p>Enquanto durar o alerta dos três sinais (até {{ x.ate }}), seus limites com <bdi>{{ x.aplicativo | escondidos }}</bdi> não valem.</p>
+  {% endfor %}
+  <p class="dica">Nesse tempo, cada ação desse aplicativo passa pela ficha, que mostra o motivo. A hora é a de Brasília e vale se nenhum sinal novo chegar.</p>
+</div>
+{% endif %}
+
 <h2>Valendo agora</h2>
 {% if not ativos %}
 <p class="cartao">Nenhum limite seu vale agora. Toda ação passa pela ficha.</p>
@@ -20,7 +29,7 @@
   <tbody>
   {% for x in ativos %}
     <tr>
-      <td>{{ x.linha.ferramenta | escondidos }} <span class="dica">pelo aplicativo {{ x.linha.aplicativo }}, no sistema {{ x.linha.sistema }}</span>{% if x.nao_vale_com_passkey %}<br><strong>Não vale com a passkey ligada.</strong> <span class="dica">Foi criado ou ampliado sem a passkey: as ações dele passam pela ficha. Encerre e crie outro, com a passkey.</span>{% endif %}</td>
+      <td>{% if x.nome_de_fora %}<span class="estranho">{{ x.linha.ferramenta | escondidos }}</span>{% else %}{{ x.linha.ferramenta | escondidos }}{% endif %} <span class="dica">pelo aplicativo <bdi>{{ x.linha.aplicativo | escondidos }}</bdi>, no sistema <bdi>{{ x.linha.sistema | escondidos }}</bdi></span>{% if x.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}{% if x.nao_vale_com_passkey %}<br><strong>Não vale com a passkey ligada.</strong> <span class="dica">Foi criado ou ampliado sem a passkey: as ações dele passam pela ficha. Encerre e crie outro, com a passkey.</span>{% endif %}</td>
       <td>{{ x.destinatarios }}</td>
       <td>{{ x.linha.usados_hoje }} de {{ x.linha.por_dia }}</td>
       <td>{{ x.linha.valido_ate | data_hora }}</td>
@@ -44,7 +53,7 @@
 {% endif %}
 {% for e in escolhas %}
 <section class="cartao">
-  <h3>{{ e.nome_vitrine }} <span class="dica">pelo aplicativo {{ e.aplicativo }}, no sistema {{ e.sistema }}</span></h3>
+  <h3>{{ e.nome_vitrine }} <span class="dica">pelo aplicativo <bdi>{{ e.aplicativo | escondidos }}</bdi>, no sistema <bdi>{{ e.sistema | escondidos }}</bdi></span>{% if e.de_terceiro %} <span class="etiqueta">de terceiros</span>{% endif %}</h3>
   <p>{{ e.descricao }}</p>
   <p><a class="botao" href="/telas/limites/novo?escolha={{ e.chave }}" hx-boost="false">Criar limite para esta ação</a></p>
 </section>
@@ -54,10 +63,10 @@
 {% endif %}
 
 {% if terminados %}
-<h2>Terminados</h2>
+<h2>Terminados ou suspensos</h2>
 <ul>
   {% for x in terminados %}
-  <li>{{ x.linha.ferramenta | escondidos }} pelo aplicativo {{ x.linha.aplicativo }}: {{ x.situacao }}{% if x.linha.motivo %} ({{ x.linha.motivo }}){% endif %}.</li>
+  <li>{% if x.nome_de_fora %}<span class="estranho">{{ x.linha.ferramenta | escondidos }}</span>{% else %}{{ x.linha.ferramenta | escondidos }}{% endif %} pelo aplicativo <bdi>{{ x.linha.aplicativo | escondidos }}</bdi>: {{ x.situacao }}{% if x.motivo %} ({{ x.motivo }}){% endif %}.{% if x.linha.situacao == "suspenso" %} <span class="dica">Um limite suspenso não volta sozinho. Depois que o ADMIN revisar o servidor de novo, crie outro limite, se ainda precisar.</span>{% endif %}</li>
   {% endfor %}
 </ul>
 {% endif %}

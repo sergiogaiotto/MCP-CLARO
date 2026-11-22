@@ -44,6 +44,10 @@ async def test_app_liga_a_conferencia_do_cofre_so_com_o_cofre_de_verdade(
             criadas.append(self)
 
     await abrir_a_saida(amb)
+    # Fase 3: o despachante so sobe com a chave Transit dos terceiros (derived), como scripts/iniciar-cofre.sh cria.
+    openbao.api(
+        "POST", f"transit/keys/{amb.p.VAULT_TRANSIT_KEY_THIRD_PARTY}", {"type": "aes256-gcm96", "derived": True}
+    )
     monkeypatch.setattr(despachante_app, "PortaDeSaida", PortaAnotada)
     email = f"admin-{uuid.uuid4().hex[:8]}@exemplo.org"
     vault = openbao.parametros("despachante")

@@ -613,7 +613,12 @@ async def test_pedidos_iguais_ao_mesmo_tempo_viram_um_protocolo_so(amb: Ambiente
     f = await vitrine(amb)
     argumentos = {"titulo": f"Pedido igual {uuid.uuid4().hex[:8]}"}
     pedido = Pedido(
-        pessoa_id=amb.ana_id, aplicativo=aplicativo, ferramenta=f, argumentos=argumentos, aplicativo_diz=None
+        pessoa_id=amb.ana_id,
+        aplicativo=aplicativo,
+        ferramenta=f,
+        argumentos=argumentos,
+        aplicativo_diz=None,
+        terceiros=False,
     )
     resultados = await asyncio.gather(*(pedidos.pedir(pedido) for _ in range(8)))
     assert len({op.id for op, _ in resultados}) == 1
@@ -661,6 +666,7 @@ async def test_dois_pedidos_pelo_ultimo_uso_de_um_limite_so_um_passa(amb: Ambien
             ferramenta=f,
             argumentos={"destinatario": "equipe", "texto": f"ultimo uso {n}"},
             aplicativo_diz=None,
+            terceiros=False,
         )
         for n in range(6)
     ]
@@ -710,11 +716,13 @@ async def test_pedidos_ao_mesmo_tempo_no_teto_de_fichas_recusam_sem_impasse(amb:
         aplicativo = await repositorio.aplicativo_por_client_id(c, "claude-code")
     assert aplicativo is not None
     f = await vitrine(amb)
-    await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": "Chega ao teto"}, None))
+    await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, {"titulo": "Chega ao teto"}, None, terceiros=False))
     async with amb.admin.connect() as c:
         # A limpeza do arranjo fecha as pausas de antes: daqui em diante, o que aparecer e desta rodada.
         desde = (await c.execute(text("SELECT coalesce(max(id), 0) FROM extrato"))).scalar_one()
-    lote = [Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Passa do teto {n}"}, None) for n in range(4)]
+    lote = [
+        Pedido(amb.ana_id, aplicativo, f, {"titulo": f"Passa do teto {n}"}, None, terceiros=False) for n in range(4)
+    ]
     resultados = await asyncio.gather(*(pedidos.pedir(p) for p in lote), return_exceptions=True)
     recusas = [r for r in resultados if isinstance(r, AcaoRecusada) and r.motivo == "teto_confirmacoes"]
     assert len(recusas) == len(lote), [type(r).__name__ for r in resultados]

@@ -3,41 +3,89 @@
 {% block conteudo %}
 <p><a href="/telas/admin/sistemas">Sistemas</a></p>
 <h1>Sistema {{ sistema.nome }}</h1>
-<p><code>{{ sistema.endereco }}</code> · {{ sistema.tipo_chave | tipo_chave }}</p>
+<p><code>{{ sistema.endereco }}</code> · {{ sistema.tipo_chave | tipo_chave }} · {{ sistema.origem | origem }}</p>
+{% if terceiro %}
+<p class="dica">Atendido na sala de visitas: só o endereço combinado, sem seguir desvios, chave guardada à parte e sem dados de rastreio.</p>
+{% if not terceiros_ligados %}
+<p class="dica">Servidores de terceiros ficam desligados até a Fase 3 passar nas provas. Você pode cadastrar, conferir e revisar; só pessoas de teste os veem.</p>
+{% endif %}
+{% endif %}
 <p><a href="/telas/admin/sistemas/{{ sistema.id }}/acesso">Autorização e chaves deste sistema</a></p>
 
 {% if sistema.situacao == "ativo" %}
 <div class="aviso" role="status">
-  <p><strong>Aceito.</strong> Este sistema fala a versão {{ sistema.versao_mcp }} do MCP.</p>
+  <p><strong>Aceito.</strong> Este {% if terceiro %}servidor{% else %}sistema{% endif %} fala a versão {{ sistema.versao_mcp }} do MCP.</p>
+  {% if terceiro %}
+  <p>Próximo passo: ler as ferramentas que ele declara, revisar cada uma e concluir a revisão do servidor.</p>
+  {% else %}
   <p>Próximo passo: ler as ferramentas que ele declara e revisar cada uma.</p>
+  {% endif %}
 </div>
+{% if sem_veredito and frase_sondagem %}
+<div class="atencao" role="status"><p>A última conferência não deu resposta de versão: {{ frase_sondagem }}</p></div>
+{% endif %}
 {% elif sistema.situacao == "recusado" %}
 <div class="recusa" role="alert">
+  {% if terceiro and frase_sondagem %}
+  <p><strong>{{ frase_sondagem }}</strong></p>
+  {% else %}
   <p><strong>Este sistema foi recusado.</strong></p>
   <p>Ele só fala a geração antiga do MCP. O MCP-CLARO só aceita a versão 2026-07-28.</p>
-  <p>Peça à equipe do sistema para atualizar o kit MCP. Depois, peça a conferência de novo.</p>
-  {% if sistema.motivo %}<p class="dica">Resposta da conferência: {{ sistema.motivo }}.</p>{% endif %}
+  {% if frase_sondagem %}<p>{{ frase_sondagem }}</p>{% else %}<p>Peça à equipe do sistema para atualizar o kit MCP. Depois, peça a conferência de novo.</p>{% endif %}
+  {% endif %}
 </div>
 {% elif sistema.situacao == "pendente" %}
 <div class="atencao" role="status">
-  {% if sistema.motivo %}
-  <p><strong>Ainda não conseguimos falar com o sistema.</strong> ({{ sistema.motivo }})</p>
-  <p>Confira o endereço e a chave de teste. Depois, peça a conferência de novo.</p>
+  {% if frase_sondagem %}
+  <p><strong>Falta conferir a versão.</strong> {{ frase_sondagem }}</p>
+  {% elif sistema.motivo %}
+  <p><strong>Ainda não conseguimos falar com o sistema.</strong> Confira o endereço e a chave de teste. Depois, peça a conferência de novo.</p>
   {% else %}
   <p><strong>Falta conferir a versão do sistema.</strong></p>
   {% endif %}
 </div>
+{% elif sistema.situacao == "quarentena" %}
+<div class="recusa" role="alert" aria-labelledby="titulo-quarentena">
+  <p id="titulo-quarentena"><strong>Este servidor está em quarentena.</strong>
+  {% if terceiro and terceiro.quarentena_sem_resposta %}
+  Ele não respondeu à conferência em rodadas seguidas. Sem conferir, o MCP-CLARO não sabe se ele mudou.
+  {% elif terceiro and terceiro.quarentena_mudou %}
+  Ele mudou a definição de uma ferramenta depois da sua revisão. Mesmo que tenha mudado só o texto, nada dele chega às pessoas até você revisar de novo.
+  {% elif terceiro and terceiro.quarentena_versao %}
+  Numa conferência da versão, ele deixou de falar a versão 2026-07-28 do MCP.{% if versao_certa %} A versão já foi conferida de novo e está certa: falta ler as ferramentas, revisar as que mudaram e concluir a revisão do servidor.{% endif %}
+  {% else %}
+  O que ele declara não bate com a revisão do servidor.
+  {% endif %}
+  </p>
+  <p>{% if not (terceiro and terceiro.quarentena_mudou) %}Nada dele chega às pessoas até você revisar de novo. {% endif %}O que estava esperando para sair foi cancelado, e os limites das pessoas com este servidor foram suspensos; cada pessoa vê isso no próprio extrato.</p>
+  <ol class="passos">
+    {% if not versao_certa %}<li>Toque em “Conferir a versão de novo”.</li>{% endif %}
+    <li>Toque em “Ler as ferramentas agora”.</li>
+    <li>Revise as marcadas “Mudou desde a revisão”.</li>
+    <li>Conclua a revisão do servidor.</li>
+  </ol>
+  {% if terceiro and terceiro.quarentena and terceiro.quarentena.ferramentas %}
+  <p>O que mudou, na conferência de {{ terceiro.quarentena.criado_em | data_hora }}:</p>
+  <ul>
+    {% for d in terceiro.quarentena.ferramentas %}
+    <li><code class="estranho">{{ d.get("ferramenta", "") | escondidos }}</code>: {% if d.get("mudanca") == "nova" %}ferramenta nova{% elif d.get("mudanca") == "sumiu" %}o servidor não declara mais{% else %}mudou a definição{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</div>
+{% if frase_sondagem and detalhe and detalhe.sondagem_desfecho != "aceito" %}<p class="dica">Última conferência da versão: {{ frase_sondagem }}</p>{% endif %}
 {% else %}
-<div class="atencao" role="status"><p>Situação: {{ sistema.situacao | situacao }}.{% if sistema.motivo %} {{ sistema.motivo }}.{% endif %}</p></div>
+<div class="atencao" role="status"><p>Situação: {{ sistema.situacao | situacao }}.</p></div>
 {% endif %}
 {% if sistema.sondado_em %}<p class="dica">Última conferência: {{ sistema.sondado_em | data_hora }}.</p>{% endif %}
 
-{% if sistema.situacao in ("pendente", "recusado", "ativo") %}
+{% if sistema.situacao != "desativado" %}
 <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/sondar" class="cartao">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label for="chave_sondagem_s">Chave de teste (se o sistema pedir)</label>
   <input type="password" id="chave_sondagem_s" name="chave_sondagem" autocomplete="off" maxlength="4096">
   <button type="submit" class="secundario">Conferir a versão de novo</button>
+  {% if sistema.situacao == "quarentena" %}<p class="dica">Em quarentena, a conferência não muda a situação: só a revisão do servidor tira daqui.</p>{% endif %}
 </form>
 {% endif %}
 
@@ -56,7 +104,7 @@
   <tbody>
   {% for v in vistas %}
     <tr>
-      <td><code>{{ v.nome | escondidos }}</code></td>
+      <td><code class="estranho">{{ v.nome | escondidos }}</code></td>
       <td class="estranho">{{ v.definicao.get("description", "") | escondidos }}</td>
       <td>{% if not v.revisada_id %}<span class="etiqueta">Sem revisão</span>
           {% elif v.impressao != v.impressao_revisada %}<span class="etiqueta ruim">Mudou desde a revisão</span>
@@ -69,5 +117,101 @@
 {% else %}
 <p class="cartao">Ainda não lemos as ferramentas deste sistema.</p>
 {% endif %}
+{% endif %}
+
+{% if terceiro %}
+<section class="cartao" aria-labelledby="titulo-revisao-servidor">
+  <h2 id="titulo-revisao-servidor">Revisão do servidor</h2>
+  {% if detalhe and detalhe.rs_versao %}
+  <p>Revisado em {{ detalhe.rs_revisado_em | data_hora }} por {{ detalhe.rs_revisado_por }} (versão {{ detalhe.rs_versao }}). Fornecedor: {{ detalhe.rs_fornecedor }}.</p>
+  {% set revistas = terceiro.fora_da_vitrine %}
+  {% if revistas %}
+  <p class="atencao">{{ revistas }} {% if revistas == 1 %}ferramenta foi revista{% else %}ferramentas foram revistas{% endif %} depois desta revisão. {% if revistas == 1 %}Ela fica{% else %}Elas ficam{% endif %} fora da vitrine até você concluir a revisão do servidor de novo.</p>
+  {% endif %}
+  {% set mudaram = terceiro.mudaram_no_servidor %}
+  {% if mudaram %}
+  <p class="atencao">{{ mudaram }} {% if mudaram == 1 %}ferramenta mudou{% else %}ferramentas mudaram{% endif %} no servidor desde a sua revisão. Na próxima conferência automática, se ele ainda declarar assim, o servidor entra em quarentena e nada dele chega às pessoas. Até lá, {% if mudaram == 1 %}ela continua{% else %}elas continuam{% endif %} na vitrine, com o texto da sua revisão. Revise {% if mudaram == 1 %}a ferramenta{% else %}cada uma{% endif %} e conclua a revisão do servidor de novo.</p>
+  {% endif %}
+  {% if detalhe.conferencias_sem_resposta %}
+  <p class="atencao">O servidor não respondeu à última conferência. Se não responder à próxima, entra em quarentena.</p>
+  {% endif %}
+  {% elif terceiro.deixou_de_valer and sistema.situacao == "ativo" %}
+  <p class="atencao">A revisão anterior deixou de valer quando o servidor saiu do ar; conclua a revisão de novo. Até lá, nenhuma ferramenta dele aparece para as pessoas.</p>
+  {% elif terceiro.deixou_de_valer %}
+  <p class="atencao">A revisão anterior deixou de valer quando o servidor saiu do ar. Quando ele voltar e passar na conferência da versão, conclua a revisão de novo. Até lá, nenhuma ferramenta dele aparece para as pessoas.</p>
+  {% elif sistema.situacao == "quarentena" %}
+  <p>A revisão anterior deixou de valer com a quarentena. Nenhuma ferramenta dele aparece para as pessoas.</p>
+  {% else %}
+  <p>Nunca revisado. Nenhuma ferramenta dele aparece para as pessoas.</p>
+  {% endif %}
+
+  {% if recusa %}
+  <div class="recusa" role="alert">
+    <p><strong>A revisão do servidor não foi concluída. Veja abaixo o que mudou e revise de novo.</strong></p>
+    <p>{{ recusa.frase }}{% if recusa.get("motivo") == "sem_chave_declaracoes" %} <a href="/telas/admin/sistemas/{{ sistema.id }}/acesso">Guardar a chave</a>.{% endif %}</p>
+    {% if recusa.ferramentas %}
+    <ul>
+      {% for nome_f, problema in recusa.ferramentas %}
+      <li><code class="estranho">{{ nome_f | escondidos }}</code>: {{ problema }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if sistema.situacao in ("ativo", "quarentena") %}
+  <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/revisao_servidor">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="fornecedor">Quem fornece este servidor</label>
+    <input type="text" id="fornecedor" name="fornecedor" required minlength="3" maxlength="200" value="{{ valores.get('fornecedor', '') }}">
+    <fieldset>
+      <legend>Mostrar na vitrine</legend>
+      {% for f in terceiro.ferramentas %}
+      {% if f.em_dia %}
+      <label class="opcao"><input type="checkbox" name="publicar" value="{{ f.nome }}" {% if f.nome in valores.get("publicar", []) %}checked{% endif %}> <span><code class="estranho">{{ f.nome | escondidos }}</code> como <code>{{ f.nome_vitrine }}</code> · {{ f.classe | classe }}</span></label>
+      {% else %}
+      <p class="dica"><code class="estranho">{{ f.nome | escondidos }}</code>: {% if not f.revisada %}falta a sua revisão.{% elif f.mudou %}mudou desde a revisão; revise de novo.{% else %}foi revisada antes da Fase 3; revise de novo.{% endif %}</p>
+      {% endif %}
+      {% else %}
+      <p>Leia as ferramentas do servidor antes de concluir.</p>
+      {% endfor %}
+    </fieldset>
+    <button type="submit">Concluir a revisão do servidor</button>
+    <p class="dica">Ao concluir, o MCP-CLARO lê o servidor de novo. Se algo mudou desde a sua revisão, a conclusão é recusada e mostra o quê.</p>
+    <p class="dica">A leitura usa a chave de leitura das declarações guardada para este servidor, a mesma que confere, de tempos em tempos, se ele mudou.</p>
+  </form>
+  {% endif %}
+
+  {% set antes_depois = terceiro.ferramentas | selectattr("antes") | list %}
+  {% if antes_depois %}
+  <h3>Antes e depois do texto do fornecedor</h3>
+  <p class="dica">Este texto vem do servidor. Ele não é mostrado às pessoas nem aos aplicativos.</p>
+  {% for f in antes_depois %}
+  <div class="antes-depois">
+    <p><code class="estranho">{{ f.nome | escondidos }}</code></p>
+    <p><strong>Na sua revisão:</strong></p>
+    <p class="estranho">{{ f.antes.get("description", "(sem descrição)") | escondidos }}</p>
+    <p><strong>Agora:</strong></p>
+    <p class="estranho">{{ f.definicao.get("description", "(sem descrição)") | escondidos }}</p>
+  </div>
+  {% endfor %}
+  {% endif %}
+</section>
+
+<section class="cartao" aria-labelledby="titulo-pedidos">
+  <h2 id="titulo-pedidos">Pedidos recusados deste sistema</h2>
+  <p>O MCP-CLARO não repassa a ninguém pedidos de dados, links ou confirmações que um sistema faça no meio de uma chamada. Nos últimos 30 dias, este servidor fez {{ terceiro.pedidos.contagem }} {% if terceiro.pedidos.contagem == 1 %}pedido recusado{% else %}pedidos recusados{% endif %}.</p>
+  {% if terceiro.pedidos.linhas %}
+  <table>
+    <thead><tr><th>Quando</th><th>Onde</th><th>Ferramenta</th><th>O que ele pediu</th></tr></thead>
+    <tbody>
+    {% for linha in terceiro.pedidos.linhas %}
+      <tr><td>{{ linha.criado_em | data_hora }}</td><td>{{ linha.tipo | onde_pedido }}</td><td><code>{{ (linha.ferramenta or "") | escondidos }}</code></td><td>{{ linha.pedidos | pedidos }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="dica">Só as categorias do MCP-CLARO: o texto, o link e os campos que o servidor mandou não são guardados nem mostrados.</p>
+  {% endif %}
+</section>
 {% endif %}
 {% endblock %}

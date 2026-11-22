@@ -54,6 +54,8 @@ PARA_PROGRAMA: Final[dict[str, str]] = {
     "acao_recusada": "programa_acao_recusada",
     "acao_pedida": "programa_acao_pedida",
     "acao_repetida": "programa_acao_repetida",
+    # Fase 3: o sistema pediu dados, um link ou uma confirmacao no meio da leitura (barrado pelo MCP-CLARO).
+    "leitura_sistema_pediu_dados": "programa_leitura_sistema_pediu_dados",
 }
 
 _TIPOS_CHAVE_LEGIVEIS: Final = {"por_pessoa": "uma chave por pessoa", "compartilhada": "uma chave compartilhada"}

@@ -21,6 +21,31 @@ servico. Toda recusa vai ao extrato com frase legivel: ``leitura_recusada``
 para leitura (ou ferramenta ainda desconhecida) e ``acao_recusada`` para acao.
 Com a porta de saida fechada, a acao e recusada antes de virar protocolo
 (``Pedidos.pedir``); a leitura segue a regra do despachante.
+
+Fase 3, servidores de terceiros:
+
+- vitrine e chamada de terceiro so para quem pode (``terceiros_ligados``: a chave
+  ``FEATURE_PHASE3_THIRD_PARTY`` ligada, ou pessoa de teste). Para os outros, a
+  ferramenta de terceiro nao existe (``fora_da_vitrine``);
+- argumentos para terceiro passam primeiro pelos tetos de tamanho, inclusive
+  os de niveis e de digitos (``argumentos.conferir_tamanho``), depois pelo
+  esquema revisado, com o orcamento de passos
+  (``argumentos.conferir_argumentos(..., terceiro=True)``): caro demais, recusa
+  com ``esquema_caro_demais``. Em qualquer sistema, aninhamento que estoura a
+  pilha na conferencia, ou numero que a conta de ``multipleOf`` nao divide,
+  vira a recusa ``argumento_fora_do_esquema``, nunca erro interno. Leitura com
+  numero NaN ou infinito e recusada antes da catraca (``numero_invalido``,
+  ``RECUSA_NUMERO_LEITURA``): o pedido ao despachante e JSON, que nao leva
+  esses numeros, e antes virava erro interno (a acao ja era recusada assim);
+- tres sinais: quando o aplicativo recebe texto de um sistema (leitura, acao
+  enviada ou consulta de uma acao enviada), a entrada grava os sinais
+  (``regras.sinais``) numa transacao que confirma ANTES de devolver o texto.
+  Falhou a gravacao, o texto nao sai. Texto nosso (recusa, falha, pedido de dados
+  barrado) nao grava sinal;
+- texto de estranhos: a resposta de leitura chega emoldurada pelo despachante
+  (``regras.estranhos.marcar``). Se ela chegar sem a marca, a entrada emoldura
+  aqui, para nada de um terceiro (ou de ferramenta marcada) passar sem moldura;
+- -32021 de terceiro: sempre o erro legivel, nunca o -32021 (D13).
 """
 
 from __future__ import annotations
@@ -39,21 +64,37 @@ from mcp_claro import __version__
 from mcp_claro.cadastro import repositorio
 from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine, Pessoa
 from mcp_claro.config.settings import Parametros
-from mcp_claro.entrada.argumentos import ArgumentosInvalidos, conferir_argumentos
+from mcp_claro.entrada.argumentos import (
+    RECUSA_ORCAMENTO,
+    ArgumentosGrandes,
+    ArgumentosInvalidos,
+    OrcamentoEsgotado,
+    conferir_argumentos,
+    conferir_tamanho,
+)
 from mcp_claro.entrada.cracha import Cracha, cracha_atual
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
 from mcp_claro.medicoes.contadores import CONTADORES
-from mcp_claro.regras import bloqueios, catraca, estado, programas, revisao
+from mcp_claro.regras import bloqueios, catraca, estado, estranhos, programas, revisao, sinais
 from mcp_claro.regras.bloqueios import Vigentes
 from mcp_claro.regras.estado import EstadoEntrada
 from mcp_claro.saida import pedidos as saida_pedidos
+from mcp_claro.saida.estados import Estado
+from mcp_claro.saida.fila import Operacao
 from mcp_claro.saida.pedidos import AcaoRecusada, Pedido, Pedidos
 from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.entrada.servidor")
 
 CODIGO_RECUSA = types.INVALID_PARAMS
+
+RECUSA_NUMERO_LEITURA = (
+    "A leitura traz um numero que nao e um numero de verdade (NaN ou infinito), e o MCP-CLARO nao consegue enviar "
+    "esse numero ao sistema. Nada foi enviado."
+)
+"""Frase da recusa ``numero_invalido`` numa leitura. A da acao (``saida.pedidos.RECUSA_NUMERO``) fala em guardar o
+pedido; a leitura nao e guardada, mas o pedido ao despachante e JSON, que nao leva NaN nem infinito."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +165,33 @@ def _traceparent(ctx: ServerRequestContext[Any], p: Parametros) -> str | None:
 
 
 def _meta_do_pedido(params: types.CallToolRequestParams) -> Any:
-    return params.model_dump(by_alias=True, exclude_none=True).get("_meta")
+    # So o _meta: copiar o pedido inteiro (model_dump) andaria tambem por todos os argumentos.
+    return params.meta
+
+
+def ja_emoldurado(resultado: dict[str, Any]) -> bool:
+    """O despachante ja emoldurou a resposta (``regras.estranhos.marcar``). O ``_meta`` que chega aqui e todo do
+    MCP-CLARO: o do sistema nunca passa do despachante."""
+    meta = resultado.get("_meta")
+    return (
+        isinstance(meta, dict)
+        and meta.get(estranhos.META_TEXTO_DE_ESTRANHOS) is True
+        and isinstance(meta.get(estranhos.META_MARCA), str)
+    )
+
+
+def emoldurar_leitura(ferramenta: FerramentaVitrine, resultado: dict[str, Any]) -> dict[str, Any]:
+    """Resposta de leitura de estranhos que chegou sem moldura: emoldura aqui, mantendo o ``_meta`` nosso.
+
+    E a segunda barreira: quem emoldura e o despachante, com a conta de partes retiradas feita antes da medida
+    (``estranhos.marcar(..., retiradas=...)``). Aqui essa conta nao existe, entao o aviso de partes retiradas, se
+    houver, vai dentro da moldura, como texto do sistema (o lado seguro)."""
+    if not ferramenta.de_estranhos or not sinais.veio_do_sistema(resultado) or ja_emoldurado(resultado):
+        return resultado
+    marcado = estranhos.marcar(resultado, sistema=ferramenta.sistema.nome, de_terceiro=ferramenta.sistema.de_terceiro)
+    marcado["_meta"] = dict(resultado.get("_meta") or {}) | dict(marcado["_meta"])
+    CONTADORES.somar("respostas_de_estranhos_emolduradas_na_entrada")
+    return marcado
 
 
 def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[Any]:
@@ -132,6 +199,24 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
 
     def acoes_ligadas(q: Quem) -> bool:
         return p.FEATURE_PHASE2_ACT or q.pessoa.teste
+
+    def terceiros_ligados(q: Quem) -> bool:
+        """Servidores de terceiros na vitrine e na chamada: chave da Fase 3 ligada, ou pessoa de teste."""
+        return p.FEATURE_PHASE3_THIRD_PARTY or q.pessoa.teste
+
+    async def gravar_sinais(q: Quem, ferramenta_id: uuid.UUID) -> None:
+        """Grava os sinais e confirma, antes de o texto do sistema sair para o aplicativo."""
+        async with engine.begin() as c:
+            tipos = await sinais.registrar(
+                c, pessoa_id=q.pessoa.id, aplicativo_id=q.aplicativo.id, ferramenta_id=ferramenta_id
+            )
+        for tipo in tipos:
+            CONTADORES.somar("sinais_gravados", tipo=tipo)
+
+    async def sinais_da_acao(q: Quem, op: Operacao) -> None:
+        """Acao enviada com resultado: o aplicativo vai receber texto do sistema."""
+        if op.estado == Estado.ENVIADA and op.resultado is not None:
+            await gravar_sinais(q, op.ferramenta_id)
 
     async def quem(ctx: ServerRequestContext[Any]) -> Quem:
         cracha = cracha_atual.get()
@@ -185,7 +270,9 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         if vigentes.geral is not None:
             raise await recusar_pedido(q, "tools/list", vigentes.geral.motivo_recusa(), vigentes.geral.mensagem())
         async with engine.connect() as c:
-            ferramentas = await repositorio.vitrine(c, q.pessoa.id, q.aplicativo.id, VERSAO_MCP)
+            ferramentas = await repositorio.vitrine(
+                c, q.pessoa.id, q.aplicativo.id, VERSAO_MCP, terceiros=terceiros_ligados(q)
+            )
         ferramentas = [f for f in ferramentas if entrada.permite(f.classe) and vigentes.para(f.sistema.id) is None]
         # Programa so ve sistema de chave propria; assistente nao ve sistema de chave de programa (decisao 9).
         ferramentas = programas.filtrar_vitrine(q.aplicativo.tipo, ferramentas)
@@ -220,7 +307,9 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
     async def tipo_da_recusa(q: Quem, nome: str) -> str:
         """Recusa antes de olhar a ferramenta (entrada fechada, bloqueio): o extrato diz se era uma acao."""
         async with engine.connect() as c:
-            f = await repositorio.ferramenta_na_vitrine(c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP)
+            f = await repositorio.ferramenta_na_vitrine(
+                c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP, terceiros=terceiros_ligados(q)
+            )
         return "acao_recusada" if f is not None and f.classe != "le" else "leitura_recusada"
 
     async def chamar(ctx: ServerRequestContext[Any], params: types.CallToolRequestParams) -> types.CallToolResult:
@@ -240,7 +329,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             return await consultar(q, params)
         async with engine.connect() as c:
             ferramenta: FerramentaVitrine | None = await repositorio.ferramenta_na_vitrine(
-                c, q.pessoa.id, q.aplicativo.id, params.name, VERSAO_MCP
+                c, q.pessoa.id, q.aplicativo.id, params.name, VERSAO_MCP, terceiros=terceiros_ligados(q)
             )
         if ferramenta is None or ferramenta.ordem_id is None:
             raise await recusar(
@@ -254,8 +343,25 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         tipo = "leitura_recusada" if ferramenta.classe == "le" else "acao_recusada"
         if (recusa_chave := programas.recusa_da_chave(q.aplicativo.tipo, ferramenta.sistema.tipo_chave)) is not None:
             raise await recusar(q, params.name, recusa_chave.motivo, recusa_chave.mensagem, trace, tipo)
+        if ferramenta.sistema.de_terceiro:
+            # Antes do esquema: a conferencia roda neste laco, e um esquema de fornecedor custa ate o tamanho dele
+            # vezes o tamanho do pedido. Os tetos prendem o pedido; o orcamento de passos (que conta tambem a
+            # comparacao de enum e const) e os cinco primeiros erros, a conferencia.
+            try:
+                conferir_tamanho(params.arguments)
+            except ArgumentosGrandes as erro:
+                raise await recusar(
+                    q,
+                    params.name,
+                    "argumento_grande_demais",
+                    f"Argumentos grandes demais para um servidor de terceiros: {erro}. Nada foi enviado.",
+                    trace,
+                    tipo,
+                ) from erro
         try:
-            conferir_argumentos(ferramenta.esquema_entrada, params.arguments)
+            conferir_argumentos(ferramenta.esquema_entrada, params.arguments, terceiro=ferramenta.sistema.de_terceiro)
+        except OrcamentoEsgotado as erro:
+            raise await recusar(q, params.name, "esquema_caro_demais", RECUSA_ORCAMENTO, trace, tipo) from erro
         except ArgumentosInvalidos as erro:
             raise await recusar(
                 q,
@@ -299,6 +405,10 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             raise await recusar(q, params.name, bloqueio.motivo_recusa(), bloqueio.mensagem(), trace, tipo)
         if ferramenta.classe != "le":
             return await agir(q, ferramenta, params, trace)
+        if saida_pedidos.tem_numero_nao_finito(params.arguments):
+            # O pedido ao despachante e JSON sem NaN nem infinito: sem esta recusa, a leitura virava erro interno.
+            # Antes da catraca: nada foi gasto nem enviado. Proprio e terceiro (D3: so muda o que dava erro).
+            raise await recusar(q, params.name, "numero_invalido", RECUSA_NUMERO_LEITURA, trace)
         async with engine.begin() as c:
             passagem = await catraca.passar(c, ferramenta.ordem_id)
         if not passagem.passou:
@@ -313,15 +423,29 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 trace_id=trace,
             )
         )
+        tipos: tuple[str, ...] = ()
         async with engine.begin() as c:
             await repositorio.marcar_uso_da_ordem(c, ferramenta.ordem_id)
+            if sinais.veio_do_sistema(resultado):
+                # Na transacao que confirma antes de devolver: quando o texto chega ao aplicativo, o sinal ja vale
+                # para o proximo pedido de acao. Falhou aqui, a leitura nao sai.
+                tipos = await sinais.registrar(
+                    c, pessoa_id=q.pessoa.id, aplicativo_id=q.aplicativo.id, ferramenta_id=ferramenta.id
+                )
+        for tipo_sinal in tipos:
+            CONTADORES.somar("sinais_gravados", tipo=tipo_sinal)
         CONTADORES.somar("leituras", sistema=ferramenta.sistema.nome)
         meta = resultado.get("_meta") or {}
         exige = meta.get(PREFIXO_META + "motivo") == MOTIVO_EXIGE_CAPACIDADE
-        if exige and (faltam := capacidades_nao_declaradas(ctx, meta.get(PREFIXO_META + "capacidades"))):
-            # O sistema so responde pedindo dados ao aplicativo, e o aplicativo nem declarou a capacidade.
+        if (
+            exige
+            and not ferramenta.sistema.de_terceiro
+            and (faltam := capacidades_nao_declaradas(ctx, meta.get(PREFIXO_META + "capacidades")))
+        ):
+            # O sistema so responde pedindo dados ao aplicativo, e o aplicativo nem declarou a capacidade. Num
+            # terceiro, nunca o -32021: vai o erro legivel do despachante (D13).
             raise capacidade_ausente(faltam)
-        return types.CallToolResult.model_validate(resultado)
+        return types.CallToolResult.model_validate(emoldurar_leitura(ferramenta, resultado))
 
     async def agir(
         q: Quem, ferramenta: FerramentaVitrine, params: types.CallToolRequestParams, trace: str | None
@@ -333,6 +457,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             argumentos=dict(params.arguments or {}),
             aplicativo_diz=saida_pedidos.aplicativo_diz(_meta_do_pedido(params)),
             trace_id=trace,
+            terceiros=terceiros_ligados(q),
         )
         try:
             op, repetida = await pedidos.pedir(pedido)
@@ -342,6 +467,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             async with engine.begin() as c:
                 await repositorio.marcar_uso_da_ordem(c, ferramenta.ordem_id)
         op = await pedidos.aguardar(op)
+        await sinais_da_acao(q, op)
         return types.CallToolResult.model_validate(
             saida_pedidos.resposta(op, selo=ferramenta.sistema.selo, repetida=repetida)
         )
@@ -362,6 +488,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                     "isError": True,
                 }
             )
+        await sinais_da_acao(q, op)
         return types.CallToolResult.model_validate(saida_pedidos.resposta(op))
 
     def esquema_da_ferramenta(nome: str) -> dict[str, Any] | None:

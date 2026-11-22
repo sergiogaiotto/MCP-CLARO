@@ -1,4 +1,4 @@
-"""Rotinas da Fase 2: fichas que vencem, aviso de ficha pendente, limites que vencem e desafios de passkey.
+"""Rotinas das acoes: fichas que vencem, aviso de ficha pendente, limites que vencem, desafios de passkey e sinais.
 
 - ``vencer_fichas``: ficha sem resposta no prazo vence, e nada segue (``fila.vencer_fichas``);
 - ``avisar_fichas_pendentes``: ficha sem decisao ha mais de ``NOTIFY_PENDING_AFTER_MINUTES`` recebe um
@@ -7,7 +7,10 @@
   resultado. O extrato so diz que a pessoa foi avisada quando o e-mail dela entrou na fila; aviso que foi
   so aos webhooks da instalacao tem frase propria;
 - ``vencer_limites``: limite ativo com prazo no passado vira ``vencido``;
-- ``limpar_desafios_passkey``: apaga os desafios de passkey vencidos ou ja usados (cada um vale uma vez).
+- ``limpar_desafios_passkey``: apaga os desafios de passkey vencidos ou ja usados (cada um vale uma vez);
+- ``limpar_sinais`` (Fase 3): apaga os sinais dos tres sinais mais velhos que a maior janela do alerta (7 dias,
+  ``regras.sinais.MAIOR_JANELA_MINUTOS``), em lotes, sem extrato. O banco recusa apagar um sinal mais novo que isso
+  (gatilho ``sinais_guarda``, migracao 0006): ninguem esconde um sinal que ainda vale.
 
 "Uma vez" vale mesmo com duas copias das rotinas no ar: alem da trava do agendador, cada linha e pega com
 ``FOR UPDATE SKIP LOCKED`` e mudada com ``UPDATE ... WHERE`` o estado de antes, na mesma transacao do aviso
@@ -29,6 +32,7 @@ from mcp_claro.avisos.fila import enfileirar
 from mcp_claro.config.settings import Parametros
 from mcp_claro.extrato import registrar
 from mcp_claro.logs import logger
+from mcp_claro.regras.sinais import MAIOR_JANELA_MINUTOS
 from mcp_claro.rotinas.agendador import Tarefa
 from mcp_claro.rotinas.config import ConfigRotinas
 from mcp_claro.saida import fila
@@ -50,6 +54,11 @@ situacao em dia. A acao ja liberada por um limite que depois venceu pelo prazo s
 a menos que a pessoa cancele ou bloqueie; o despachante so a para se o limite foi encerrado ou suspenso."""
 INTERVALO_DESAFIOS: Final = 3600.0
 """Limpar desafios de passkey: uma vez por hora basta, cada desafio vale poucos minutos."""
+INTERVALO_SINAIS: Final = 3600.0
+"""Limpar sinais velhos: uma vez por hora basta, cada sinal fica 7 dias."""
+LOTE_SINAIS: Final = 5000
+VOLTAS_SINAIS: Final = 20
+"""Ate ``VOLTAS_SINAIS`` lotes de ``LOTE_SINAIS`` por rodada, cada um na sua transacao; o resto fica para a proxima."""
 
 
 # --- Fichas que vencem -----------------------------------------------------------------------
@@ -254,12 +263,46 @@ async def limpar_desafios_passkey(engine: AsyncEngine) -> int:
     return int(apagados or 0)
 
 
+# --- Sinais dos tres sinais mais velhos que a maior janela (Fase 3) ---------------------------
+
+SQL_LIMPAR_SINAIS = """
+DELETE FROM sinais
+WHERE id IN (
+  SELECT id FROM sinais
+  WHERE visto_em < now() - make_interval(mins => :minutos)
+  ORDER BY visto_em
+  LIMIT :lote
+)
+"""
+
+
+async def limpar_sinais(engine: AsyncEngine, *, lote: int = LOTE_SINAIS, voltas: int = VOLTAS_SINAIS) -> int:
+    """Uma rodada: apaga, em lotes, os sinais vistos ha mais de ``MAIOR_JANELA_MINUTOS``. Devolve quantos.
+
+    Nenhum alerta olha mais longe que isso (a janela vai de 5 minutos a 7 dias), e os sinais sao dado sobre o uso
+    de cada pessoa: nao ficam mais que o necessario. Nada vai ao extrato (o sinal nao e um passo da pessoa)."""
+    total = 0
+    for _ in range(voltas):
+        async with engine.begin() as c:
+            apagados = int(
+                (await c.execute(text(SQL_LIMPAR_SINAIS), {"minutos": MAIOR_JANELA_MINUTOS, "lote": lote})).rowcount
+                or 0
+            )
+        total += apagados
+        if apagados < lote:
+            break
+    if total:
+        log.info("sinais_limpos", sinais=total)
+    return total
+
+
 # --- Tarefas do agendador --------------------------------------------------------------------
 
 
 def tarefas_de_acoes(engine: AsyncEngine, p: Parametros, config: ConfigRotinas) -> list[Tarefa]:
-    """As tarefas da Fase 2 no formato do agendador. Rodam com ou sem ``FEATURE_PHASE2_ACT``: fichas de
-    pessoas de teste tambem vencem e avisam."""
+    """As tarefas das acoes no formato do agendador. Rodam com ou sem ``FEATURE_PHASE2_ACT`` e
+    ``FEATURE_PHASE3_THIRD_PARTY``: fichas de pessoas de teste tambem vencem e avisam, e os sinais sao gravados
+    sempre."""
     prazo = config.prazo_tarefa
     minutos = int(p.NOTIFY_PENDING_AFTER_MINUTES)
     base_url = str(p.PUBLIC_BASE_URL)
@@ -278,4 +321,5 @@ def tarefas_de_acoes(engine: AsyncEngine, p: Parametros, config: ConfigRotinas) 
             lambda: limpar_desafios_passkey(engine),
             prazo,
         ),
+        Tarefa("limpar_sinais", min(config.intervalo_limpeza, INTERVALO_SINAIS), lambda: limpar_sinais(engine), prazo),
     ]

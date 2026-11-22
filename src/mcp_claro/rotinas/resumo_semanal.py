@@ -4,7 +4,9 @@ Semana ISO em UTC (segunda a domingo). A tarefa acorda de hora em hora; a partir
 segunda as 01:00 UTC (folga para as contagens atrasadas), poe na fila o resumo da
 semana que acabou, uma vez por semana (``chave_unica``). Leva so totais:
 
-- recusas por versao antiga, dos dois lados (aplicativos e sistemas);
+- recusas por versao antiga, dos dois lados: aplicativos, sistemas proprios e, a parte, servidores de terceiros
+  (``motivo = 'cadastro_terceiro'``, D30: a recusa de um terceiro nao dispara o alerta alto e fica no painel e
+  aqui). As tres somam o total da decisao 8;
 - crachas recusados;
 - leituras feitas e recusadas;
 - bloqueios e pausas ligados na semana, e bloqueios ainda ativos.
@@ -55,6 +57,7 @@ async def contagens(c: AsyncConnection, semana: Semana) -> dict[str, int]:
     total: dict[str, int] = {
         "recusas_versao_aplicativos": 0,
         "recusas_versao_sistemas": 0,
+        "recusas_versao_terceiros": 0,
         "crachas_recusados": 0,
         "leituras": 0,
         "leituras_recusadas": 0,
@@ -62,11 +65,19 @@ async def contagens(c: AsyncConnection, semana: Semana) -> dict[str, int]:
         "pausas_ligadas": 0,
         "bloqueios_ativos": 0,
     }
-    for lado, n in await c.execute(
-        text("SELECT lado, sum(contagem) FROM recusas_versao WHERE minuto >= :i AND minuto < :f GROUP BY lado"),
+    for lado, de_terceiro, n in await c.execute(
+        text(
+            "SELECT lado, motivo = 'cadastro_terceiro', sum(contagem) FROM recusas_versao"
+            " WHERE minuto >= :i AND minuto < :f GROUP BY 1, 2"
+        ),
         janela,
     ):
-        total["recusas_versao_aplicativos" if lado == "aplicativo" else "recusas_versao_sistemas"] += int(n)
+        if lado == "aplicativo":
+            total["recusas_versao_aplicativos"] += int(n)
+        elif de_terceiro:
+            total["recusas_versao_terceiros"] += int(n)
+        else:
+            total["recusas_versao_sistemas"] += int(n)
     for nome, n in await c.execute(
         text(
             "SELECT nome, sum(valor) FROM medicoes.hora WHERE hora >= :i AND hora < :f"
@@ -98,7 +109,8 @@ def corpo_do_resumo(semana: Semana, numeros: dict[str, int]) -> dict[str, Any]:
         "contagens": numeros,
         "linhas": [
             f"Recusas por versao antiga, lado dos aplicativos: {numeros['recusas_versao_aplicativos']}",
-            f"Recusas por versao antiga, lado dos sistemas: {numeros['recusas_versao_sistemas']}",
+            f"Recusas por versao antiga, lado dos sistemas proprios: {numeros['recusas_versao_sistemas']}",
+            f"Recusas por versao antiga, servidores de terceiros: {numeros['recusas_versao_terceiros']}",
             f"Crachas recusados: {numeros['crachas_recusados']}",
             f"Leituras feitas: {numeros['leituras']}",
             f"Leituras recusadas: {numeros['leituras_recusadas']}",

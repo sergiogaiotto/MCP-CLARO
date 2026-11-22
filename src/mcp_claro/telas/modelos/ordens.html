@@ -4,6 +4,17 @@
 <h1>Minhas ordens de serviço</h1>
 <p>Uma ordem de serviço diz o que um aplicativo de IA pode ler por você, e até quando.</p>
 <p>Ela termina sozinha no prazo. Você pode revogar antes, quando quiser.</p>
+{% set ha = namespace(terceiros=false) %}
+{% for f in (ativas | map(attribute="ferramentas") | sum(start=[])) + (modelos | map(attribute="ferramentas") | sum(start=[])) %}{% if f.origem is defined and f.origem != "proprio" %}{% set ha.terceiros = true %}{% endif %}{% endfor %}
+{% if ha.terceiros %}
+<p class="dica" id="dica-terceiros">Uma ferramenta marcada “de terceiros” é de um servidor de fora da organização. O MCP-CLARO não controla o que ele faz do lado de lá, e o que ele responde chega ao aplicativo marcado como texto de estranhos.</p>
+{# Pessoa real: com a chave da Fase 3 desligada, o terceiro nao entra na vitrine dela (so pessoas de teste o usam).
+   ``Rotas._pagina_ordens`` passa ``terceiros_ligados`` (a chave): com ela ligada, a nota nao aparece. Sem a chave no
+   contexto (o modelo montado a mao), a frase fica condicional e vale nos dois casos. #}
+{% if not (sessao and sessao.pessoa.teste) and not (terceiros_ligados is defined and terceiros_ligados) %}
+<p class="dica" id="terceiros-so-teste">Enquanto os servidores de terceiros estiverem desligados nesta instalação, as ferramentas marcadas “de terceiros” não funcionam para você: o aplicativo não as vê. Só pessoas de teste as usam.</p>
+{% endif %}
+{% endif %}
 
 <h2>Valendo agora</h2>
 {% if not ativas %}
@@ -11,12 +22,13 @@
 {% endif %}
 {% for o in ativas %}
 <section class="cartao" id="ordem-{{ o.id }}">
-  <h3>{{ o.aplicativo }}: {{ o.modelo }}</h3>
+  <h3><bdi>{{ o.aplicativo | escondidos }}</bdi>: {{ o.modelo }}</h3>
   <p>{{ o.descricao }}</p>
   <p><strong>O que ele pode ler:</strong></p>
   <ul class="ferramentas">
     {% for f in o.ferramentas %}
-    <li>{% if f.descricao %}{{ f.descricao }}{% else %}{{ f.nome_original | escondidos }} (ainda sem revisão){% endif %} <span class="dica">(sistema {{ f.sistema }})</span></li>
+    {% set de_terceiros = f.origem is defined and f.origem != "proprio" %}
+    <li>{% if f.descricao %}{{ f.descricao }}{% elif de_terceiros %}<span class="estranho">{{ f.nome_original | escondidos }}</span> (ainda sem revisão){% else %}{{ f.nome_original | escondidos }} (ainda sem revisão){% endif %} <span class="dica">(sistema <bdi>{{ f.sistema | escondidos }}</bdi>)</span>{% if de_terceiros %} <span class="etiqueta">de terceiros</span>{% endif %}</li>
     {% endfor %}
   </ul>
   <p><strong>Até quando:</strong> {{ o.fim | data_hora }}.
@@ -37,7 +49,7 @@
   <fieldset>
     <legend>1. Para qual aplicativo?</legend>
     {% for a in aplicativos %}
-    <label class="opcao"><input type="radio" name="aplicativo" value="{{ a.id }}" required {% if valores.get("aplicativo") == a.id|string %}checked{% endif %}> {{ a.nome }}</label>
+    <label class="opcao"><input type="radio" name="aplicativo" value="{{ a.id }}" required {% if valores.get("aplicativo") == a.id|string %}checked{% endif %}> <bdi>{{ a.nome | escondidos }}</bdi></label>
     {% endfor %}
   </fieldset>
   <fieldset>
@@ -45,7 +57,7 @@
     {% for m in modelos %}
     <label class="opcao"><input type="radio" name="modelo" value="{{ m.id }}" required {% if valores.get("modelo") == m.id|string %}checked{% endif %}>
       <span><strong>{{ m.nome }}</strong>: {{ m.descricao }}
-        <span class="dica">Pode ler: {% for f in m.ferramentas %}{{ f.descricao or (f.nome_original | escondidos) }}{% if not loop.last %}; {% endif %}{% endfor %}. Prazo de até {{ m.validade_dias }} dias.</span>
+        <span class="dica">Pode ler: {% for f in m.ferramentas %}{% set de_terceiros = f.origem is defined and f.origem != "proprio" %}{% if f.descricao %}{{ f.descricao }}{% elif de_terceiros %}<span class="estranho">{{ f.nome_original | escondidos }}</span>{% else %}{{ f.nome_original | escondidos }}{% endif %}{% if de_terceiros %} (de terceiros){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}. Prazo de até {{ m.validade_dias }} dias.</span>
       </span>
     </label>
     {% endfor %}
@@ -63,7 +75,7 @@
   <thead><tr><th>Aplicativo</th><th>Ordem</th><th>Até</th><th>Situação</th></tr></thead>
   <tbody>
   {% for o in terminadas %}
-    <tr><td>{{ o.aplicativo }}</td><td>{{ o.modelo }}</td><td>{{ o.fim | data_hora }}</td><td>{{ o.situacao | situacao }}</td></tr>
+    <tr><td><bdi>{{ o.aplicativo | escondidos }}</bdi></td><td>{{ o.modelo }}</td><td>{{ o.fim | data_hora }}</td><td>{{ o.situacao | situacao }}</td></tr>
   {% endfor %}
   </tbody>
 </table>

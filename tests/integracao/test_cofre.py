@@ -1,7 +1,8 @@
 """Cliente fino do cofre contra um OpenBao 2.7.2 de verdade, em Docker.
 
 O OpenBao sobe em modo dev (memoria) e e preparado pela API como no Compose: Transit com a chave
-``mcp-claro-chaves`` (derived), KV v2 com a chave do estado das confirmacoes, as politicas de
+``mcp-claro-chaves`` (derived) e a dos servidores de terceiros ``mcp-claro-chaves-terceiros`` (derived), KV v2
+com a chave do estado das confirmacoes, as politicas de
 ``docker/cofre/politicas/`` e um AppRole por papel. Um teste a parte roda ``scripts/iniciar-cofre.sh``
 dentro do conteiner, duas vezes, e confere que ele e idempotente.
 """
@@ -49,6 +50,7 @@ RAIZ = Path(__file__).resolve().parents[2]
 POLITICAS = RAIZ / "docker" / "cofre" / "politicas"
 PAPEIS = ("entrada", "despachante", "rotinas")
 CHAVE = "mcp-claro-chaves"
+CHAVE_TERCEIROS = "mcp-claro-chaves-terceiros"
 ESTADO = "mcp-claro/estado-confirmacoes"
 
 
@@ -83,6 +85,8 @@ def preparar(url: str, raiz: str, pasta: Path) -> None:
     """O que scripts/iniciar-cofre.sh faz no Compose, pela API."""
     api(url, raiz, "POST", "sys/mounts/transit", {"type": "transit"})
     api(url, raiz, "POST", f"transit/keys/{CHAVE}", {"type": "aes256-gcm96", "derived": True})
+    # A chave so dos servidores de terceiros (Fase 3), como o script cria: o despachante recusa a partida sem ela.
+    api(url, raiz, "POST", f"transit/keys/{CHAVE_TERCEIROS}", {"type": "aes256-gcm96", "derived": True})
     api(url, raiz, "POST", "sys/mounts/kv", {"type": "kv", "options": {"version": "2"}})
     for _ in range(50):  # o KV v2 recem-ligado leva um instante para aceitar escrita
         try:

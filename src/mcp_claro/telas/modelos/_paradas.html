@@ -9,7 +9,7 @@
   <tbody>
   {% for p in suas %}
     <tr>
-      <td>{{ p.o_que }}</td>
+      <td><bdi>{{ p.o_que | escondidos }}</bdi></td>
       <td>{% if p.tipo == "bloqueio" %}<span class="etiqueta ruim">Bloqueado</span>{% else %}<span class="etiqueta">Pausado</span>{% endif %}</td>
       <td>{{ p.desde | data_hora }}</td>
       <td>{{ p.quem }}</td>
@@ -33,7 +33,7 @@
 <h3>Parado pelo ADMIN ou pelo MCP-CLARO, para todas as pessoas</h3>
 <ul>
   {% for p in gerais %}
-  <li>{{ p.o_que }}: {% if p.tipo == "bloqueio" %}bloqueado{% else %}pausado{% endif %} desde {{ p.desde | data_hora }}. {{ p.quem }} ligou. Só o ADMIN desfaz.</li>
+  <li><bdi>{{ p.o_que | escondidos }}</bdi>: {% if p.tipo == "bloqueio" %}bloqueado{% else %}pausado{% endif %} desde {{ p.desde | data_hora }}. {{ p.quem }} ligou. Só o ADMIN desfaz.</li>
   {% endfor %}
 </ul>
 {% endif %}

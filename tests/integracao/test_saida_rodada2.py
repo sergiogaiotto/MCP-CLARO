@@ -342,11 +342,13 @@ async def test_limite_so_estes_com_argumento_fora_do_esquema_vai_para_a_ficha(am
 
         # O esquema de enviar_mensagem tem destinatario e texto: "copia_oculta" fica fora dele.
         fora = {"destinatario": "equipe", "texto": f"fora {marca}", "copia_oculta": "fora@exemplo"}
-        op, _ = await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, fora, None))
+        op, _ = await pedidos.pedir(Pedido(amb.ana_id, aplicativo, f, fora, None, terceiros=False))
         assert (op.estado, op.limite_id) == (Estado.AGUARDANDO_FICHA, None)
         assert await usados(amb, limite) == 0
         dentro, _ = await pedidos.pedir(
-            Pedido(amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": f"dentro {marca}"}, None)
+            Pedido(
+                amb.ana_id, aplicativo, f, {"destinatario": "equipe", "texto": f"dentro {marca}"}, None, terceiros=False
+            )
         )
         assert (dentro.estado, dentro.limite_id) == (Estado.LIBERADA, limite)
         assert await usados(amb, limite) == 1
@@ -417,10 +419,12 @@ async def test_acao_pedida_e_repetida_de_programa_passam_por_programas_linha(amb
             espera_segundos=0,
         )
     pedidos, _ = await pedidos_de(amb)
-    repetida, foi_repetida = await pedidos.pedir(Pedido(amb.ana_id, robo, f, argumentos, None))
+    repetida, foi_repetida = await pedidos.pedir(Pedido(amb.ana_id, robo, f, argumentos, None, terceiros=False))
     assert (repetida.id, foi_repetida) == (op.id, True)
     # Pedido novo pelo caminho da entrada (com o Aplicativo na mao, sem consulta a mais para um assistente).
-    outro, foi_outro = await pedidos.pedir(Pedido(amb.ana_id, robo, f, {"titulo": f"Outro {sufixo}"}, None))
+    outro, foi_outro = await pedidos.pedir(
+        Pedido(amb.ana_id, robo, f, {"titulo": f"Outro {sufixo}"}, None, terceiros=False)
+    )
     assert not foi_outro
     try:
         async with amb.admin.connect() as c:

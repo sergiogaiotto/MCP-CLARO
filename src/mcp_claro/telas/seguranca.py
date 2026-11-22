@@ -4,18 +4,24 @@
 - Nada de moldura (X-Frame-Options DENY e ``frame-ancestors 'none'``) nem de ``Referer``.
 - Cookies ``__Host-``: Secure, HttpOnly, SameSite=Lax, ``Path=/`` e sem ``Domain``.
 - Todo POST leva o token CSRF da sessao, conferido em tempo constante, e nao pode vir de outra origem.
+- O formulario tem teto de tamanho e de campos (``TETO_PADRAO``). Uma rota que precisa de mais declara o proprio
+  teto (``rota_com_teto``), sem mudar o das outras; nela, ate ``FOLGA_DA_ROTA`` vezes o tamanho, quem recusa e o
+  leitor, com a frase em portugues.
 """
 
 from __future__ import annotations
 
 import hmac
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from typing import Final
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from starlette.datastructures import MutableHeaders
+from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 COOKIE_SESSAO: Final = "__Host-mcp_claro_sessao"
@@ -23,7 +29,36 @@ COOKIE_LOGIN: Final = "__Host-mcp_claro_login"
 CAMPO_CSRF: Final = "csrf"
 CABECALHO_CSRF: Final = "x-csrf-token"
 MAXIMO_FORMULARIO: Final = 64 * 1024
+"""Teto, em bytes, do corpo de um formulario (o mesmo da montagem das telas, ``rotas.rotas_telas``)."""
 MAXIMO_CAMPOS: Final = 200
+"""Teto de campos de um formulario."""
+
+# Recusas do leitor de formularios (a tela mostra com o titulo "Pedido recusado").
+FORMATO_INESPERADO: Final = "Formulário em formato inesperado."
+GRANDE_DEMAIS: Final = "Formulário grande demais. Nada foi feito."
+ILEGIVEL: Final = "Formulário ilegível. Nada foi feito."
+CAMPOS_DEMAIS: Final = "Formulário com campos demais. Nada foi feito."
+CHAVE_TETO: Final = "mcp_claro.teto_formulario"
+"""Onde ``ComTeto`` poe, no pedido, o teto da rota."""
+
+
+@dataclass(frozen=True, slots=True)
+class TetoFormulario:
+    """Quanto um formulario pode trazer: ``tamanho`` em bytes e ``campos``. ``campos_demais`` e a frase da recusa
+    quando passa dos campos (uma rota pode dizer o que fazer)."""
+
+    tamanho: int
+    campos: int
+    campos_demais: str = CAMPOS_DEMAIS
+
+
+TETO_PADRAO: Final = TetoFormulario(MAXIMO_FORMULARIO, MAXIMO_CAMPOS)
+"""O teto de toda rota das telas que nao declara outro."""
+FOLGA_DA_ROTA: Final = 2
+"""Numa rota com teto proprio (``rota_com_teto``), o ``max_body_size`` do Starlette e ``FOLGA_DA_ROTA`` vezes o
+tamanho do teto. Ate ali, quem recusa e ``ler_formulario``, com a frase da tela em portugues. Acima, o Starlette
+recusa antes de ler, com o 413 dele ("Content Too Large", em ingles). A folga nao aumenta o que fica na memoria: o
+leitor para de ler logo que passa do tamanho do teto."""
 
 CSP: Final = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; "
@@ -107,21 +142,66 @@ class FormularioRecusado(Exception):
         super().__init__(mensagem)
 
 
+class ComTeto:
+    """Filtro ASGI de uma rota com teto de formulario proprio: poe o teto no pedido, e ``ler_formulario`` o usa."""
+
+    def __init__(self, app: ASGIApp, *, teto: TetoFormulario) -> None:
+        self.app = app
+        self.teto = teto
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            scope[CHAVE_TETO] = self.teto
+        await self.app(scope, receive, send)
+
+
+def rota_com_teto(caminho: str, funcao: Callable[[Request], Awaitable[Response]], teto: TetoFormulario) -> Route:
+    """Um POST com teto de formulario proprio. O ``max_body_size`` da rota vale no lugar do da montagem das telas
+    so para ela (o Starlette usa o da rota mais de dentro); as outras rotas ficam com ``TETO_PADRAO``. Ele tem folga
+    (``FOLGA_DA_ROTA``) sobre o tamanho do teto, para o leitor recusar antes do Starlette, em portugues."""
+    return Route(
+        caminho,
+        funcao,
+        methods=["POST"],
+        middleware=[Middleware(ComTeto, teto=teto)],
+        max_body_size=FOLGA_DA_ROTA * teto.tamanho,
+    )
+
+
+def teto_do_pedido(pedido: Request) -> TetoFormulario:
+    teto = pedido.scope.get(CHAVE_TETO)
+    return teto if isinstance(teto, TetoFormulario) else TETO_PADRAO
+
+
+def _campos(corpo: bytes | bytearray) -> int:
+    """A mesma conta do ``parse_qsl``: um campo a mais que os "&"."""
+    return corpo.count(b"&") + 1
+
+
 async def ler_formulario(pedido: Request) -> Formulario:
+    """O formulario do pedido, dentro do teto da rota (``teto_do_pedido``). Recusa com ``FormularioRecusado``.
+
+    Passar dos campos tem frase propria (a da rota diz o que fazer), tambem quando o corpo passa do tamanho e o que
+    ja chegou dele passa dos campos."""
+    teto = teto_do_pedido(pedido)
     tipo = pedido.headers.get("content-type", "").split(";")[0].strip().lower()
     if tipo != "application/x-www-form-urlencoded":
-        raise FormularioRecusado(415, "Formulario em formato inesperado.")
+        raise FormularioRecusado(415, FORMATO_INESPERADO)
     corpo = bytearray()
     async for pedaco in pedido.stream():
         corpo.extend(pedaco)
-        if len(corpo) > MAXIMO_FORMULARIO:
-            raise FormularioRecusado(413, "Formulario grande demais.")
+        if len(corpo) > teto.tamanho:
+            if _campos(corpo) > teto.campos:
+                raise FormularioRecusado(400, teto.campos_demais)
+            raise FormularioRecusado(413, GRANDE_DEMAIS)
+    if _campos(corpo) > teto.campos:
+        raise FormularioRecusado(400, teto.campos_demais)
     try:
         pares = parse_qsl(
-            corpo.decode("utf-8"), keep_blank_values=True, strict_parsing=False, max_num_fields=MAXIMO_CAMPOS
+            corpo.decode("utf-8"), keep_blank_values=True, strict_parsing=False, max_num_fields=teto.campos
         )
     except (UnicodeDecodeError, ValueError) as erro:
-        raise FormularioRecusado(400, "Formulario ilegivel.") from erro
+        raise FormularioRecusado(400, ILEGIVEL) from erro
     return Formulario(pares)
 
 
