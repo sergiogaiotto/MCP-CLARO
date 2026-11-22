@@ -150,3 +150,18 @@ def test_texto_do_recurso_embutido_tambem_passa_pela_medida() -> None:
     assert "Bia Souza" not in nota
     assert "123.456.789-09" not in json.dumps(saida)
     assert [b["resource"]["uri"] for b in saida["content"]] == ["file:///ficha.json", "file:///nota.txt"]
+
+
+def test_texto_json_com_campos_pessoais_acima_do_teto_fixo_e_recusado_mesmo_que_o_leitor_abra() -> None:
+    """O desfecho nao depende da pilha da maquina: acima de ``NIVEIS_JSON_DO_TEXTO`` niveis a leitura e recusada,
+    mesmo quando ``json.loads`` abre o texto (no CI, abriu 100 mil niveis); no teto, mascara."""
+    assert medida.NIVEIS_JSON_DO_TEXTO == 10_000
+    # json_fundo(n) tem n listas e o objeto da folha: n + 1 niveis.
+    no_teto = medida.aplicar({"content": [{"type": "text", "text": json_fundo(9_999)}]}, ["cpf"])
+    assert "123.456.789-09" not in json.dumps(no_teto, ensure_ascii=False)
+    acima = json_fundo(10_000)
+    assert medida.profundidade(json.loads(acima)) == 10_001  # o leitor abre: a recusa e do teto, nao da pilha
+    with pytest.raises(medida.RespostaFundaDemais):
+        medida.aplicar({"content": [{"type": "text", "text": acima}]}, ["cpf"])
+    # Sem campos pessoais, nada e aberto: o texto passa como texto, como antes.
+    assert medida.aplicar({"content": [{"type": "text", "text": acima}]}, [])["content"][0]["type"] == "text"

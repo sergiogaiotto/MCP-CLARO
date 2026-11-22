@@ -662,8 +662,9 @@ por isso algumas faixas são largas. Outra máquina dá outros números. Nenhum 
 - **Leitura com medida: cada bloco só com o que é dele (vale para todos).** Cada bloco do resultado sai só com
   `type`, o texto e as `annotations`; um recurso embutido, só com `uri`, `mimeType` e `text`. O `_meta` do bloco e o
   do recurso embutido nunca passam: podiam levar dado pessoal ou instrução do sistema. Num terceiro, as `annotations`
-  também saem. A máscara não usa recursão. Um texto JSON com campos pessoais que nem o leitor de JSON abre (umas
-  dezenas de milhares de níveis) é recusado com `resposta_funda_demais`. Prova: `tests/unidade/test_medida_meta.py`
+  também saem. A máscara não usa recursão. Um texto JSON com campos pessoais com mais de 10.000 níveis, ou que o leitor
+  de JSON não abre, é recusado com `resposta_funda_demais`. O teto é fixo para o desfecho não depender da máquina:
+  o leitor de JSON abriu uns 40 mil níveis numa máquina de testes e 100 mil no CI. Prova: `tests/unidade/test_medida_meta.py`
   e `tests/integracao/test_estranhos_leitura.py::test_texto_json_fundo_com_campos_pessoais_e_mascarado_ou_recusado`.
 - **Resultado fundo demais (vale para todos).** Na leitura, um resultado com mais de 199 níveis, ou que o kit não
   escreve, vira o erro nosso `resposta_funda_demais`. Na prática, o leitor do kit já recusa mais de 200 níveis numa

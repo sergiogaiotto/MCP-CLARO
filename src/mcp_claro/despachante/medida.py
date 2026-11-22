@@ -23,6 +23,13 @@ class RespostaFundaDemais(ValueError):
     """O resultado tem partes demais umas dentro das outras para a leitura com medida."""
 
 
+NIVEIS_JSON_DO_TEXTO: Final = 10_000
+"""Niveis de listas e objetos, um dentro do outro, de um texto JSON com campos pessoais a mascarar. Acima disso a
+leitura e recusada (``RespostaFundaDemais``) mesmo quando o leitor de JSON consegue abrir o texto: sem o teto fixo, o
+desfecho dependia da pilha da maquina (medido: o leitor de JSON do Python 3.14 abriu uns 40 mil niveis numa maquina
+com pilha de 8 MiB, e 100 mil noutra, no CI). O teto fica bem abaixo do que uma pilha comum abre."""
+
+
 def profundidade(dados: Any) -> int:
     """Quantos niveis de listas e objetos, um dentro do outro (0 para um valor simples). Sem recursao."""
     maior = 0
@@ -113,6 +120,8 @@ def _mascarar_bloco_texto(texto: str, campos: frozenset[str], crus: set[str]) ->
         except ValueError:
             dados = None
         if isinstance(dados, (dict, list)):
+            if profundidade(dados) > NIVEIS_JSON_DO_TEXTO:
+                raise RespostaFundaDemais("texto com JSON fundo demais para a leitura com medida")
             try:
                 texto = json.dumps(mascarar_estrutura(dados, campos), ensure_ascii=False)
             except RecursionError:
@@ -136,8 +145,8 @@ def aplicar(resultado: dict[str, Any], campos_pessoais: Iterable[str], *, anotac
     (Fase 3: podiam levar dado pessoal ou instrucao do sistema). ``anotacoes=False`` (servidor de terceiros) tira
     tambem as ``annotations``.
 
-    Levanta ``RespostaFundaDemais`` quando um texto JSON, com campos pessoais a mascarar, e fundo demais ate para
-    o leitor de JSON.
+    Levanta ``RespostaFundaDemais`` quando um texto JSON, com campos pessoais a mascarar, tem mais de
+    ``NIVEIS_JSON_DO_TEXTO`` niveis ou e fundo demais ate para o leitor de JSON.
     """
     campos = frozenset(campos_pessoais)
     saida = dict(resultado)
