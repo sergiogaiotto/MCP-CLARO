@@ -23,6 +23,8 @@ from mcp_claro.cadastro.esquema import com_descricoes, conferir_terceiro, limpar
 from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, ORIGENS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
 from mcp_claro.entrada.argumentos import conferir_esquema
+from mcp_claro.selo.contrato import FERRAMENTAS_DO_CONTRATO
+from mcp_claro.selo.vigente import SeloVigente
 
 
 def _aplicativo(linha: Row[Any]) -> Aplicativo:
@@ -33,10 +35,37 @@ def _pessoa(linha: Row[Any]) -> Pessoa:
     return Pessoa(linha.id, linha.emissor, linha.sujeito, linha.nome, linha.papel, linha.situacao, linha.teste)
 
 
-def _sistema(linha: Row[Any], prefixo: str = "") -> Sistema:
+def _sistema(linha: Row[Any], prefixo: str = "", *, com_selo: bool = True) -> Sistema:
+    """O ``Sistema`` de uma linha com as colunas de ``sistemas`` e, com ``com_selo``, as do selo vigente
+    (``selo_nivel``, ``selo_teste_id``, ``selo_testado_em``, ``selo_vale_ate``, ``selo_modo``, ``selo_motivo``), que a
+    consulta traz por ``CROSS JOIN LATERAL selo_vigente(s.id)``. Sem ``com_selo``, ``selo_vigente`` fica no padrao
+    ``NIVEL_1_SEM_TESTE`` do modelo (nivel 1, que nao promete nada)."""
+
     def g(campo: str) -> Any:
         return getattr(linha, prefixo + campo)
 
+    if not com_selo:
+        return Sistema(
+            g("id"),
+            g("nome"),
+            g("endereco"),
+            g("origem"),
+            g("tipo_chave"),
+            g("selo"),
+            g("situacao"),
+            g("versao_mcp"),
+            g("revisao_servidor_id"),
+            g("sondagem_desfecho"),
+        )
+    teste_id = g("selo_teste_id")
+    selo_vigente = SeloVigente(
+        int(g("selo_nivel")),
+        None if teste_id is None else uuid.UUID(str(teste_id)),
+        g("selo_testado_em"),
+        g("selo_vale_ate"),
+        g("selo_modo"),
+        str(g("selo_motivo")),
+    )
     return Sistema(
         g("id"),
         g("nome"),
@@ -48,6 +77,7 @@ def _sistema(linha: Row[Any], prefixo: str = "") -> Sistema:
         g("versao_mcp"),
         g("revisao_servidor_id"),
         g("sondagem_desfecho"),
+        selo_vigente,
     )
 
 
@@ -82,22 +112,44 @@ async def pessoa_no_login(
     return _pessoa(linha)
 
 
-async def sistema_por_id(c: AsyncConnection, sistema_id: uuid.UUID) -> Sistema | None:
-    linha = (await c.execute(text("SELECT * FROM sistemas WHERE id = :i"), {"i": sistema_id})).first()
-    return _sistema(linha) if linha else None
+_SQL_SISTEMA = """
+SELECT s.*, sv.nivel AS selo_nivel, sv.teste_id AS selo_teste_id, sv.testado_em AS selo_testado_em,
+       sv.vale_ate AS selo_vale_ate, sv.modo AS selo_modo, sv.motivo AS selo_motivo
+FROM sistemas s CROSS JOIN LATERAL selo_vigente(s.id) sv
+WHERE s.id = :i
+"""
+_SQL_SISTEMA_SEM_SELO = "SELECT s.* FROM sistemas s WHERE s.id = :i"
+
+
+async def sistema_por_id(c: AsyncConnection, sistema_id: uuid.UUID, *, com_selo: bool = False) -> Sistema | None:
+    """O sistema. ``com_selo``: com o selo vigente de agora em ``Sistema.selo_vigente``, lido de ``selo_vigente()`` na
+    mesma consulta.
+
+    Sem ``com_selo`` (o padrao), a consulta nao chama ``selo_vigente()`` e ``Sistema.selo_vigente`` fica no padrao
+    ``NIVEL_1_SEM_TESTE`` (nivel 1, que nao promete nada): e o que os caminhos do despachante que nao usam o selo
+    (``sondar_sistema``, ``ler_declaracoes``, ``revisar_servidor``) leem. Assim, um defeito ou uma demora em
+    ``selo_vigente()`` (que le as ferramentas do contrato em ``ferramentas_vistas``) nao para a sondagem nem a
+    releitura do que o sistema declara, que e o que troca uma definicao ruim guardada. Quem mostra ou usa o selo pede
+    ``com_selo=True``, ou le ``selo.vigente.ler``."""
+    sql = _SQL_SISTEMA if com_selo else _SQL_SISTEMA_SEM_SELO
+    linha = (await c.execute(text(sql), {"i": sistema_id})).first()
+    return _sistema(linha, com_selo=com_selo) if linha else None
 
 
 # Um terceiro so entra com ``terceiros`` e so com as ferramentas publicadas na revisao do servidor vigente (a
 # guarda de sistemas so deixa a revisao vigente num servidor 'ativo'). Rever uma ferramenta grava outro id: ela sai
 # da vitrine ate a proxima conclusao. A revisada de terceiro tambem precisa da definicao declarada, que so a
 # revisao da Fase 3 grava (``revisar_ferramenta``, com o esquema limpo e as descricoes do ADMIN): uma linha de
-# antes dela nunca leva o texto do fornecedor a vitrine. Sistema proprio: como nas Fases 1 e 2.
+# antes dela nunca leva o texto do fornecedor a vitrine. Sistema proprio: como nas Fases 1 e 2. Fase 4: o selo
+# vigente de cada sistema vem junto (``selo_vigente``), e as ferramentas do contrato do selo nunca entram.
 _SQL_VITRINE = """
 SELECT DISTINCT ON (f.id)
        f.*, o.id AS ordem_id,
        s.id AS s_id, s.nome AS s_nome, s.endereco AS s_endereco, s.origem AS s_origem, s.tipo_chave AS s_tipo_chave,
        s.selo AS s_selo, s.situacao AS s_situacao, s.versao_mcp AS s_versao_mcp,
-       s.revisao_servidor_id AS s_revisao_servidor_id, s.sondagem_desfecho AS s_sondagem_desfecho
+       s.revisao_servidor_id AS s_revisao_servidor_id, s.sondagem_desfecho AS s_sondagem_desfecho,
+       sv.nivel AS s_selo_nivel, sv.teste_id AS s_selo_teste_id, sv.testado_em AS s_selo_testado_em,
+       sv.vale_ate AS s_selo_vale_ate, sv.modo AS s_selo_modo, sv.motivo AS s_selo_motivo
 FROM ordens_servico o
 JOIN modelos_ordem m ON m.id = o.modelo_id AND m.ativo
 JOIN modelos_ordem_ferramentas mf ON mf.modelo_id = m.id
@@ -105,11 +157,14 @@ JOIN ferramentas_revisadas f ON f.sistema_id = mf.sistema_id AND f.nome_original
                              AND f.situacao = 'ativa'
 JOIN sistemas s ON s.id = f.sistema_id AND s.situacao = 'ativo' AND s.versao_mcp = :versao
 LEFT JOIN revisoes_servidor rs ON rs.id = s.revisao_servidor_id AND rs.sistema_id = s.id
+CROSS JOIN LATERAL selo_vigente(s.id) sv
 WHERE o.pessoa_id = :pessoa AND o.aplicativo_id = :aplicativo AND o.situacao = 'ativa'
   AND o.inicio <= now() AND o.fim > now()
+  AND f.nome_original <> ALL (CAST(:reservados AS text[]))
   AND (s.origem = 'proprio'
        OR (CAST(:terceiros AS boolean) AND f.id = ANY (rs.publicadas) AND f.definicao_declarada IS NOT NULL))
 """
+_RESERVADOS = list(FERRAMENTAS_DO_CONTRATO)
 
 
 def _ferramenta(linha: Row[Any], *, para_chamar: bool = False) -> FerramentaVitrine:
@@ -145,7 +200,13 @@ async def vitrine(
     linhas = (
         await c.execute(
             text(_SQL_VITRINE + " ORDER BY f.id, o.fim DESC"),
-            {"pessoa": pessoa_id, "aplicativo": aplicativo_id, "versao": versao, "terceiros": terceiros},
+            {
+                "pessoa": pessoa_id,
+                "aplicativo": aplicativo_id,
+                "versao": versao,
+                "terceiros": terceiros,
+                "reservados": _RESERVADOS,
+            },
         )
     ).all()
     return sorted((_ferramenta(linha) for linha in linhas), key=lambda f: f.nome_vitrine)
@@ -171,6 +232,7 @@ async def ferramenta_na_vitrine(
                 "versao": versao,
                 "nome": nome_vitrine,
                 "terceiros": terceiros,
+                "reservados": _RESERVADOS,
             },
         )
     ).first()
@@ -199,6 +261,7 @@ async def ferramenta_da_ordem(
                 "f": ferramenta_id,
                 "o": ordem_id,
                 "terceiros": terceiros,
+                "reservados": _RESERVADOS,
             },
         )
     ).first()

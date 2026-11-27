@@ -482,7 +482,7 @@ def _sistema(origem: str, endereco: str = "https://t.exemplo/mcp") -> Sistema:
         endereco=endereco,
         origem=origem,
         tipo_chave="por_pessoa",
-        selo=0,
+        selo=1,  # sistemas.selo fica em 1 desde a 0007; o selo vigente sai de selo_vigente()
         situacao="ativo",
         versao_mcp=VERSAO_MCP,
     )

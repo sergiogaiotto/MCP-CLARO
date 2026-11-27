@@ -63,6 +63,13 @@ def test_fases_em_ordem(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("decisao 10" in p for p in problemas)
 
 
+def test_fase4_tambem_em_ordem(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A Fase 4 exige a Fase 3 (decisao 10), como antes; a recusa propria (D24) vem a mais (test_settings_fase4).
+    monkeypatch.setenv("FEATURE_PHASE4_BADGES", "ligado")
+    problemas = Parametros().problemas()
+    assert "FEATURE_PHASE4_BADGES exige FEATURE_PHASE3_THIRD_PARTY (decisao 10)." in problemas
+
+
 def test_liga_desliga_em_portugues(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FEATURE_PHASE1_READ", "ligado")
     monkeypatch.setenv("PATROL_AUTOCLOSE_ENABLED", "desligado")

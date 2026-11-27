@@ -8,6 +8,7 @@ from typing import Any, Final, Literal
 
 from mcp_claro.cadastro.esquema import limpar_textos, nomes_neutros
 from mcp_claro.regras.estranhos import vem_de_estranhos
+from mcp_claro.selo.vigente import NIVEL_1_SEM_TESTE, SeloVigente
 
 Classe = Literal["le", "muda", "tem_volta"]
 Origem = Literal["proprio", "terceiro"]
@@ -55,6 +56,15 @@ class Pessoa:
 
 @dataclass(frozen=True, slots=True)
 class Sistema:
+    """Um sistema do cadastro.
+
+    ``selo`` e a coluna antiga ``sistemas.selo``, presa em 1 pela 0007 (D8): fica para o codigo de antes da Fase 4
+    (critica B1). O selo de agora e ``selo_vigente``, lido de ``selo_vigente()`` pelo cadastro
+    (``cadastro.repositorio``: a vitrine, ``ferramenta_na_vitrine``, ``ferramenta_da_ordem`` e
+    ``sistema_por_id(..., com_selo=True)``); o padrao, nivel 1 sem teste, fica para quem monta o ``Sistema`` a mao e
+    para ``sistema_por_id`` sem ``com_selo`` (os caminhos do despachante que nao usam o selo). O que vai a uma pessoa e
+    o selo efetivo (``selo.vigente.efetivo``), nunca nenhum dos dois direto."""
+
     id: uuid.UUID
     nome: str
     endereco: str
@@ -65,6 +75,7 @@ class Sistema:
     versao_mcp: str | None
     revisao_servidor_id: uuid.UUID | None = None
     sondagem_desfecho: str | None = None
+    selo_vigente: SeloVigente = NIVEL_1_SEM_TESTE
 
     @property
     def de_terceiro(self) -> bool:
@@ -97,8 +108,13 @@ class FerramentaVitrine:
         """A resposta e texto de estranhos: servidor de terceiros ou ferramenta marcada "traz texto de fora"."""
         return vem_de_estranhos(self.sistema.origem, self.texto_de_fora)
 
-    def como_tool(self) -> dict[str, Any]:
+    def como_tool(self, selo_efetivo: int | None = None) -> dict[str, Any]:
         """Definicao no formato do fio da 2026-07-28, com nomes e textos do cadastro, nao do sistema.
+
+        ``selo_efetivo``: o nivel do selo efetivo da pessoa que ve a vitrine (``selo.vigente.efetivo`` sobre
+        ``sistema.selo_vigente``), que vai no ``_meta``. Sem ele, vai a coluna antiga ``sistema.selo`` (presa em 1),
+        como antes da Fase 4. O efetivo nunca passa do vigente: um nivel acima de ``sistema.selo_vigente.nivel``, ou
+        fora de 1 a 3, levanta ``ValueError`` (um defeito de quem chama nunca sobe o selo no aplicativo).
 
         Num terceiro, nada do fornecedor: o esquema de entrada sai limpo de novo (so as descricoes de campo do
         primeiro nivel ficam: a revisao gravou as do ADMIN), sem o ``$schema`` da raiz e com nomes neutros nas
@@ -106,9 +122,17 @@ class FerramentaVitrine:
         com os mesmos nomes; aqui e a segunda barreira, tambem para uma revisada gravada antes), as dicas saem so da
         classe revisada, com ``openWorldHint`` sempre verdadeiro, e a descricao termina com a frase fixa.
         """
+        if selo_efetivo is None:
+            selo = self.sistema.selo
+        elif isinstance(selo_efetivo, bool) or selo_efetivo not in (1, 2, 3):
+            raise ValueError(f"selo efetivo fora de 1 a 3: {selo_efetivo!r}")
+        elif selo_efetivo > self.sistema.selo_vigente.nivel:
+            raise ValueError("o selo efetivo nunca passa do selo vigente do sistema")
+        else:
+            selo = selo_efetivo
         meta: dict[str, Any] = {
             "br.com.claro.mcp-claro/sistema": self.sistema.nome,
-            "br.com.claro.mcp-claro/selo": self.sistema.selo,
+            "br.com.claro.mcp-claro/selo": selo,
         }
         if self.sistema.de_terceiro:
             etiquetas: dict[str, Any] = {

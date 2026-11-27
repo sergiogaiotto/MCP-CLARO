@@ -7,6 +7,8 @@ mais uma folga (a sala ainda confere o endereco e espera o terceiro). Classifica
 - pedido que o escritor de JSON nao consegue montar (argumentos com 256 niveis ou mais, um dentro do outro):
   ``nao_enviado`` (``PEDIDO_FUNDO_DEMAIS``), antes de abrir conexao com a sala;
 - qualquer outra falha, prazo, status que nao seja 200 ou corpo fora do contrato: ``duvida``;
+- chamada com o numero da operacao (``chave_operacao``, Fase 4): ``nao_enviado`` (``NUMERO_SEM_SALA_V2``), sem
+  abrir a chave nem conexao, ate o contrato da sala v2 (G7, etapa 5); numero fora da forma uuid, ``ValueError``;
 - 200 com corpo do contrato: a classificacao que a sala deu. A sala cheia responde assim, na hora em que desiste
   da vaga (``visitas.app.PRAZO_VAGA``): ``nao_enviado`` com ``sala_sem_vaga``, sem nada ir a um filho, e nao uma
   espera que come o prazo do despachante e vira ``duvida``. Na listagem, a sala cheia com o cabecalho que so o
@@ -19,13 +21,21 @@ despachante): quem monta e o despachante, a partir dos parametros.
 from __future__ import annotations
 
 import ssl
-from typing import Any
+from typing import Any, Final
 
 import anyio
 import httpx2
 from pydantic import SecretStr, ValidationError
 
-from mcp_claro.ligacao.cliente import PEDIDO_FUNDO_DEMAIS, TETO_RESPOSTA_PADRAO, Listagem, Resposta, Segredo, Sondagem
+from mcp_claro.ligacao.cliente import (
+    PEDIDO_FUNDO_DEMAIS,
+    TETO_RESPOSTA_PADRAO,
+    Listagem,
+    Resposta,
+    Segredo,
+    Sondagem,
+    conferir_numero,
+)
 from mcp_claro.ligacao.sala_contrato import (
     CABECALHO_DA_SALA,
     MOTIVO_PEDIDO_FORA,
@@ -49,6 +59,9 @@ from mcp_claro.ligacao.sala_contrato import (
 _ANTES_DE_ENVIAR = (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout, httpx2.UnsupportedProtocol)
 FOLGA_PADRAO = 10.0
 PRAZO_LISTAR = 120.0
+NUMERO_SEM_SALA_V2: Final = "numero_sem_sala_v2"
+"""``Resposta.excecao`` (com ``nao_enviado``) de uma chamada com o numero da operacao pela sala: o contrato da sala
+v1 nao o leva, e nada sai ate a v2 (G7, etapa 5; critica B1)."""
 
 
 class ClienteSala:
@@ -114,9 +127,15 @@ class ClienteSala:
         prazo: float = 30.0,
         esquema_declarado: dict[str, Any] | None = None,
         teto_resposta: int = TETO_RESPOSTA_PADRAO,
+        chave_operacao: str | None = None,
     ) -> Resposta:
         if traceparent:
             raise ValueError("rastro nunca vai a servidor de terceiros")
+        conferir_numero(chave_operacao)
+        if chave_operacao is not None:
+            # O contrato da sala v1 nao tem o numero (``PedidoChamar`` recusa campo a mais): ate a v2 (G7, etapa 5),
+            # nada sai com numero para um terceiro, nem a chave abre. O selo de terceiro tambem ainda e recusado.
+            return Resposta("nao_enviado", excecao=NUMERO_SEM_SALA_V2)
         chave = await segredo()
         try:
             pedido = PedidoChamar(

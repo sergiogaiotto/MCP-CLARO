@@ -102,7 +102,7 @@ def resultado_do_sistema(sistema: str, texto: str = TEXTO_DO_SISTEMA, *, erro: b
     return {
         "content": [{"type": "text", "text": texto}],
         "isError": erro,
-        "_meta": {PREFIXO_META + "sistema": sistema, PREFIXO_META + "selo": 0},
+        "_meta": {PREFIXO_META + "sistema": sistema, PREFIXO_META + "selo": 1},
     }
 
 
@@ -111,7 +111,7 @@ def resultado_nosso(sistema: str, motivo: str, texto: str = "Texto do MCP-CLARO.
     return {
         "content": [{"type": "text", "text": texto}],
         "isError": True,
-        "_meta": {PREFIXO_META + "motivo": motivo, PREFIXO_META + "sistema": sistema, PREFIXO_META + "selo": 0},
+        "_meta": {PREFIXO_META + "motivo": motivo, PREFIXO_META + "sistema": sistema, PREFIXO_META + "selo": 1},
     }
 
 

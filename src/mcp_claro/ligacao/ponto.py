@@ -29,7 +29,12 @@ from mcp_claro.ligacao.sala_contrato import SALA_FORA, FalhaNaSala, resposta_sal
 
 
 class Ligacao(Protocol):
-    """O que o despachante usa para falar com um sistema (mesmas assinaturas do cliente fixado)."""
+    """O que o despachante usa para falar com um sistema (mesmas assinaturas do cliente fixado).
+
+    ``chave_operacao`` (Fase 4, ``contrato.LigacaoComNumero``): o numero da operacao, que vai so em
+    ``params._meta[contrato.CHAVE_OPERACAO]``. Fora da forma uuid, ``ValueError`` antes da rede, em toda ligacao. Sem
+    ele, o pedido e o de antes. A sala (``ClienteSala``) ainda nao leva o numero: devolve ``nao_enviado`` sem nada
+    enviar, ate o contrato da sala v2 (G7, etapa 5)."""
 
     async def chamar_ferramenta(
         self,
@@ -43,6 +48,7 @@ class Ligacao(Protocol):
         prazo: float = 30.0,
         esquema_declarado: dict[str, Any] | None = None,
         teto_resposta: int = TETO_RESPOSTA_PADRAO,
+        chave_operacao: str | None = None,
     ) -> Resposta: ...
 
     async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
@@ -81,6 +87,7 @@ class ClienteLocal:
         prazo: float = 30.0,
         esquema_declarado: dict[str, Any] | None = None,
         teto_resposta: int = TETO_RESPOSTA_PADRAO,
+        chave_operacao: str | None = None,
     ) -> Resposta:
         return await cliente.chamar_ferramenta(
             endereco,
@@ -95,6 +102,7 @@ class ClienteLocal:
             terceiro=self.terceiro,
             ambiente=self.ambiente,
             liberar_locais=self.liberar_locais,
+            chave_operacao=chave_operacao,
         )
 
     async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:
@@ -126,7 +134,7 @@ class ClienteLocal:
 @dataclass(frozen=True, slots=True)
 class SemSala:
     """Servidor de terceiros sem sala de visitas: nenhum pedido MCP sai por aqui, e o chamador fica sabendo por
-    ``SalaFora``."""
+    ``SalaFora``. O numero da operacao e conferido como no cliente fixado (``ValueError`` fora da forma uuid)."""
 
     async def chamar_ferramenta(
         self,
@@ -140,7 +148,9 @@ class SemSala:
         prazo: float = 30.0,
         esquema_declarado: dict[str, Any] | None = None,
         teto_resposta: int = TETO_RESPOSTA_PADRAO,
+        chave_operacao: str | None = None,
     ) -> Resposta:
+        cliente.conferir_numero(chave_operacao)
         return resposta_sala_fora()
 
     async def listar(self, endereco: str, segredo: Segredo, discover_json: str | None) -> Listagem:

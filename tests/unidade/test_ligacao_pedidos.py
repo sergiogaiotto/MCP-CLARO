@@ -204,7 +204,7 @@ SISTEMA = Sistema(
     endereco="http://127.0.0.1:9/mcp",
     origem="proprio",
     tipo_chave="por_pessoa",
-    selo=0,
+    selo=1,  # sistemas.selo fica em 1 desde a 0007; o selo vigente sai de selo_vigente()
     situacao="ativo",
     versao_mcp=VERSAO_MCP,
 )

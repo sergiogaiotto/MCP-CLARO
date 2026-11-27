@@ -9,7 +9,9 @@ diferente de 2026-07-28, com ``EDGE_MODE=apigee`` (reservado, decisao 7) nem,
 em piloto ou producao, com banco sem ``verify-full``. Fase 3: fora de
 desenvolvimento e teste, a sala de visitas (``VISITS_INTERNAL_URL``, https) e
 obrigatoria sempre (ajustes, A2), e ``FEATURE_PHASE3_THIRD_PARTY`` ainda nao
-liga (D6), como ``PROGRAM_ACTIONS_ENABLED``.
+liga (D6), como ``PROGRAM_ACTIONS_ENABLED``. Fase 4: ``FEATURE_PHASE4_BADGES``
+continua exigindo a Fase 3 (decisao 10) e tambem ainda nao liga (D24 da Fase 4,
+pela regra da D6). Os testes ligam as chaves pelo construtor, sem ``conferir``.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import enum
 import re
 from functools import cached_property
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Final
 from urllib.parse import urlsplit
 
 from pydantic import BeforeValidator, Field, SecretStr, field_validator, model_validator
@@ -107,6 +109,15 @@ class PropagacaoRastro(enum.StrEnum):
 class ExportaRastros(enum.StrEnum):
     DESLIGADO = "desligado"
     OTLP = "otlp"
+
+
+FASE4_AINDA_NAO_LIGA: Final = (
+    "FEATURE_PHASE4_BADGES ainda nao liga: ate a decisao registrada do dono, depois das provas que dependem de gente e"
+    " de ambiente real, so pessoas de teste usam os selos de nivel 2 e 3 (D24 da Fase 4, pela regra da D6;"
+    " decisoes.md, Mudancas deliberadas da Fase 4)."
+)
+"""A recusa propria da Fase 4 na partida (desenho 9, D24; ajustes: o G9 nao a tira). Vale mesmo com a Fase 3 ligada:
+a recusa da D6 pode cair sem que esta caia."""
 
 
 def _parece_email(valor: str) -> bool:
@@ -274,6 +285,18 @@ class Parametros(BaseSettings):
     NOTIFY_POLL_SECONDS: int = Field(default=5, ge=1, le=300)
     ROUTINES_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
     TOOL_DRIFT_CHECK_SECONDS: int = Field(default=900, ge=60, le=86400)
+
+    # Selos de nivel 2 e 3 (Fase 4, desenho 9). BADGE_TTL_DAYS e BADGE_WARN_DAYS sao da politica (o banco le a
+    # validade na hora do teste); estes mudam com um reinicio. A escada da consulta e fixa no codigo
+    # (selo.contrato.ESCADA_DA_CONSULTA_MINUTOS); BADGE_LOOKUP_MAX_ATTEMPTS diz ate onde ela vai.
+    BADGE_LOOKUP_INTERVAL_SECONDS: int = Field(default=60, ge=30, le=3600)
+    BADGE_LOOKUP_MAX_ATTEMPTS: int = Field(default=8, ge=1, le=20)
+    BADGE_LOOKUP_TIMEOUT_SECONDS: int = Field(default=10, ge=1, le=60)
+    BADGE_LOOKUP_FAILS_TO_WITHDRAW: int = Field(default=3, ge=1, le=20)
+    BADGE_BLOCK_NOTICE_ATTEMPTS: int = Field(default=3, ge=1, le=10)
+    BADGE_TEST_MAX_CALLS: int = Field(default=300, ge=50, le=2000)
+    BADGE_TEST_MAX_SECONDS: int = Field(default=900, ge=60, le=3600)
+    BADGE_TEST_PAIRS: int = Field(default=10, ge=0, le=100)
 
     # Ronda das portas e vigia de fora (Fase 1); regras de recusa do papel vigia em vigia/config.py
     PATROL_CLIENT_ID: str = "mcp-claro-ronda"
@@ -483,6 +506,8 @@ class Parametros(BaseSettings):
             )
         if self.FEATURE_PHASE4_BADGES and not self.FEATURE_PHASE3_THIRD_PARTY:
             erros.append("FEATURE_PHASE4_BADGES exige FEATURE_PHASE3_THIRD_PARTY (decisao 10).")
+        if self.FEATURE_PHASE4_BADGES:
+            erros.append(FASE4_AINDA_NAO_LIGA)
         if self.PROGRAM_ACTIONS_ENABLED:
             erros.append(
                 "PROGRAM_ACTIONS_ENABLED ainda nao liga: as acoes de programas ainda nao tem as pendencias do"

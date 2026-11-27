@@ -20,7 +20,10 @@ Regras do plano, provadas por teste:
 - rastro: toda chamada ao kit roda num contexto OpenTelemetry vazio; o transporte tira
   ``traceparent``, ``tracestate`` e ``baggage`` dos cabecalhos e, num servidor de
   terceiros, deixa no ``_meta`` do corpo so o envelope do MCP (com ou sem provedor de
-  rastros instalado);
+  rastros instalado) e, quando o despachante o mandou, o numero da operacao;
+- numero da operacao (Fase 4, contrato do selo): ``chamar_ferramenta(chave_operacao=...)`` poe o
+  numero so em ``params._meta[contrato.CHAVE_OPERACAO]``, nunca nos argumentos nem em cabecalho;
+  valor fora da forma uuid e recusado antes da rede; sem ele, o corpo e o de antes, byte a byte;
 - nao segue redirecionamento (``max_redirects=0``), nao le variaveis de proxy do
   ambiente, recusa cookies e so fala com o endereco cadastrado; num servidor de
   terceiros, so https e so IP publico (``conferir_endereco_terceiro``, que confere o
@@ -59,6 +62,7 @@ from opentelemetry import propagate
 from pydantic import TypeAdapter, ValidationError
 
 from mcp_claro import __version__, logs
+from mcp_claro.selo import contrato
 from mcp_claro.versao import VERSAO_MCP
 
 # O kit escreve no log pedacos do que o sistema mandou: so o fato fica (``mcp_claro.logs``).
@@ -152,6 +156,9 @@ class Tentativa:
     tipos: list[str] = field(default_factory=list)
     espiar: bool = False
     corpos_jsonrpc: list[bool] = field(default_factory=list)
+    numero: str | None = None
+    """O numero da operacao que o despachante mandou nesta chamada (``chave_operacao``), ja conferido. Num
+    terceiro, so ele passa no ``_meta`` do corpo, alem do envelope do MCP (``_sem_rastro``)."""
 
 
 _TENTATIVA: contextvars.ContextVar[Tentativa | None] = contextvars.ContextVar("mcp_claro_tentativa", default=None)
@@ -274,8 +281,20 @@ def _campos_de_rastro() -> frozenset[str]:
     return _CABECALHOS_DE_RASTRO | {c.lower() for c in propagate.get_global_textmap().fields}
 
 
-def _sem_rastro(request: httpx2.Request, corpo: Any, *, terceiro: bool) -> httpx2.Request:
-    """Tira os cabecalhos de rastro de todo POST e, num terceiro, tudo do ``_meta`` que nao e envelope do MCP."""
+def _fica_no_meta_do_terceiro(chave: Any, valor: Any, numero: str | None) -> bool:
+    """O que fica no ``_meta`` de um pedido a um servidor de terceiros: o envelope do MCP e, so quando o despachante
+    mandou o numero da operacao nesta chamada (``numero``, ja conferido), a chave exata do contrato com esse mesmo
+    valor, na forma uuid. Qualquer outra chave do prefixo do MCP-CLARO sai, como tudo o mais (D10 da Fase 3)."""
+    if not isinstance(chave, str):
+        return False
+    if chave.startswith(_PREFIXO_ENVELOPE):
+        return True
+    return chave == contrato.CHAVE_OPERACAO and numero is not None and valor == numero and contrato.numero_valido(valor)
+
+
+def _sem_rastro(request: httpx2.Request, corpo: Any, *, terceiro: bool, numero: str | None = None) -> httpx2.Request:
+    """Tira os cabecalhos de rastro de todo POST e, num terceiro, tudo do ``_meta`` que nao e envelope do MCP, salvo
+    o numero da operacao que o despachante mandou (``numero``)."""
     campos = _campos_de_rastro()
     itens = request.headers.multi_items()
     cabecalhos = [(k, v) for k, v in itens if k.lower() not in campos]
@@ -284,7 +303,7 @@ def _sem_rastro(request: httpx2.Request, corpo: Any, *, terceiro: bool) -> httpx
         params = corpo.get("params")
         meta = params.get("_meta") if isinstance(params, dict) else None
         if isinstance(params, dict) and isinstance(meta, dict):
-            limpo = {k: v for k, v in meta.items() if isinstance(k, str) and k.startswith(_PREFIXO_ENVELOPE)}
+            limpo = {k: v for k, v in meta.items() if _fica_no_meta_do_terceiro(k, v, numero)}
             if limpo != meta:
                 novo = corpo | {"params": params | {"_meta": limpo}}
                 conteudo = json.dumps(novo, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
@@ -410,7 +429,9 @@ class _TransporteQueClassifica(httpx2.AsyncBaseTransport):
                 tentativa.fase, tentativa.excecao = "duvida", PEDIDO_A_MAIS
                 return _erro_sintetico(request, 502, "duvida")
             tentativa.pedidos += 1
-        request = _sem_rastro(request, corpo, terceiro=self._terceiro)
+        request = _sem_rastro(
+            request, corpo, terceiro=self._terceiro, numero=tentativa.numero if tentativa is not None else None
+        )
         ja_respondeu = tentativa is not None and (bool(tentativa.status_http) or tentativa.fase == "duvida")
         fase: Fase
         excecao: httpx2.TransportError
@@ -916,6 +937,24 @@ async def listar_ferramentas(
     return listagem.ferramentas
 
 
+def conferir_numero(chave_operacao: str | None) -> None:
+    """``ValueError`` quando o numero da operacao nao tem a forma do contrato (uuid em minusculas); nada sai."""
+    if chave_operacao is not None and not contrato.numero_valido(chave_operacao):
+        raise ValueError("o numero da operacao nao tem a forma do contrato do selo; nada foi enviado")
+
+
+def _meta_do_pedido(traceparent: str | None, chave_operacao: str | None) -> dict[str, Any] | None:
+    """O ``_meta`` que o MCP-CLARO poe no pedido (o kit acrescenta o envelope). Sem rastro e sem numero, None, como
+    antes da Fase 4: o corpo sai igual, byte a byte."""
+    conferir_numero(chave_operacao)
+    meta: dict[str, Any] = {}
+    if traceparent:
+        meta["traceparent"] = traceparent
+    if chave_operacao is not None:
+        meta[contrato.CHAVE_OPERACAO] = chave_operacao
+    return meta or None
+
+
 def _pedido_que_sai(nome: str, argumentos: dict[str, Any], meta: dict[str, Any] | None) -> types.CallToolRequest | None:
     """O pedido ``tools/call``, se o kit consegue escreve-lo; senao None.
 
@@ -949,6 +988,7 @@ async def chamar_ferramenta(
     terceiro: bool = False,
     ambiente: str = "producao",
     liberar_locais: bool = False,
+    chave_operacao: str | None = None,
 ) -> Resposta:
     """Exatamente um POST ``tools/call``. Devolve o resultado cru ou a classificacao da falha.
 
@@ -957,6 +997,11 @@ async def chamar_ferramenta(
     o kit nao consegue escrever (argumentos fundos demais) e ``nao_enviado`` com ``PEDIDO_FUNDO_DEMAIS``, antes de
     qualquer rede.
 
+    ``chave_operacao`` (contrato do selo, ``contrato.LigacaoComNumero``): o numero da operacao, que vai so em
+    ``params._meta[contrato.CHAVE_OPERACAO]``, com o valor recebido; nunca nos argumentos nem em cabecalho. Fora da
+    forma uuid (``contrato.numero_valido``), ``ValueError`` antes de qualquer rede. Sem ele (``None``), o pedido e o
+    de antes da Fase 4, byte a byte. Num terceiro, o transporte deixa passar so essa chave alem do envelope do MCP.
+
     A classificacao e decidida dentro da sessao; os pedidos, depois de ela fechar: o kit responde a um pedido do
     sistema pelo fio antigo numa tarefa a parte, e, com o pedido e o resultado no mesmo corpo, a resposta do kit (que
     a barreira segura e conta) so sai quando a sessao fecha. Lidos antes, os pedidos vinham vazios, e a leitura
@@ -964,7 +1009,7 @@ async def chamar_ferramenta(
     """
     if terceiro and traceparent:
         raise ValueError("rastro nunca vai a servidor de terceiros")
-    meta = {"traceparent": traceparent} if traceparent else None
+    meta = _meta_do_pedido(traceparent, chave_operacao)
     pedido = _pedido_que_sai(nome, argumentos, meta)
     if pedido is None:
         # Antes de qualquer rede (nem o nome do terceiro e procurado): nenhum byte saiu.
@@ -973,10 +1018,11 @@ async def chamar_ferramenta(
         recusa = await _endereco_do_terceiro(endereco, ambiente, liberar_locais)
         if recusa is not None:
             return Resposta("nao_enviado", excecao=recusa)
-    tentativa = Tentativa(teto_pedidos=1)
+    tentativa = Tentativa(teto_pedidos=1, numero=chave_operacao)
     marca = _TENTATIVA.set(tentativa)
     vazio = otel_context.attach(otel_context.Context())
-    # Cabecalhos Mcp-Param-* que o sistema exige quando o esquema dele marca x-mcp-header.
+    # Cabecalhos Mcp-Param-* que o sistema exige quando o esquema dele marca x-mcp-header (so dos argumentos: o
+    # numero da operacao nunca vira cabecalho).
     cabecalhos = mcp_param_headers(x_mcp_header_map(esquema_declarado), argumentos) if esquema_declarado else {}
     try:
         async with (
