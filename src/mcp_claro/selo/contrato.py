@@ -197,7 +197,9 @@ da etapa 3r): o sistema disse que a escrita foi feita, inteira ou em parte, e o 
 resposta ao aviso continua sem ser final (``ORIGENS_DA_RESPOSTA_FINAL``): ela nao encerra a escada nem queima o
 numero; so impede o numero novo, que e o lado arriscado. No banco,
 ``selo_vocabulario('estados_que_impedem_numero_novo')``; sao os estados que contam como ``aconteceu`` e ``em_parte``
-(``CONTA_COMO``)."""
+(``CONTA_COMO``). Tambem impede o numero novo a ultima resposta da original, de qualquer origem, ``em_andamento``
+(um ``em_andamento`` do aviso mais novo que a ultima consulta ``desconhecido``): o sistema recebeu a escrita e ainda
+nao terminou."""
 
 EventoDepois = Literal["concluida", "entregue", "devolvida", "desfeita", "parada"]
 EVENTOS_DEPOIS: Final[tuple[EventoDepois, ...]] = ("concluida", "entregue", "devolvida", "desfeita", "parada")

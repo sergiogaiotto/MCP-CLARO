@@ -1413,7 +1413,9 @@ CREATE INDEX envios_selo_repete ON envios_selo (repete_operacao_id) WHERE repete
 -- desfecho da primeira (ou nao_recebida de novo, e a segunda resposta confirma). Uma original sem envio tambem da
 -- numero novo, nunca erro (critica A1). Com fichas.numero_novo (a pessoa escolheu na ficha, critica M4.2), numero
 -- novo, sem copiar: a guarda da ficha (fichas_guarda) conferiu, na confirmacao, que nenhuma acao com o numero da
--- original tinha estado final e que a ultima resposta dela a consulta era desconhecido. Na porta, este passo roda num
+-- original tinha estado final, que nenhuma resposta sobre o numero, de qualquer origem, dizia concluida ou parcial,
+-- que a ultima resposta dela a consulta era desconhecido e que a ultima resposta dela, de qualquer origem, nao era
+-- em_andamento. Na porta, este passo roda num
 -- SAVEPOINT (ajustes D22): um erro aqui faz a acao sair sem numero, com acao_enviada_sem_numero no extrato.
 CREATE FUNCTION envios_selo_nasce() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
@@ -1835,7 +1837,9 @@ SQL_FICHAS = r"""
 -- motivo, nenhuma resposta sobre o numero, de qualquer origem, diz que a escrita foi feita, inteira ou em parte
 -- (selo_vocabulario('estados_que_impedem_numero_novo'), concluida e parcial): a resposta ao aviso de bloqueio nao e
 -- final (nao encerra a escada nem queima o numero), mas impede o numero novo, que faria a escrita duas vezes (decisao
--- do coordenador na conferencia final da etapa 3r).
+-- do coordenador na conferencia final da etapa 3r). E a ultima resposta da original, de qualquer origem, nao pode ser
+-- em_andamento: um em_andamento do aviso, mais novo que a ultima consulta desconhecido, diz que o sistema recebeu a
+-- escrita e ainda nao terminou, e o numero novo a faria duas vezes.
 -- O banco nao conhece BADGE_LOOKUP_MAX_ATTEMPTS: a regra inteira, com a escada da original acabada (as tentativas,
 -- sistema_fora ou o tempo, contrato.escada_vencida), fica com o codigo (fila.confirmar_ficha e
 -- Operacao.original_ficou_em_desconhecido); esta guarda e a segunda barreira, com o que o banco sabe. O envio le a
@@ -1946,7 +1950,8 @@ BEGIN
     SELECT o.repete_operacao_id INTO repete FROM operacoes o WHERE o.id = NEW.operacao_id;
     -- O estado final conta pelo NUMERO da original: a cadeia de envios_selo.repete_operacao_id, como a contradicao
     -- (fila._SQL_OPERACAO): sobe ate o envio com o numero proprio e desce por todos os pedidos iguais que o copiaram.
-    -- Na mesma cadeia, uma resposta de qualquer origem que diga que a escrita foi feita tambem recusa.
+    -- Na mesma cadeia, uma resposta de qualquer origem que diga que a escrita foi feita tambem recusa; e, na original,
+    -- a ultima resposta de qualquer origem em_andamento (o aviso mais novo que a ultima consulta).
     IF repete IS NULL
        OR EXISTS (
          WITH RECURSIVE acima (operacao_id, pai, passo) AS (
@@ -1967,8 +1972,11 @@ BEGIN
                          AND i.estado = ANY (selo_vocabulario('estados_que_impedem_numero_novo'))))
        OR (SELECT i.estado FROM informacoes_sistema i
            WHERE i.operacao_id = repete AND i.origem = 'consulta' AND i.desfecho = 'respondeu'
-           ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) IS DISTINCT FROM 'desconhecido' THEN
-      RAISE EXCEPTION 'O numero novo so vale no pedido igual a uma acao sem resposta final sobre o numero dela, cuja ultima resposta a consulta foi desconhecido, e sem resposta que diga que a escrita foi feita'
+           ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) IS DISTINCT FROM 'desconhecido'
+       OR (SELECT i.estado FROM informacoes_sistema i
+           WHERE i.operacao_id = repete AND i.desfecho = 'respondeu'
+           ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) = 'em_andamento' THEN
+      RAISE EXCEPTION 'O numero novo so vale no pedido igual a uma acao sem resposta final sobre o numero dela, cuja ultima resposta a consulta foi desconhecido, e sem resposta que diga que a escrita foi feita ou esta em andamento'
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;

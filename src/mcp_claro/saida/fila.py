@@ -166,7 +166,12 @@ class EscadaDaOriginal:
     ``dito_feito_no_numero``: alguma resposta sobre o numero, de qualquer origem (a resposta ao aviso de bloqueio
     tambem), diz que a escrita foi feita, inteira ou em parte (``contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO``). A
     resposta ao aviso nao e final, mas o numero novo nao vale contra ela (decisao do coordenador na conferencia final
-    da etapa 3r): a ficha diria "o sistema nao sabe se o primeiro foi feito", e ele disse que foi."""
+    da etapa 3r): a ficha diria "o sistema nao sabe se o primeiro foi feito", e ele disse que foi.
+
+    ``ultima_resposta``: o estado da ultima resposta ``respondeu`` da original, de QUALQUER origem. Um ``em_andamento``
+    ai (a resposta ao aviso de bloqueio, mais nova que a ultima consulta ``desconhecido``) diz que o sistema recebeu a
+    escrita e ainda nao terminou: o numero novo a faria duas vezes, e ele tambem nao vale (conferencia final da etapa
+    3r)."""
 
     enviado_em: datetime
     estado_final_do_numero: str | None
@@ -174,6 +179,7 @@ class EscadaDaOriginal:
     tentativas: int
     ultimo_desfecho: str | None
     dito_feito_no_numero: bool = False
+    ultima_resposta: str | None = None
 
 
 def _escada_acabou(
@@ -304,7 +310,8 @@ class Operacao:
         ``BADGE_LOOKUP_MAX_ATTEMPTS``), ``sistema_fora`` na ultima linha de consulta ou o tempo
         (``contrato.escada_vencida``). "Sem resposta final" vale pelo NUMERO da original, nao so por ela: nenhuma acao
         que saiu com esse numero tem estado final (``EscadaDaOriginal.estado_final_do_numero``), e nenhuma resposta
-        sobre ele, nem a do aviso de bloqueio, diz que a escrita foi feita (``dito_feito_no_numero``).
+        sobre ele, nem a do aviso de bloqueio, diz que a escrita foi feita (``dito_feito_no_numero``), e a ultima
+        resposta da original, de qualquer origem, nao e ``em_andamento`` (``ultima_resposta``).
 
         So assim a ficha mostra o aviso e a escolha "mandar com numero novo" ("o sistema nao sabe se o primeiro foi
         feito; com numero novo, pode fazer duas vezes"), e ``confirmar_ficha(..., numero_novo=True)`` a aceita. O banco
@@ -315,7 +322,7 @@ class Operacao:
             return False
         if o.dito_feito_no_numero:
             return False
-        if o.ultima_consulta != "desconhecido":
+        if o.ultima_consulta != "desconhecido" or o.ultima_resposta == "em_andamento":
             return False
         return _escada_acabou(
             tentativas=o.tentativas,
@@ -378,7 +385,8 @@ SELECT o.id, o.protocolo, o.codigo_conferencia, o.pessoa_id, o.aplicativo_id, o.
        sub.protocolo AS substituto, ori.enviado_em AS ori_enviado_em,
        ori.estado_final_do_numero AS ori_estado_final_do_numero,
        ori.ultima_consulta AS ori_ultima_consulta, ori.tentativas AS ori_tentativas,
-       ori.ultimo_desfecho AS ori_ultimo_desfecho, ori.dito_feito_no_numero AS ori_dito_feito_no_numero
+       ori.ultimo_desfecho AS ori_ultimo_desfecho, ori.dito_feito_no_numero AS ori_dito_feito_no_numero,
+       ori.ultima_resposta AS ori_ultima_resposta
 FROM operacoes o
 JOIN fila_saida f ON f.operacao_id = o.id
 JOIN ferramentas_revisadas r ON r.id = o.ferramenta_id
@@ -437,6 +445,8 @@ LEFT JOIN LATERAL (
           WHERE fim.estado IS NOT NULL ORDER BY n.passo, n.operacao_id LIMIT 1) AS estado_final_do_numero,
          (SELECT i.estado FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id AND i.origem = 'consulta'
             AND i.desfecho = 'respondeu' ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS ultima_consulta,
+         (SELECT i.estado FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id
+            AND i.desfecho = 'respondeu' ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS ultima_resposta,
          (SELECT count(*) FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id AND i.origem = 'consulta'
             AND i.desfecho = ANY (selo_vocabulario('desfechos_que_gastam_tentativa'))) AS tentativas,
          (SELECT i.desfecho FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id
@@ -518,6 +528,7 @@ def _original(linha: Row[Any]) -> EscadaDaOriginal | None:
         tentativas=int(linha.ori_tentativas or 0),
         ultimo_desfecho=linha.ori_ultimo_desfecho,
         dito_feito_no_numero=linha.ori_dito_feito_no_numero is True,
+        ultima_resposta=linha.ori_ultima_resposta,
     )
 
 
@@ -1196,8 +1207,9 @@ async def confirmar_ficha(
                 await c.execute(text(_SQL_CONFIRMA_FICHA_NUMERO_NOVO), valores)
         except DBAPIError as erro:
             # A guarda do banco (fichas_guarda) recusou: entre a leitura e o UPDATE, o numero da original ganhou
-            # resposta final, ou a original outra resposta a consulta. Nada muda: quem chama desfaz a liberacao junto
-            # com a recusa.
+            # resposta final ou uma resposta, de qualquer origem, que diz que a escrita foi feita (concluida ou
+            # parcial), ou a original ganhou outra resposta a consulta, ou a ultima resposta dela passou a ser
+            # em_andamento. Nada muda: quem chama desfaz a liberacao junto com a recusa.
             log.info("numero_novo_recusado_pelo_banco", erro=type(erro).__name__)
             raise DecisaoRecusada("numero_novo_nao_cabe", NUMERO_NOVO_NAO_CABE) from erro
         CONTADORES.somar("selo_numero_novo_escolhido")

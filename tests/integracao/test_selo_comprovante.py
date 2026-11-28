@@ -10,8 +10,9 @@
   tambem entram; e so a consulta gasta a vez da escada (o recibo e a resposta ao aviso, nao).
 - Decisao 1 do coordenador (retoque da etapa 3): a resposta ao aviso nunca e final. Um ``parada`` so do aviso nao
   resolve o "estamos confirmando" e nao queima o numero do pedido igual; pela consulta, resolve e queima.
-- Conferencia final da etapa 3r: a resposta ao aviso que diz que a escrita foi feita (``concluida`` ou ``parcial``)
-  impede o numero novo do pedido igual, no codigo e no banco, sem deixar de nao ser final.
+- Conferencia final da etapa 3r: a resposta ao aviso que diz que a escrita foi feita (``concluida`` ou ``parcial``),
+  sobre qualquer acao com o numero, impede o numero novo do pedido igual, no codigo e no banco, sem deixar de nao ser
+  final; e o ``em_andamento`` mais novo que a ultima consulta tambem impede. As outras respostas ao aviso nao.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from mcp_claro.config.settings import Parametros
 from mcp_claro.regras import bloqueios
@@ -459,8 +461,9 @@ async def test_o_aviso_que_diz_que_fez_impede_o_numero_novo(
 async def test_a_resposta_ao_aviso_depois_de_sistema_fora_nao_reabre_a_escada_da_original(mundo: MundoSelo) -> None:
     """Conferencia final da etapa 3r (decisao do coordenador): a escada da original conta o ``sistema_fora`` pela
     ultima linha de origem ``consulta``. A consulta de O diz ``desconhecido`` e depois para em ``sistema_fora``; a
-    resposta ao aviso de bloqueio que entra depois (``em_andamento``, que nao diz que a escrita foi feita) nao reabre
-    a escada: O segue em "o sistema nao confirmou; a decisao e sua", e o pedido igual T oferece o numero novo."""
+    resposta ao aviso de bloqueio que entra depois (``desconhecido``, que nao diz que a escrita foi feita nem que esta
+    em andamento) nao reabre a escada: O segue em "o sistema nao confirmou; a decisao e sua", e o pedido igual T
+    oferece o numero novo."""
     m = mundo
     maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
     o = await m.confirmar(await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA))))
@@ -468,7 +471,7 @@ async def test_a_resposta_ao_aviso_depois_de_sistema_fora_nao_reabre_a_escada_da
     await m.informar(o, "desconhecido")
     await m.informar(o, None, desfecho="sistema_fora")
     b = await _bloquear(m)
-    await _avisar(m, b, {o.id: "em_andamento"})
+    await _avisar(m, b, {o.id: "desconhecido"})
     await _encerrar(m, b)
     atual = await m.por_id(o.id)
     assert atual.informado is not None
@@ -484,3 +487,142 @@ async def test_a_resposta_ao_aviso_depois_de_sistema_fora_nao_reabre_a_escada_da
     assert t.original is not None
     assert (t.original.ultimo_desfecho, t.original.dito_feito_no_numero) == ("sistema_fora", False)
     assert t.original_ficou_em_desconhecido(maximo)
+
+
+# --- Conferencia final da etapa 3r2: a cadeia do numero, o em_andamento mais novo e o que nao impede ----------
+
+
+async def _numero_novo_pela_entrada(m: MundoSelo, t: fila.Operacao) -> fila.Operacao:
+    assert t.ficha_id is not None
+    async with m.entrada_db.begin() as c:
+        return await fila.confirmar_ficha(
+            c,
+            t.ficha_id,
+            pessoa_id=m.pessoas["ana"],
+            com_passkey=True,
+            espera_segundos=0,
+            rapida_segundos=0,
+            numero_novo=True,
+            maximo_consultas=m.p.BADGE_LOOKUP_MAX_ATTEMPTS,
+        )
+
+
+async def _recusa_da_guarda(m: MundoSelo, t: fila.Operacao) -> str:
+    """O UPDATE da confirmacao com numero novo direto pelo papel da entrada, sem o codigo: devolve a mensagem da
+    recusa do banco (``fichas_guarda``), que nunca e falta de permissao."""
+    assert t.ficha_id is not None
+    async with m.entrada_db.connect() as c:
+        tx = await c.begin()
+        try:
+            with pytest.raises(DBAPIError) as erro:
+                await c.execute(
+                    text(fila._SQL_CONFIRMA_FICHA_NUMERO_NOVO),
+                    {"f": t.ficha_id, "p": m.pessoas["ana"], "pk": True, "s": 1, "cc": "passkey"},
+                )
+        finally:
+            await tx.rollback()
+    mensagem = str(erro.value)
+    assert "permission denied" not in mensagem
+    return mensagem
+
+
+async def _o_em_desconhecido(
+    m: MundoSelo, aviso: str | None, *, consultas_depois: int = 0
+) -> tuple[fila.Operacao, Any]:
+    """O sai com numero e a consulta responde ``desconhecido`` ate o maximo (as ultimas ``consultas_depois`` vem
+    depois do aviso); um bloqueio avisa e o sistema responde ``aviso``; a pessoa decide ``nao_aconteceu``."""
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    o = await m.confirmar(await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA))))
+    envio_o = await m.sair_com_numero(o, "nao_confirmada")
+    for _ in range(maximo - consultas_depois):
+        await m.informar(o, "desconhecido")
+    if aviso is not None:
+        b = await _bloquear(m)
+        await _avisar(m, b, {o.id: aviso})
+        await _encerrar(m, b)
+    for _ in range(consultas_depois):
+        await m.informar(o, "desconhecido")
+    await m.decidir(await m.por_id(o.id), "nao_aconteceu")
+    return o, envio_o
+
+
+async def test_o_aviso_que_diz_que_fez_em_outra_acao_do_numero_impede_o_numero_novo(mundo: MundoSelo) -> None:
+    """Defeito 1 do verificador da etapa 3r2 (mutacoes N1 e N2: a guarda e o codigo olhando so a original). O aviso diz
+    ``concluida`` sobre o numero K em O; R, pedido igual de O, sai com K (o aviso nao queima), e a consulta de R termina
+    em ``desconhecido``; T repete R (a nao confirmada mais nova). A linha do aviso esta em O, nao em R: so a cadeia do
+    numero a acha. O codigo nao oferece, a guarda recusa direto pela entrada e, sem a escolha, T leva K."""
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    o, envio_o = await _o_em_desconhecido(m, "concluida")
+    r = await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA)))
+    assert r.repete_protocolo == o.protocolo
+    envio_r = await m.sair_com_numero(await m.confirmar(r), "nao_confirmada")
+    assert envio_r.chave == envio_o.chave
+    for _ in range(maximo):
+        await m.informar(r, "desconhecido")
+    await m.decidir(await m.por_id(r.id), "nao_aconteceu")
+    t = await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA)))
+    assert t.repete_protocolo == r.protocolo
+    assert t.original is not None
+    assert (t.original.estado_final_do_numero, t.original.ultima_consulta) == (None, "desconhecido")
+    assert t.original.dito_feito_no_numero is True
+    assert not t.original_ficou_em_desconhecido(maximo)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        await _numero_novo_pela_entrada(m, t)
+    assert recusa.value.motivo == "numero_novo_nao_cabe"
+    assert "sem resposta que diga que a escrita foi feita" in await _recusa_da_guarda(m, t)
+    envio_t = await m.sair_com_numero(await m.confirmar(await m.por_id(t.id)))
+    assert (envio_t.chave, envio_t.repete_operacao_id) == (envio_o.chave, r.id)
+
+
+@pytest.mark.parametrize("quando", ["aviso_mais_novo", "consulta_mais_nova"])
+async def test_o_em_andamento_mais_novo_que_a_ultima_consulta_impede_o_numero_novo(
+    mundo: MundoSelo, quando: str
+) -> None:
+    """Conferencia final da etapa 3r2 (decisao do coordenador sobre a opiniao do verificador). O aviso responde
+    ``em_andamento`` ("recebeu o pedido, registrou o numero e ainda nao terminou"). Mais novo que a ultima consulta
+    ``desconhecido``, e a ultima palavra do sistema: o numero novo faria a escrita duas vezes, e o codigo e a guarda o
+    recusam. Com uma consulta ``desconhecido`` depois dele, a ultima palavra volta a ser "nao sei", e o numero novo
+    vale como antes."""
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    o, envio_o = await _o_em_desconhecido(
+        m, "em_andamento", consultas_depois=1 if quando == "consulta_mais_nova" else 0
+    )
+    t = await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA)))
+    assert t.repete_protocolo == o.protocolo
+    assert t.original is not None
+    assert (t.original.ultima_consulta, t.original.dito_feito_no_numero) == ("desconhecido", False)
+    if quando == "consulta_mais_nova":
+        assert t.original.ultima_resposta == "desconhecido"
+        assert t.original_ficou_em_desconhecido(maximo)
+        liberada = await _numero_novo_pela_entrada(m, t)
+        envio_t = await m.sair_com_numero(liberada)
+        assert (envio_t.repete_operacao_id, envio_t.chave != envio_o.chave) == (None, True)
+        return
+    assert t.original.ultima_resposta == "em_andamento"
+    assert not t.original_ficou_em_desconhecido(maximo)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        await _numero_novo_pela_entrada(m, t)
+    assert recusa.value.motivo == "numero_novo_nao_cabe"
+    assert "ou esta em andamento" in await _recusa_da_guarda(m, t)
+    envio_t = await m.sair_com_numero(await m.confirmar(await m.por_id(t.id)))
+    assert (envio_t.chave, envio_t.repete_operacao_id) == (envio_o.chave, o.id)
+
+
+@pytest.mark.parametrize("dito_no_aviso", ["parada", "nao_recebida", "recusada", "desfeita", "desconhecido"])
+async def test_o_aviso_que_nao_diz_que_fez_deixa_o_numero_novo(mundo: MundoSelo, dito_no_aviso: str) -> None:
+    """O outro lado da regra: com a resposta ao aviso que nao diz que a escrita foi feita nem que esta em andamento,
+    pelo papel da entrada, o codigo oferece o numero novo, a guarda (que le ``informacoes_sistema`` pela entrada) o
+    aceita, e o envio sai com numero novo."""
+    m = mundo
+    o, envio_o = await _o_em_desconhecido(m, dito_no_aviso)
+    t = await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA)))
+    assert t.repete_protocolo == o.protocolo
+    assert t.original is not None
+    assert (t.original.dito_feito_no_numero, t.original.ultima_resposta) == (False, dito_no_aviso)
+    assert t.original_ficou_em_desconhecido(m.p.BADGE_LOOKUP_MAX_ATTEMPTS)
+    liberada = await _numero_novo_pela_entrada(m, t)
+    assert liberada.ficha_numero_novo is True
+    envio_t = await m.sair_com_numero(liberada)
+    assert (envio_t.repete_operacao_id, envio_t.chave != envio_o.chave) == (None, True)
