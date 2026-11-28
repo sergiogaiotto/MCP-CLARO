@@ -12,7 +12,8 @@ nos de ``selo_esquema_teto`` e ``selo_esquema_peso``, ``selo_endereco_normalizad
 o codigo dizem o mesmo. O alvo de teste tem mais tres funcoes no banco com a regra de ``selo/declaracao.py``, que
 ``tests/integracao/test_selo_declaracao_banco.py`` confere: ``selo_alvo_bem_escrito`` (``_nome_do_alvo``),
 ``selo_ipv4_escrito`` (``_ip_escrito``) e ``selo_endereco_conexao`` (``forma_de_conexao``, menos o nome fora de
-ASCII). ``docs/contrato.md`` (G8) publica as mesmas tabelas.
+ASCII e a porta escrita como ``int()`` a le, que o alvo nunca tem). ``docs/contrato.md`` (G8) publica as mesmas
+tabelas.
 
 Sobre o rascunho independente de escrita segura (commit ``7b952151dddd84260d057cdb506081820003fe56``,
 ``spec/mws.md``): os IDs dele aparecem so em ``Requisito.adaptado_de`` e ``Requisito.parte_de`` e nas

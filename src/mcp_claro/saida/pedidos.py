@@ -36,6 +36,14 @@ depois, emoldurado por ``regras.estranhos.marcar``. O aviso de partes sem texto 
 moldura so quando a porta de saida guardou a conta (``fila.META_RETIRADAS``); sem ela, vai dentro, como texto do
 sistema. ``operacoes.resultado`` continua gravado so com a mascara, sem moldura (uma marca nova a cada resposta), e
 o ``_meta`` guardado nunca vai ao aplicativo.
+
+Fase 4 (selos, desenho 7.3): a ficha nasce com o retrato do selo efetivo da pessoa (``fila.registrar_pedido``, com
+``FEATURE_PHASE4_BADGES``), e o pedido igual a uma "nao confirmada" que saiu com numero leva ``repete_operacao_id``
+(o banco decide no envio se o numero e o mesmo). A resposta ao aplicativo, em ``agir`` e em ``consultar``, leva no
+``_meta`` o selo da operacao (``selo_da_operacao``), nunca a coluna antiga ``sistemas.selo``. Na "nao confirmada" que
+saiu com numero, o texto diz que o MCP-CLARO esta perguntando ao sistema e, com resposta, o que o sistema informou
+(so o vocabulario do contrato, ``_meta`` ``informado``), marcado como dito pelo sistema ou, num terceiro, pelo servidor
+de terceiros (critica M9). O aplicativo nunca recebe o numero da operacao, o recibo nem texto do sistema.
 """
 
 from __future__ import annotations
@@ -62,12 +70,17 @@ from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import FINAIS, FRASE, Estado
 from mcp_claro.saida.fila import Operacao, Rota
 from mcp_claro.saida.protocolo import FUSO, chave_pedido_igual, protocolo_valido
+from mcp_claro.selo import vigente
 from mcp_claro.versao import PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.saida.pedidos")
 
 CONSULTA: Final = "mcp_claro_consultar_protocolo"
 CHAVE_APLICATIVO_DIZ: Final = PREFIXO_META + "aplicativo_diz"
+META_SELO: Final = PREFIXO_META + "selo"
+META_INFORMADO: Final = PREFIXO_META + "informado"
+"""``_meta`` da "nao confirmada" que saiu com numero e tem resposta do sistema: ``{"estado", "final"}`` (e
+``"de_terceiro": true`` num servidor de terceiros, critica M9). So o vocabulario do contrato do selo."""
 TETO_APLICATIVO_DIZ: Final = 1000
 
 FERRAMENTA_CONSULTA: Final[dict[str, Any]] = {
@@ -295,6 +308,7 @@ class Pedidos:
                     espera_segundos=valores["OUTBOX_HOLD_SECONDS"],
                     trace_id=pedido.trace_id,
                     aplicativo=pedido.aplicativo,
+                    selo_ligado=self.p.FEATURE_PHASE4_BADGES is True,
                 )
         if op is None or rota is None:
             # A pausa vai numa transacao propria, depois de soltar a trava compartilhada deste pedido: dois
@@ -439,6 +453,24 @@ class Pedidos:
         async with self.engine.connect() as c:
             return await fila.por_protocolo(c, protocolo, pessoa_id=pessoa_id, aplicativo_id=aplicativo_id)
 
+    async def selo_da_operacao(self, op: Operacao, *, pessoa_teste: bool) -> int:
+        """O nivel do selo que vai no ``_meta`` da resposta sobre ``op`` (``agir`` e ``consultar``, desenho 7.3): o da
+        propria operacao (``Operacao.nivel_do_selo``: o envio com numero, o nivel 1 de quem saiu sem numero ou o retrato
+        da ficha). Sem nenhum deles (limite que ainda nao saiu, ficha de antes da 0007), o efetivo de agora da pessoa,
+        lido de ``selo_vigente()``. Uma falha ao ler o selo vira nivel 1, que nao promete nada: o selo nunca faz a
+        resposta falhar (A1)."""
+        nivel = op.nivel_do_selo
+        if nivel is not None:
+            return nivel
+        try:
+            async with self.engine.connect() as c:
+                lido = await vigente.ler(c, op.sistema_id)
+            return vigente.efetivo(lido, ligada=self.p.FEATURE_PHASE4_BADGES is True, pessoa_teste=pessoa_teste).nivel
+        except Exception as erro:  # noqa: BLE001 - o selo nunca faz a resposta ao aplicativo falhar (A1)
+            log.warning("selo_da_operacao_nao_lido", erro=type(erro).__name__)
+            CONTADORES.somar("selo_da_operacao_nao_lido")
+            return 1
+
 
 def _hora_local(op: Operacao) -> str | None:
     if op.hora_saida is None:
@@ -446,8 +478,10 @@ def _hora_local(op: Operacao) -> str | None:
     return op.hora_saida.astimezone(ZoneInfo(FUSO)).strftime("%H:%M:%S")
 
 
-def texto_do_estado(op: Operacao) -> str:
-    """Frase para o aplicativo mostrar a pessoa. Nunca traz argumento nem dado pessoal."""
+def texto_do_estado(op: Operacao, *, consultas_maximas: int | None = None) -> str:
+    """Frase para o aplicativo mostrar a pessoa. Nunca traz argumento nem dado pessoal, nem texto do sistema: so o
+    vocabulario do contrato do selo. ``consultas_maximas`` (``BADGE_LOOKUP_MAX_ATTEMPTS``) diz quando a consulta ao
+    sistema acabou sem resposta final."""
     prot = op.protocolo
     if op.estado == Estado.AGUARDANDO_FICHA:
         passkey = " com a passkey" if op.ficha_exige_passkey else ""
@@ -471,11 +505,71 @@ def texto_do_estado(op: Operacao) -> str:
             "nao_aconteceu": " A pessoa registrou que nao aconteceu no sistema.",
             "nao_sei": " A pessoa registrou que ainda nao sabe.",
         }.get(op.decisao_pessoa or "", "")
-        return (
-            f"Estamos confirmando: a acao {prot} foi enviada uma vez, mas a resposta do sistema nao chegou inteira. "
-            f"Nada sera reenviado. Nao repita o pedido: confira no sistema.{decidido}"
+        inicio = (
+            f"Estamos confirmando: a acao {prot} foi enviada uma vez, mas a resposta do sistema nao chegou inteira."
         )
-    return f"Protocolo {prot}: {FRASE[op.estado]}"
+        if op.envio_nivel is None:
+            return f"{inicio} Nada sera reenviado. Nao repita o pedido: confira no sistema.{decidido}"
+        return (
+            f"{inicio} {_o_que_o_sistema_disse(op, consultas_maximas)} Nada sera reenviado. Nao repita o pedido."
+            f"{decidido}"
+        )
+    texto = f"Protocolo {prot}: {FRASE[op.estado]}"
+    if op.mesmo_numero_de is not None and op.estado in fila.PASSOU_POR_ENVIANDO:
+        texto += f" Saiu com o mesmo numero do protocolo {op.mesmo_numero_de}."
+    return texto
+
+
+def _quem_informou(op: Operacao) -> str:
+    """Quem diz: o sistema ou, num terceiro, o servidor de terceiros (critica M9). O nome e o do cadastro."""
+    return f"O servidor de terceiros {op.sistema_nome}" if op.de_terceiro else f"O sistema {op.sistema_nome}"
+
+
+def _o_que_o_sistema_disse(op: Operacao, consultas_maximas: int | None) -> str:
+    """O trecho da "nao confirmada" que saiu com numero (niveis 2 e 3, desenho 7.3): o que o sistema informou, so com o
+    vocabulario do contrato, ou que o MCP-CLARO esta perguntando. Uma resposta que nao e final (``em_andamento``,
+    ``desconhecido`` ou uma ``nao_recebida`` sozinha, critica A3.3) nao encerra a conferencia."""
+    if op.substituto is not None:
+        return (
+            f"O protocolo {op.substituto} saiu depois ao sistema com o mesmo numero; o que o sistema informar aparece"
+            " nele."
+        )
+    informado = op.informado
+    dito = None
+    if informado is not None:
+        dito = informado.estado_final or (informado.estado if informado.desfecho == "respondeu" else None)
+    if informado is not None and dito is not None:
+        quem = _quem_informou(op)
+        if informado.estado_final is not None:
+            # A decisao da pessoa e uma so (decisoes_nao_confirmada.operacao_id e unica): depois dela, nada a registrar.
+            ainda = (
+                " A pessoa ainda pode registrar o que viu nas telas do MCP-CLARO." if op.decisao_pessoa is None else ""
+            )
+            return f"{quem} informou: {dito}. E o que o sistema diz; o MCP-CLARO nao confere do lado de la.{ainda}"
+        if consultas_maximas is not None and op.consulta_acabou(consultas_maximas):
+            return f"{quem} informou: {dito}, mas nao deu uma resposta final; a decisao fica com a pessoa."
+        return f"{quem} informou: {dito}, ainda sem resposta final; o MCP-CLARO continua perguntando."
+    if consultas_maximas is not None and op.consulta_acabou(consultas_maximas):
+        return "O MCP-CLARO perguntou ao sistema o que houve e ele nao confirmou; a decisao fica com a pessoa."
+    return "O MCP-CLARO esta perguntando ao sistema o que houve, pelo numero que mandou junto."
+
+
+def informado_no_meta(op: Operacao) -> dict[str, Any] | None:
+    """O ``_meta`` ``informado`` da "nao confirmada" que saiu com numero e tem resposta do sistema (desenho 7.3):
+    ``{"estado", "final"}``, e ``"de_terceiro": true`` num servidor de terceiros (critica M9). Sem resposta (ou com o
+    resultado em outro protocolo), None."""
+    if op.estado != Estado.NAO_CONFIRMADA or op.envio_nivel is None or op.substituto is not None:
+        return None
+    informado = op.informado
+    if informado is None:
+        return None
+    dito = informado.estado_final or (informado.estado if informado.desfecho == "respondeu" else None)
+    if dito is None:
+        return None
+    meta: dict[str, Any] = {"estado": dito, "final": informado.estado_final is not None}
+    if op.de_terceiro:
+        meta["de_terceiro"] = True
+    return meta
 
 
 _COM_ERRO: Final = {
@@ -488,8 +582,13 @@ _COM_ERRO: Final = {
 }
 
 
-def resposta(op: Operacao, *, selo: int | None = None, repetida: bool = False) -> dict[str, Any]:
-    """Resultado de ``tools/call`` no fio da 2026-07-28, com o protocolo no ``_meta`` do MCP-CLARO."""
+def resposta(
+    op: Operacao, *, selo: int | None = None, repetida: bool = False, consultas_maximas: int | None = None
+) -> dict[str, Any]:
+    """Resultado de ``tools/call`` no fio da 2026-07-28, com o protocolo no ``_meta`` do MCP-CLARO.
+
+    ``selo``: o nivel do selo da operacao (``Pedidos.selo_da_operacao``). Na "nao confirmada" com resposta do sistema,
+    ``_meta`` ``informado`` (``informado_no_meta``)."""
     meta: dict[str, Any] = {
         PREFIXO_META + "protocolo": op.protocolo,
         PREFIXO_META + "estado": str(op.estado),
@@ -497,13 +596,17 @@ def resposta(op: Operacao, *, selo: int | None = None, repetida: bool = False) -
         PREFIXO_META + "sistema": op.sistema_nome,
     }
     if selo is not None:
-        meta[PREFIXO_META + "selo"] = selo
+        meta[META_SELO] = selo
+    informado = informado_no_meta(op)
+    if informado is not None:
+        meta[META_INFORMADO] = informado
     if op.hora_saida is not None and op.estado == Estado.LIBERADA:
         meta[PREFIXO_META + "hora_saida"] = op.hora_saida.isoformat()
     if repetida:
         meta[PREFIXO_META + "repetido"] = True
     if op.estado == Estado.ENVIADA and op.resultado is not None:
-        aviso = {"type": "text", "text": f"Protocolo {op.protocolo}: enviada uma vez ao sistema."}
+        mesmo = f" Saiu com o mesmo numero do protocolo {op.mesmo_numero_de}." if op.mesmo_numero_de else ""
+        aviso = {"type": "text", "text": f"Protocolo {op.protocolo}: enviada uma vez ao sistema.{mesmo}"}
         if op.de_estranhos:
             # O aviso do protocolo e nosso: fica fora da moldura. O resto sai emoldurado, com marca nova. O aviso de
             # partes retiradas pela medida tambem sai fora, so com a conta guardada pela porta de saida.
@@ -519,7 +622,7 @@ def resposta(op: Operacao, *, selo: int | None = None, repetida: bool = False) -
         corpo["_meta"] = meta
         return corpo
     return {
-        "content": [{"type": "text", "text": texto_do_estado(op)}],
+        "content": [{"type": "text", "text": texto_do_estado(op, consultas_maximas=consultas_maximas)}],
         "isError": op.estado in _COM_ERRO,
         "_meta": meta,
     }

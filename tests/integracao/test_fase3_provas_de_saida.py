@@ -1089,10 +1089,11 @@ def _so_dentro(resultado: Any, *trechos: str) -> None:
 
 
 # As chaves do _meta que o MCP-CLARO escreve, conforme o codigo de hoje: na leitura (moldura e despachante), na
-# resposta de uma acao enviada (mais o protocolo) e na consulta pelo protocolo (sem o selo).
+# resposta de uma acao enviada (mais o protocolo) e na consulta pelo protocolo, com o selo da operacao (Fase 4,
+# desenho 7.3: a consulta leva o selo, como a acao).
 META_LEITURA = frozenset({"origem", "texto_de_estranhos", "marca", "sistema", "selo"})
 META_ACAO = META_LEITURA | {"protocolo", "estado", "codigo_conferencia"}
-META_CONSULTA = META_ACAO - {"selo"}
+META_CONSULTA = META_ACAO
 
 
 def _nada_do_sistema_fora_dos_blocos(resultado: Any, sistema: str, chaves: frozenset[str] = META_LEITURA) -> None:

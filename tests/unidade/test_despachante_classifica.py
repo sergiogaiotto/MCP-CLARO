@@ -13,6 +13,7 @@ a chave. O app do despachante monta a porta com a chave da Fase 3 que recebeu.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import json
@@ -28,7 +29,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from exemplos import mal_comportado
 from mcp_claro.cadastro.modelos import FerramentaVitrine, Sistema
 from mcp_claro.config.settings import Parametros
-from mcp_claro.despachante import renovacao
+from mcp_claro.despachante import renovacao, servico
 from mcp_claro.despachante.app import criar_app_despachante
 from mcp_claro.ligacao import cliente, ponto, sala_contrato
 from mcp_claro.ligacao.sala_cliente import ClienteSala
@@ -38,6 +39,7 @@ from mcp_claro.saida import despachante as porta_de_saida
 from mcp_claro.saida import fila
 from mcp_claro.saida.despachante import MOTIVO_TERCEIROS, PortaDeSaida, linha_da_sala, pedidos_legiveis
 from mcp_claro.saida.estados import Estado
+from mcp_claro.selo import contrato, respostas
 from tests.apoio import porta_livre
 from tests.cifra_falsa import CifraFalsa
 
@@ -922,3 +924,164 @@ def test_app_do_despachante_da_a_porta_a_chave_da_fase_3(monkeypatch: pytest.Mon
         assert app.state.porta.terceiros_ligados is ligada
         assert app.state.despachante.terceiros_ligados is ligada
         assert app.state.porta.ligacao == app.state.despachante.ligacao
+
+
+# --- Fase 4: o numero do selo, o recibo e o selo da leitura (G3a, etapa 3) ----------------------------------------
+
+NUMERO = str(uuid.uuid4())
+
+
+class ChamarSemNumero:
+    """O chamador falso dos testes antigos: nao tem o parametro ``chave_operacao``."""
+
+    def __init__(self, resposta: cliente.Resposta) -> None:
+        self.resposta = resposta
+        self.vezes = 0
+
+    async def __call__(
+        self,
+        endereco: str,
+        segredo: Any,
+        discover_json: Any,
+        nome: str,
+        argumentos: Any,
+        *,
+        traceparent: str | None = None,
+        prazo: float = 30.0,
+        esquema_declarado: Any = None,
+    ) -> cliente.Resposta:
+        self.vezes += 1
+        return self.resposta
+
+
+async def test_sem_envio_com_numero_o_chamador_antigo_continua_servindo(monkeypatch: pytest.MonkeyPatch) -> None:
+    chamar = ChamarSemNumero(cliente.Resposta("resultado", resultado=types.CallToolResult(content=[])))
+    p = PortaDeSaida(engine=None, cifra=None, chamar=chamar)  # type: ignore[arg-type]
+    _com_chave(p, monkeypatch)
+    estado, _, _, _ = await p._enviar(OP, FERRAMENTA, None, None)
+    assert (estado, chamar.vezes) == (Estado.ENVIADA, 1)
+
+
+async def test_com_envio_o_numero_vai_como_chave_operacao(monkeypatch: pytest.MonkeyPatch) -> None:
+    vistos: list[Any] = []
+
+    async def chamar(*_: Any, **kw: Any) -> cliente.Resposta:
+        vistos.append(kw.get("chave_operacao", "sem"))
+        return cliente.Resposta("resultado", resultado=types.CallToolResult(content=[]))
+
+    p = PortaDeSaida(engine=None, cifra=None, chamar=chamar)  # type: ignore[arg-type]
+    _com_chave(p, monkeypatch)
+    await p._enviar(OP, FERRAMENTA, None, None)
+    p._selos[OP.fila_id] = porta_de_saida.SeloDoEnvio(nivel=2, chave=NUMERO, teste_id=uuid.uuid4())
+    await p._enviar(OP, FERRAMENTA, None, None)
+    assert vistos == ["sem", NUMERO]
+
+
+def _recibo(estado: str = "concluida", *, numero: str = NUMERO, erro: bool = False) -> types.CallToolResult:
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text="ok")],
+        is_error=erro,
+        _meta={contrato.CHAVE_RECIBO: {"contrato": contrato.CONTRATO, "operacao": numero, "estado": estado}},
+    )
+
+
+async def test_o_recibo_e_lido_antes_de_o_meta_sair_e_nunca_vai_ao_resultado(monkeypatch: pytest.MonkeyPatch) -> None:
+    resposta = cliente.Resposta("resultado", resultado=_recibo())
+    p = PortaDeSaida(engine=None, cifra=None, ligacao=lambda _s: LigacaoFalsa(resposta))  # type: ignore[arg-type]
+    _com_chave(p, monkeypatch)
+    p._selos[OP.fila_id] = porta_de_saida.SeloDoEnvio(nivel=3, chave=NUMERO, teste_id=uuid.uuid4())
+    estado, corpo, _, _ = await p._enviar(OP, FERRAMENTA, None, None)
+    assert estado == Estado.ENVIADA
+    assert corpo is not None
+    assert "_meta" not in corpo
+    assert p._recibos[OP.fila_id] == respostas.Recibo("concluida")
+
+
+async def test_no_nivel_2_o_recibo_nao_e_lido(monkeypatch: pytest.MonkeyPatch) -> None:
+    resposta = cliente.Resposta("resultado", resultado=_recibo())
+    p = PortaDeSaida(engine=None, cifra=None, ligacao=lambda _s: LigacaoFalsa(resposta))  # type: ignore[arg-type]
+    _com_chave(p, monkeypatch)
+    p._selos[OP.fila_id] = porta_de_saida.SeloDoEnvio(nivel=2, chave=NUMERO, teste_id=uuid.uuid4())
+    await p._enviar(OP, FERRAMENTA, None, None)
+    assert OP.fila_id not in p._recibos
+
+
+@pytest.mark.parametrize(
+    ("resposta", "esperado"),
+    [
+        (cliente.Resposta("resultado", resultado=_recibo()), respostas.Recibo("concluida")),
+        (cliente.Resposta("resultado", resultado=_recibo(erro=True)), respostas.Invalida("incoerente")),
+        (
+            cliente.Resposta("resultado", resultado=_recibo(numero=str(uuid.uuid4()))),
+            respostas.Invalida("outro_numero"),
+        ),
+        (
+            cliente.Resposta("resultado", resultado=types.CallToolResult(content=[])),
+            respostas.Invalida("recibo_ausente"),
+        ),
+        (cliente.Resposta("duvida", excecao="ReadError"), None),
+        (cliente.Resposta("nao_enviado"), None),
+    ],
+    ids=["certo", "incoerente", "outro_numero", "ausente", "sem_resposta", "nao_saiu"],
+)
+def test_recibo_da_resposta(resposta: cliente.Resposta, esperado: Any) -> None:
+    assert porta_de_saida._recibo_da_resposta(resposta, NUMERO) == esperado
+
+
+async def test_nenhum_numero_vai_a_servidor_de_terceiros() -> None:
+    """Ate o contrato da sala v2 (G7), o passo do selo nem le o banco para um terceiro: sem numero, sem linha."""
+    selo = await porta()._passo_do_selo(None, OP, FERRAMENTA_T)  # type: ignore[arg-type]
+    assert selo is porta_de_saida.SEM_SELO
+
+
+@pytest.mark.parametrize(
+    ("retrato", "nivel"),
+    [({"nivel": 2}, 2), (json.dumps({"nivel": 3}), 3), (None, None), ({"nivel": True}, None), ({"nivel": "2"}, None)],
+)
+def test_nivel_do_retrato_da_ficha(retrato: Any, nivel: int | None) -> None:
+    assert porta_de_saida._nivel_do_retrato(retrato) == nivel
+
+
+@pytest.mark.parametrize("selo", [1, 2, 3])
+def test_a_leitura_leva_o_selo_dado_e_nunca_a_coluna_antiga(selo: int) -> None:
+    resposta = cliente.Resposta("resultado", resultado=types.CallToolResult(content=[]))
+    leitura = servico.interpretar(resposta, FERRAMENTA, com_chave_da_pessoa=False, selo=selo)
+    assert leitura.resultado["_meta"][servico.PREFIXO_META + "selo"] == selo
+    sem = servico.interpretar(resposta, FERRAMENTA, com_chave_da_pessoa=False)
+    assert sem.resultado["_meta"][servico.PREFIXO_META + "selo"] == 1
+
+
+def test_app_do_despachante_da_a_chave_da_fase_4(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Parametros, "conferir", lambda self: self)
+    engine = create_async_engine("postgresql+asyncpg://ninguem@127.0.0.1:1/nada")
+    for ligada in (True, False):
+        p = Parametros(
+            APP_ENV="teste", FEATURE_PHASE2_ACT=True, FEATURE_PHASE3_THIRD_PARTY=True, FEATURE_PHASE4_BADGES=ligada
+        )
+        app = criar_app_despachante(p, engine, CifraFalsa())
+        assert app.state.porta.selos_ligados is ligada
+        assert app.state.despachante.selos_ligados is ligada
+        assert app.state.perguntador.ligacao == app.state.despachante.ligacao
+
+
+async def test_a_tarefa_dos_avisos_deriva_avisa_e_sobrevive_a_uma_volta_que_falha() -> None:
+    from mcp_claro.despachante import app as despachante_app
+
+    passos: list[str] = []
+
+    class Perguntador:
+        async def derivar_avisos(self) -> int:
+            passos.append("derivar")
+            if len(passos) == 1:
+                raise RuntimeError("o banco caiu")
+            return 0
+
+        async def avisar_bloqueios(self) -> int:
+            passos.append("avisar")
+            if passos.count("avisar") >= 2:
+                raise asyncio.CancelledError
+            return 0
+
+    with pytest.raises(asyncio.CancelledError):
+        await despachante_app.rodar_avisos_de_bloqueio(Perguntador(), 0.0)  # type: ignore[arg-type]
+    assert passos == ["derivar", "derivar", "avisar", "derivar", "avisar"]

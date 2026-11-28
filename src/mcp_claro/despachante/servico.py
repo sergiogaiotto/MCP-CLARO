@@ -36,6 +36,16 @@ Fase 3 (servidores de terceiros):
   ``dados.pedidos``) e ao contador ``pedidos_do_sistema_barrados``, com ``onde``. A lista lida continua a mesma;
 - a sondagem separa o desfecho: so "versao" conta como versao antiga, e um terceiro ativo e revisado que deixa de
   falar a 2026-07-28 vai a quarentena (D29).
+
+Fase 4 (selos):
+
+- o ``_meta`` do resultado da leitura leva o selo efetivo da pessoa (``selo.vigente.efetivo`` sobre o selo lido de
+  ``selo_vigente()`` para o sistema, com ``FEATURE_PHASE4_BADGES`` e ``pessoas.teste``), nunca a coluna antiga
+  ``sistemas.selo``. A reconferencia (``ferramenta_da_ordem``) continua sem o selo; ele e lido a parte, num
+  SAVEPOINT, e uma falha ao le-lo vira nivel 1, sem parar a leitura (critica A1);
+- ``_listar`` marca em ``ferramentas_vistas.sumiu_em`` o que o sistema deixou de listar, e tira a marca do que voltou
+  (critica M1): sem isso, um proprio que deixa de listar as ferramentas do contrato ficava com o selo ate vencer. As
+  linhas vao todas na mesma ordem fixa, pelo nome, as listadas e as que sumiram.
 """
 
 from __future__ import annotations
@@ -78,6 +88,7 @@ from mcp_claro.regras import bloqueios, estado, estranhos, programas
 from mcp_claro.regras.escondidos import marcar_escondidos
 from mcp_claro.saida import travas
 from mcp_claro.saida.quarentena import por_em_quarentena
+from mcp_claro.selo import vigente
 from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.despachante")
@@ -286,8 +297,13 @@ class Leitura:
     contadores: tuple[tuple[str, dict[str, str]], ...] = field(default_factory=tuple)
 
 
-def interpretar(resposta: Resposta, ferramenta: FerramentaVitrine, *, com_chave_da_pessoa: bool) -> Leitura:
-    """Da resposta do sistema (ou da sala) ao resultado que volta a entrada e a linha do extrato. Puro."""
+def interpretar(
+    resposta: Resposta, ferramenta: FerramentaVitrine, *, com_chave_da_pessoa: bool, selo: int = 1
+) -> Leitura:
+    """Da resposta do sistema (ou da sala) ao resultado que volta a entrada e a linha do extrato. Puro.
+
+    ``selo``: o nivel do selo efetivo da pessoa (``Despachante._selo_da_leitura``), que vai ao ``_meta``; nunca a
+    coluna antiga ``sistemas.selo``. Sem ele, nivel 1, que nao promete nada."""
     sistema = ferramenta.sistema
     pedidos = pedidos_da_resposta(resposta)
     sala = linha_da_sala(resposta, sistema)
@@ -330,7 +346,7 @@ def interpretar(resposta: Resposta, ferramenta: FerramentaVitrine, *, com_chave_
     # So o _meta nosso: o do sistema saiu em _resultado_do_sistema; o da moldura e o dos erros sao nossos.
     meta: dict[str, Any] = dict(resultado.get("_meta") or {})
     meta[PREFIXO_META + "sistema"] = sistema.nome
-    meta[PREFIXO_META + "selo"] = sistema.selo
+    meta[PREFIXO_META + "selo"] = selo if selo in (1, 2, 3) else 1
     if sistema.tipo_chave == "compartilhada":
         meta[PREFIXO_META + "aviso"] = "Sistema de chave compartilhada: ele nao distingue as pessoas."
     resultado["_meta"] = meta
@@ -397,15 +413,35 @@ def _pedidos_da_falha(erro: Exception) -> tuple[str, ...]:
 
 async def _guardar_vistas(c: AsyncConnection, sistema: Sistema, ferramentas: Sequence[dict[str, Any]]) -> None:
     """Grava ``ferramentas_vistas`` em ordem fixa, pelo nome (ja conferido por ``_declaracao_invalida``), e nao na
-    ordem do servidor: duas leituras ao mesmo tempo travam as mesmas linhas na mesma ordem, sem impasse no banco."""
-    for f in sorted(ferramentas, key=lambda f: str(f["name"])):
+    ordem do servidor: duas leituras ao mesmo tempo travam as mesmas linhas na mesma ordem, sem impasse no banco.
+
+    Critica M1: o que o sistema deixou de listar ganha ``sumiu_em`` (agora), e o que voltou perde a marca. As linhas
+    que sumiram entram na mesma ordem fixa, pelo nome, junto com as listadas (uma ordem so para todas)."""
+    listadas = {str(f["name"]): f for f in ferramentas}
+    antes = (
+        await c.execute(
+            text("SELECT nome FROM ferramentas_vistas WHERE sistema_id = :s AND sumiu_em IS NULL"), {"s": sistema.id}
+        )
+    ).scalars()
+    sumidas = {str(n) for n in antes} - set(listadas)
+    for nome in sorted(set(listadas) | sumidas):
+        f = listadas.get(nome)
+        if f is None:
+            await c.execute(
+                text(
+                    "UPDATE ferramentas_vistas SET sumiu_em = now()"
+                    " WHERE sistema_id = :s AND nome = :n AND sumiu_em IS NULL"
+                ),
+                {"s": sistema.id, "n": nome},
+            )
+            continue
         await c.execute(
             text(
                 "INSERT INTO ferramentas_vistas (sistema_id, nome, definicao, impressao) "
                 "VALUES (:s, :n, CAST(:d AS jsonb), :i) ON CONFLICT (sistema_id, nome) DO UPDATE "
-                "SET definicao = EXCLUDED.definicao, impressao = EXCLUDED.impressao, vista_em = now()"
+                "SET definicao = EXCLUDED.definicao, impressao = EXCLUDED.impressao, vista_em = now(), sumiu_em = NULL"
             ),
-            {"s": sistema.id, "n": f["name"], "d": json.dumps(f), "i": impressao(f)},
+            {"s": sistema.id, "n": nome, "d": json.dumps(f), "i": impressao(f)},
         )
 
 
@@ -508,12 +544,14 @@ class Despachante:
         local_para_terceiro: Ligacao | None = None,
         liberar_locais: bool = False,
         terceiros_ligados: bool = False,
+        selos_ligados: bool = False,
         ligacao: Ligador | None = None,
     ) -> None:
         """``ambiente`` (``APP_ENV``), ``sala`` (``ClienteSala`` montado na criacao do app) e
         ``local_para_terceiro`` (so testes; ignorado fora de desenvolvimento e teste) escolhem por onde falar com
         cada sistema. ``liberar_locais`` (so testes) aceita endereco local na troca de chave OAuth de um terceiro.
-        ``terceiros_ligados``: a chave da Fase 3. ``ligacao`` troca a escolha inteira (so testes)."""
+        ``terceiros_ligados``: a chave da Fase 3. ``selos_ligados``: a chave da Fase 4 (``FEATURE_PHASE4_BADGES``).
+        ``ligacao`` troca a escolha inteira (so testes)."""
         self.engine = engine
         self.cifra = cifra
         self.prazo_leitura = prazo_leitura
@@ -522,6 +560,7 @@ class Despachante:
         self.local_para_terceiro = local_para_terceiro
         self.liberar_locais = liberar_locais
         self.terceiros_ligados = terceiros_ligados
+        self.selos_ligados = selos_ligados
         self._ligacao = ligacao
 
     def ligacao(self, sistema: Sistema) -> Ligacao:
@@ -598,6 +637,18 @@ class Despachante:
             log.warning("chave_indisponivel", sistema=sistema_nome, erro=type(erro).__name__)
             raise await self._recusar(pedido, "chave_indisponivel", MENSAGEM_CHAVE_INDISPONIVEL, nome) from None
 
+    async def _selo_da_leitura(self, c: AsyncConnection, sistema: Sistema, pessoa_teste: bool) -> int:
+        """O nivel do selo efetivo da pessoa, lido de ``selo_vigente()`` num SAVEPOINT. Uma falha ao ler vira nivel 1,
+        sem parar a leitura (critica A1): o nivel 1 nao promete nada."""
+        try:
+            async with c.begin_nested():
+                lido = await vigente.ler(c, sistema.id)
+            return vigente.efetivo(lido, ligada=self.selos_ligados, pessoa_teste=pessoa_teste).nivel
+        except Exception as erro:  # noqa: BLE001 - o selo nunca para a leitura
+            log.warning("selo_da_leitura_nao_lido", sistema=sistema.nome, erro=type(erro).__name__)
+            CONTADORES.somar("selo_nao_lido", onde="leitura")
+            return 1
+
     async def ler(self, pedido: PedidoLeitura) -> dict[str, Any]:
         async with self.engine.connect() as c:
             pessoa = (
@@ -648,6 +699,8 @@ class Despachante:
             discover_json = (
                 await c.execute(text("SELECT sondagem FROM sistemas WHERE id = :s"), {"s": sistema.id})
             ).scalar_one_or_none()
+            # Antes da proxima leitura desta conexao: o SAVEPOINT deixa a conexao boa mesmo com o selo que falha.
+            selo = await self._selo_da_leitura(c, sistema, bool(pessoa is not None and pessoa.teste))
             declarado = await repositorio.esquema_declarado(c, sistema.id, ferramenta.nome_original)
             try:
                 if sistema.tipo_chave == "por_pessoa":
@@ -680,7 +733,7 @@ class Despachante:
         except Exception as erro:  # noqa: BLE001 - a leitura nunca vira erro interno; nada e reenviado
             log.warning("leitura_falhou", sistema=sistema.nome, erro=type(erro).__name__)
             resposta = Resposta("duvida", excecao=type(erro).__name__)
-        leitura = interpretar(resposta, ferramenta, com_chave_da_pessoa=aberta is not None)
+        leitura = interpretar(resposta, ferramenta, com_chave_da_pessoa=aberta is not None, selo=selo)
         if leitura.marcar_vencida and aberta is not None:
             await renovacao.marcar_vencida(
                 self.engine, sistema_id=sistema.id, pessoa_id=pedido.pessoa_id, cifrada=aberta.cifrada

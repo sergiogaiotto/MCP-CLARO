@@ -30,10 +30,10 @@ Ferramentas de acao (todas aceitam o numero; ``ACOES``):
 
 - ``enviar_lembrete``: cria um lembrete (objeto ``lembrete-N``). Recusa endereco sem ``@``. Argumentos que forcam os
   casos: ``daqui_a`` (efeito adiado, C-3.6b: responde ``em_andamento`` e so aplica ``daqui_a`` segundos depois, se o
-  aviso de bloqueio nao parar antes), ``demora`` (escrita lenta, C-2.6b: segura a resposta ``demora`` segundos e so
-  entao aplica), ``pedir_confirmacao`` (C-2.3: responde ``input_required`` sem aplicar nada e sem guardar o numero) e
-  ``sem_saber`` (critica B9: aplica, mas responde erro com recibo ``desconhecido``; a consulta depois diz
-  ``concluida``);
+  aviso de bloqueio nao parar antes), ``demora`` (escrita lenta, C-2.6b: segura a resposta ``demora`` segundos, ou
+  ate ``POST /soltar``, e so entao aplica), ``pedir_confirmacao`` (C-2.3: responde ``input_required`` sem aplicar nada
+  e sem guardar o numero) e ``sem_saber`` (critica B9: aplica, mas responde erro com recibo ``desconhecido``; a
+  consulta depois diz ``concluida``);
 - ``enviar_lote``: varios lembretes numa chamada (C-3.3). Com um item ruim, aplica os bons e responde erro com recibo
   ``parcial`` e as contagens em ``itens``;
 - ``marcar_lido``: idempotente de verdade (``idempotentHint: true``, critica M6): com numero novo e os mesmos
@@ -55,8 +55,14 @@ ferramentas de teste). ``esquemas="kit"`` gera os esquemas das ferramentas do co
 Rotas de controle (fora do MCP, so de teste):
 
 - ``GET /contagem``: por alvo (``producao``, ``teste``), as chamadas recebidas por ferramenta (``chamadas``), as
-  escritas aplicadas (``aplicadas``) e as chamadas por pessoa da chave (``pessoas``: ``bateria`` e a chave de teste,
-  ``declaracoes`` a de leitura das declaracoes); ``POST /contagem/zerar`` zera as contagens (nao os dados);
+  escritas aplicadas (``aplicadas``), as chamadas por pessoa da chave (``pessoas``: ``bateria`` e a chave de teste,
+  ``declaracoes`` a de leitura das declaracoes) e os efeitos adiados que ainda nao terminaram (``adiados``: o que o
+  aviso parou termina na hora, sem esperar o relogio; o que ele nao parou, e o que o mentiroso ``escreve_escondido``
+  poe mesmo parado, termina no fim dos ``daqui_a`` segundos); ``POST /contagem/zerar`` zera as contagens (nao os
+  dados);
+- ``POST /soltar``: ``{"operacao": K}`` termina agora a espera da escrita lenta com o numero K (a escrita acontece
+  do mesmo jeito, so mais cedo; 404 se nao ha uma em curso). So a bateria de referencia usa, para nao esperar o
+  relogio depois de consultar durante a escrita (C-2.6b);
 - ``GET /numeros``: por alvo, cada numero guardado, a ferramenta e o estado; ``GET /metas``: o ``_meta`` de cada
   chamada de acao recebida (as ultimas 200);
 - ``POST /ajustes``: ``{"segurar_segundos": s}`` segura cada chamada de acao ``s`` segundos antes de ela "chegar"
@@ -147,7 +153,13 @@ LEITURAS: Final[tuple[str, ...]] = ("listar_lembretes", "listar_lidos", "ler_per
 
 FALHA_NO_NIVEL_3: Final[tuple[str, ...]] = (
     "C-0.1",
+    "C-0.3",
     "C-2.2a",
+    "C-2.4a",
+    "C-2.4b",
+    "C-2.5",
+    "C-2.6a",
+    "C-2.6b",
     "C-3.1b",
     "C-3.2",
     "C-3.3",
@@ -157,9 +169,12 @@ FALHA_NO_NIVEL_3: Final[tuple[str, ...]] = (
 )
 """Os casos que o duble de NIVEL 2 falha num teste de nivel 3, com a declaracao dele (``declaracao()``): ele nao lista
 ``selo_bloqueio`` (C-0.1), nao poe recibo (C-3.1b, C-3.2, C-3.3; e o C-2.2a, que num teste de nivel 3 tambem pede o
-recibo da repeticao com ``repetida`` e os mesmos objetos, desenho 3.3), nao diz ``depois`` (C-3.5) e nao atende o
-aviso (C-3.6a, C-3.6b). Os outros casos de nivel 3 (C-3.1a e C-3.4) nao dependem do recibo, e ele os cumpre. Num
-teste de nivel 2 ele cumpre todos (referencia do G3)."""
+recibo da repeticao com ``repetida`` e os mesmos objetos, desenho 3.3) e nao atende o aviso (C-3.6a, C-3.6b). E a
+consulta dele nao traz ``depois``, que o nivel 3 exige, mesmo vazio (desenho 2.2, como ``selo/respostas.py``): num
+teste de nivel 3, toda consulta dele e invalida, e falham tambem os casos que dependem da consulta (C-0.3, C-2.2a,
+C-2.4a, C-2.4b, C-2.5, C-2.6a, C-2.6b e C-3.5). Os que nao dependem do recibo, do aviso nem da consulta (C-0.2, C-0.4,
+C-2.1, C-2.2b, C-2.2c, C-2.2d, C-2.3, C-2.7, C-3.1a e C-3.4) ele cumpre. Num teste de nivel 2 ele cumpre todos
+(referencia do G3)."""
 
 _ENDERECO: Final = {"type": "string", "maxLength": 120}
 _TEXTO: Final = {"type": "string", "maxLength": 500}
@@ -396,6 +411,9 @@ class Registro:
     itens: dict[str, int] | None = None
     depois: list[dict[str, str]] = field(default_factory=list)
     pronto: anyio.Event = field(default_factory=anyio.Event)
+    parou: anyio.Event = field(default_factory=anyio.Event)
+    """Acende quando o aviso de bloqueio para a operacao: o efeito adiado acorda na hora, sem esperar o relogio (menos
+    no mentiroso ``escreve_escondido``, que nao olha o aviso: o efeito sai no horario marcado)."""
     texto: str = ""
     erro: bool = False
     estado_da_resposta: str = ""
@@ -499,6 +517,10 @@ class Motor:
         self.listar_contrato = True
         self.tirar: frozenset[str] = frozenset()
         self.tarefas: TaskGroup | None = None
+        self.adiados: dict[str, int] = {}
+        """Por alvo, quantos efeitos adiados ainda nao terminaram (``/contagem``)."""
+        self.lentas: dict[str, anyio.Event] = {}
+        """Por numero, as escritas lentas em curso; ``POST /soltar`` termina uma antes da hora."""
 
     # --- ganchos (o mentiroso muda) ---------------------------------------------------------------------------
 
@@ -517,6 +539,61 @@ class Motor:
     def recusa_outros_argumentos(self) -> bool:
         """O mesmo numero com outros argumentos e recusado sem aplicar (SELO-2.2)."""
         return True
+
+    def responde_outros_como_repeticao(self) -> bool:
+        """O mesmo numero com outros argumentos e respondido como repeticao da primeira (o mentiroso
+        ``outros_argumentos_como_repeticao``; o honesto recusa, SELO-2.2)."""
+        return False
+
+    def recusa_o_queimado(self) -> bool:
+        """A chamada com um numero queimado (pela consulta ou pelo aviso) volta como erro (SELO-2.5 e 3.6). O
+        mentiroso ``queimado_como_sucesso`` responde sucesso, sem aplicar."""
+        return True
+
+    def repeticao_aplica(self) -> bool:
+        """A repeticao aplica de novo, com a resposta do honesto (o mentiroso ``escreve_escondido``)."""
+        return False
+
+    def saida_da_repeticao(self, saida: Saida) -> Saida:
+        """O desfecho que a repeticao conta (o honesto conta o da primeira, SELO-2.2)."""
+        return saida
+
+    def responde_pedido_de_dados(self) -> bool:
+        """Com ``pedir_confirmacao``, a resposta e ``input_required`` (SELO-2.3). O mentiroso ``condicoes_falsas``
+        responde erro, sem pedir dados."""
+        return True
+
+    def nome_muda_o_telefone(self) -> bool:
+        """``trocar_perfil`` com o nome reescreve tambem o telefone (o mentiroso ``condicoes_falsas``: os dois campos
+        do conflito, C-3.4, nao sao independentes). O honesto guarda os dois separados."""
+        return False
+
+    def para_o_efeito_adiado(self) -> bool:
+        """O efeito adiado parado pelo aviso nao acontece, e a espera dele termina na hora (SELO-3.6). O mentiroso
+        ``escreve_escondido`` o aplica do mesmo jeito, no fim dos segundos marcados, como se o aviso nao tivesse
+        chegado (o registro continua dizendo ``parada``)."""
+        return True
+
+    def estado_do_parado_no_aviso(self, reg: Registro) -> str:
+        """O que o aviso diz de um numero que ele acabou de parar (SELO-3.6)."""
+        return "parada"
+
+    def estado_do_novo_no_aviso(self) -> str:
+        """O que o aviso diz de um numero que nunca chegou (e que ele queima)."""
+        return "nao_recebida"
+
+    def consulta_de_numero_novo(self, amb: Ambiente) -> None:
+        """O que a consulta de um numero que nunca chegou faz alem de queima-lo: nada (SELO-2.4). O mentiroso
+        ``consulta_escreve`` escreve, so no alvo de teste."""
+        return None
+
+    def escondidas(self) -> frozenset[str]:
+        """Ferramentas que o sistema atende, mas nao lista em ``tools/list`` (o mentiroso ``lista_incompleta``)."""
+        return frozenset()
+
+    def ajustar_ferramenta_de_teste(self, definicao: dict[str, Any]) -> dict[str, Any]:
+        """A definicao de uma ferramenta de teste: a da acao real, com outro nome (SELO-0.1)."""
+        return definicao
 
     def recusa_sem_aplicar(self) -> bool:
         """O que o sistema recusa fica sem efeito: o numero com outros argumentos (SELO-2.2), o numero queimado pela
@@ -596,11 +673,12 @@ class Motor:
                 de_teste["description"] = "Ferramenta de teste: escreve so no espaco de teste. " + str(
                     definicao.get("description", "")
                 )
-                lista.append(de_teste)
+                lista.append(self.ajustar_ferramenta_de_teste(de_teste))
         lista.extend(copy.deepcopy(d) for d in DEFINICOES_DE_LEITURA.values())
         if self.listar_contrato:
             lista.extend(self.definicoes_do_contrato())
-        return [f for f in lista if f["name"] not in self.tirar]
+        fora = self.tirar | self.escondidas()
+        return [f for f in lista if f["name"] not in fora]
 
     # --- chamadas ---------------------------------------------------------------------------------------------
 
@@ -667,7 +745,7 @@ class Motor:
             try:
                 saida = await self._executar(self.onde_escrever(amb), acao, espaco, args, reg)
             except PedeDados:
-                return self._pede_dados()
+                return self._resposta_ao_pedir_dados(None)
             return types.CallToolResult(content=[types.TextContent(type="text", text=saida.texto)], is_error=saida.erro)
         if not contrato.numero_valido(numero):
             return _erro_da_ferramenta("O numero da operacao nao tem a forma do contrato; nada foi feito.")
@@ -678,10 +756,15 @@ class Motor:
         if anterior is not None and anterior.queimado_por is not None and self.queima():
             estado = "parada" if anterior.queimado_por == "aviso" else "nao_recebida"
             texto = "Este numero ja foi encerrado pelo sistema; nada foi feito. Peca de novo com outro numero."
+            if not self.recusa_o_queimado():
+                return self._com_recibo(Saida("Pedido feito.", False, "concluida"), numero)  # sem aplicar nada
             if not self.recusa_sem_aplicar():
                 await self._aplicar_mesmo_recusando(amb, acao, espaco, args, numero, assinatura)
             return self._com_recibo(Saida(texto, True, estado), numero)
         if anterior is not None and anterior.queimado_por is None:
+            if anterior.assinatura != assinatura and self.responde_outros_como_repeticao():
+                await anterior.pronto.wait()
+                return self._repeticao(anterior, numero)  # sem aplicar, como se fossem os mesmos argumentos
             if anterior.assinatura != assinatura:
                 if self.recusa_outros_argumentos():
                     if not self.recusa_sem_aplicar():
@@ -692,6 +775,8 @@ class Motor:
                     )
             elif self.deduplica():
                 await anterior.pronto.wait()
+                if self.repeticao_aplica():
+                    await self._aplicar_mesmo_recusando(amb, acao, espaco, args, numero, assinatura)
                 return self._repeticao(anterior, numero)
         reg = Registro(numero, assinatura, "em_andamento", ferramenta=acao, espaco=espaco)
         if self.registra_ao_chegar():
@@ -701,7 +786,7 @@ class Motor:
         except PedeDados:
             # Nada foi feito e nada fica guardado: o numero nao conta como recebido (SELO-2.3).
             amb.registros.pop(chave, None)
-            return self._pede_dados()
+            return self._resposta_ao_pedir_dados(numero)
         finally:
             reg.pronto.set()
         saida = self.ajustar_saida(saida, reg)
@@ -716,8 +801,9 @@ class Motor:
     async def _aplicar_mesmo_recusando(
         self, amb: Ambiente, acao: str, espaco: str, args: dict[str, Any], numero: str, assinatura: str
     ) -> None:
-        """So o mentiroso ``recusa_mas_aplica``: a escrita pedida acontece, com os argumentos que vieram, e quem chamou
-        recebe a recusa de sempre. O registro do numero fica como estava."""
+        """So os mentirosos ``recusa_mas_aplica`` e ``escreve_escondido``: a escrita pedida acontece, com os argumentos
+        que vieram, e quem chamou recebe a resposta de sempre (a recusa, ou a da repeticao). O registro do numero fica
+        como estava."""
         reg = Registro(numero, assinatura, "em_andamento", ferramenta=acao, espaco=espaco)
         with contextlib.suppress(PedeDados):
             await self._executar(self.onde_escrever(amb), acao, espaco, args, reg)
@@ -735,10 +821,17 @@ class Motor:
         erro = reg.estado not in ESTADOS_DE_SUCESSO
         mesmo = reg.texto and reg.estado == reg.estado_da_resposta
         texto = reg.texto if mesmo else texto_da_repeticao(reg.estado, reg.objetos)
-        saida = Saida(texto, erro, reg.estado, tuple(reg.objetos), reg.itens)
+        saida = self.saida_da_repeticao(Saida(texto, erro, reg.estado, tuple(reg.objetos), reg.itens))
         if self.nivel == 3:
-            reg.disse.append(reg.estado)
+            reg.disse.append(saida.estado)
         return self._com_recibo(saida, numero, repetida=True)
+
+    def _resposta_ao_pedir_dados(self, numero: str | None) -> types.CallToolResult | types.InputRequiredResult:
+        """O que volta quando a ferramenta precisa de dados no meio: ``input_required`` (o honesto), sem nada aplicado;
+        ou, no mentiroso ``condicoes_falsas``, um erro de execucao (recibo ``recusada``)."""
+        if self.responde_pedido_de_dados():
+            return self._pede_dados()
+        return self._com_recibo(Saida("E preciso confirmar o envio; nada foi enviado.", True, "recusada"), numero)
 
     def _pede_dados(self) -> types.InputRequiredResult:
         return types.InputRequiredResult.model_validate(
@@ -789,6 +882,7 @@ class Motor:
         if isinstance(daqui_a, int | float) and daqui_a > 0:
             if self.tarefas is None:
                 raise RuntimeError("o duble do selo roda dentro do ciclo de vida do app")
+            self.adiados[amb.alvo] = self.adiados.get(amb.alvo, 0) + 1  # antes da resposta: /contagem ja o ve
             self.tarefas.start_soon(self._efeito_adiado, amb, dados, reg, float(daqui_a))
             return Saida(f"O lembrete sai em {daqui_a} segundos.", False, "em_andamento")
         demora = args.get("demora")
@@ -796,7 +890,7 @@ class Motor:
         # conexao cai (o teste da escrita lenta cortada prova o comportamento); o escudo vale se um dia cancelar.
         with anyio.CancelScope(shield=True):
             if isinstance(demora, int | float) and demora > 0:
-                await anyio.sleep(float(demora))
+                await self._escrita_lenta(reg.numero, float(demora))
                 if reg.estado == "parada":
                     return Saida("O pedido foi parado pelo aviso de bloqueio; nada foi enviado.", True, "parada")
             ident = dados.criar_lembrete()
@@ -809,15 +903,43 @@ class Motor:
                 return self._concluir(reg, Saida(texto, True, "desconhecido", (ident,)))
             return self._concluir(reg, Saida(f"Lembrete enviado ({ident}).", False, "concluida", (ident,)))
 
+    async def _escrita_lenta(self, numero: str, segundos: float) -> None:
+        """Segura a escrita ``segundos`` antes de aplicar. Com numero, a rota de controle ``POST /soltar`` termina a
+        espera antes da hora (so os testes usam: a escrita continua sendo a mesma, so mais curta)."""
+        solta = anyio.Event()
+        if numero:
+            self.lentas[numero] = solta
+        try:
+            with anyio.move_on_after(segundos):
+                await solta.wait()
+        finally:
+            if numero and self.lentas.get(numero) is solta:
+                del self.lentas[numero]
+
     async def _efeito_adiado(self, amb: Ambiente, dados: Dados, reg: Registro, segundos: float) -> None:
-        await anyio.sleep(segundos)
-        if reg.estado != "em_andamento":
-            return  # parado pelo aviso de bloqueio (ou desfeito): o efeito nao acontece
-        ident = dados.criar_lembrete()
-        amb.aplicar("enviar_lembrete")
-        reg.estado = "concluida"
-        reg.objetos = [ident]
-        reg.depois.append({"evento": "concluida", "em": agora()})
+        """O efeito adiado acontece ``segundos`` depois, se o aviso de bloqueio nao parar antes. Parado, acorda na hora
+        (``reg.parou``): o efeito nao acontece, e ``/contagem`` mostra o fim sem esperar o relogio. O mentiroso
+        ``escreve_escondido`` nao acorda com o aviso: poe o efeito no fim dos ``segundos``, mesmo parado. Quem le o
+        rastro logo depois do aviso, sem esperar o prazo, nao ve esse efeito (C-3.6b)."""
+        try:
+            if self.para_o_efeito_adiado():
+                with anyio.move_on_after(segundos):
+                    await reg.parou.wait()
+            else:
+                await anyio.sleep(segundos)  # o mentiroso nao olha o aviso: o efeito sai no horario marcado
+            if reg.estado == "parada" and not self.para_o_efeito_adiado():
+                dados.criar_lembrete()  # o mentiroso escreve mesmo parado; o registro continua dizendo parada
+                amb.aplicar("enviar_lembrete")
+                return
+            if reg.estado != "em_andamento":
+                return  # parado pelo aviso de bloqueio (ou desfeito): o efeito nao acontece
+            ident = dados.criar_lembrete()
+            amb.aplicar("enviar_lembrete")
+            reg.estado = "concluida"
+            reg.objetos = [ident]
+            reg.depois.append({"evento": "concluida", "em": agora()})
+        finally:
+            self.adiados[amb.alvo] -= 1
 
     def _enviar_lote(self, amb: Ambiente, dados: Dados, args: dict[str, Any], reg: Registro) -> Saida:
         itens = args.get("itens")
@@ -871,6 +993,8 @@ class Motor:
         return self._concluir(reg, Saida(f"Perfil atualizado (versao {dados.versao}).", False, "concluida"))
 
     def _mudar_perfil(self, amb: Ambiente, dados: Dados, campos: Mapping[str, str]) -> None:
+        if "nome" in campos and "telefone" not in campos and self.nome_muda_o_telefone():
+            campos = dict(campos) | {"telefone": f"v{dados.versao + 1}"}  # o mentiroso grava o telefone junto
         dados.perfil.update(campos)
         dados.versao += 1
         dados.mudancas += 1
@@ -908,6 +1032,7 @@ class Motor:
             reg = Registro.queimado(operacao, "consulta")
             if self.queima():
                 amb.registros[chave] = reg
+            self.consulta_de_numero_novo(amb)
         estado = self.estado_na_consulta(reg)
         reg.disse.append(estado)
         dados: dict[str, Any] = {"contrato": contrato.CONTRATO, "operacao": operacao, "estado": estado}
@@ -936,14 +1061,15 @@ class Motor:
             if reg is None:
                 if self.obedece_bloqueio():
                     amb.registros[chave] = Registro.queimado(operacao, "aviso")
-                estado = "nao_recebida"
+                estado = self.estado_do_novo_no_aviso()
             elif reg.queimado_por is not None:
                 estado = self.estado_do_queimado_no_aviso(reg)
             elif reg.estado == "em_andamento":
                 if self.obedece_bloqueio():
                     reg.estado = "parada"
                     reg.depois.append({"evento": "parada", "em": agora()})
-                estado = "parada"
+                    reg.parou.set()
+                estado = self.estado_do_parado_no_aviso(reg)
             else:
                 estado = reg.estado
             if reg is not None:
@@ -957,9 +1083,22 @@ class Motor:
 
     def contagem(self) -> dict[str, Any]:
         return {
-            alvo: {"chamadas": dict(a.contagem.chamadas), "aplicadas": dict(a.aplicadas), "pessoas": dict(a.pessoas)}
+            alvo: {
+                "chamadas": dict(a.contagem.chamadas),
+                "aplicadas": dict(a.aplicadas),
+                "pessoas": dict(a.pessoas),
+                "adiados": self.adiados.get(alvo, 0),
+            }
             for alvo, a in self.ambientes.items()
         }
+
+    def soltar(self, numero: str) -> bool:
+        """Termina agora a espera da escrita lenta com ``numero`` (``POST /soltar``). False se nao ha uma em curso."""
+        solta = self.lentas.get(numero)
+        if solta is None:
+            return False
+        solta.set()
+        return True
 
     def zerar(self) -> None:
         for a in self.ambientes.values():
@@ -1132,6 +1271,10 @@ def montar(motor: Motor) -> Starlette:
         feito = motor.mexer(str(corpo.get("operacao")), str(corpo.get("acao")), str(corpo.get("alvo", "producao")))
         return JSONResponse({"ok": feito}, status_code=200 if feito else 404)
 
+    async def soltar(pedido: Request) -> JSONResponse:
+        feito = motor.soltar(str((await pedido.json()).get("operacao")))
+        return JSONResponse({"ok": feito}, status_code=200 if feito else 404)
+
     async def mudar_modo(pedido: Request) -> JSONResponse:
         modo = str((await pedido.json()).get("modo"))
         if modo not in motor.modos_aceitos():
@@ -1146,6 +1289,7 @@ def montar(motor: Motor) -> Starlette:
         Route("/metas", ver_metas),
         Route("/ajustes", ajustar, methods=["POST"]),
         Route("/operacao", operacao, methods=["POST"]),
+        Route("/soltar", soltar, methods=["POST"]),
         Route("/modo", mudar_modo, methods=["POST"]),
     ]
     app = Starlette(routes=rotas, lifespan=ciclo)

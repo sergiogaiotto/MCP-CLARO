@@ -132,6 +132,12 @@ async def revisar_ferramenta(
 
     Serve para terceiros e proprios. A impressao e a da definicao declarada; ``definicao_declarada`` fica guardada.
     Num terceiro, o banco forca ``texto_de_fora`` e tira as etiquetas, seja qual for o valor dado aqui.
+
+    Sem ``nome_vitrine``, o nome de vitrine e o original com um sufixo sorteado de 12 letras hexadecimais (48 bits). O
+    indice ``ferramentas_vitrine_ativa`` e unico entre as ativas da sessao de testes inteira, e muitos testes gravam de
+    vez: com 6 letras (24 bits), umas 300 ativas do mesmo nome davam cerca de 0,3% de colisao por nome em cada rodada
+    (Fase 4, etapa 3, G02rr). Com 48 bits, mil ativas do mesmo nome dao menos de uma chance em 500 milhoes. O teto do
+    nome de vitrine e 128 letras (0002): o original vai ate 115.
     """
     d = dict(definicao_declarada)
     nome = str(d["name"])
@@ -157,7 +163,7 @@ async def revisar_ferramenta(
             {
                 "s": sistema_id,
                 "n": nome,
-                "nv": nome_vitrine or f"{nome}_{uuid.uuid4().hex[:6]}",
+                "nv": nome_vitrine or f"{nome}_{uuid.uuid4().hex[:12]}",
                 "d": descricao,
                 "ee": json.dumps(d.get("inputSchema") or {"type": "object", "properties": {}}),
                 "es": json.dumps(d.get("outputSchema")),

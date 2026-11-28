@@ -5,14 +5,18 @@ gravacao em ``declaracoes_selo`` e a leitura da mais recente.
   que so leem, toda revisada do sistema (de qualquer classe e situacao) e a producao de todo sistema do cadastro.
 - ``conferir`` e o banco (``declaracoes_selo_nasce``) concordam sobre o alvo de teste que e a producao de um sistema
   (normalizado); a tela recusa antes, com a frase para o ADMIN.
-- O alvo com o nome escrito de outro jeito (pontos de outros alfabetos, IPv4 curto, decimal ou hexadecimal, IPv6 com
-  um IPv4 dentro) nao passa da tela, e nada chega ao banco; a producao escrita de outro jeito no cadastro e pega pela
-  forma de conexao, na tela e no banco (``selo_endereco_conexao``, que junta os mesmos enderecos que a tela, menos o
-  nome fora de ASCII, que fica so com a tela).
+- O alvo com o nome ou a porta escritos de outro jeito (pontos de outros alfabetos, IPv4 curto, decimal ou
+  hexadecimal, IPv6 com um IPv4 dentro, mapeado ou NAT64, porta com ``+``, ``_`` ou digitos de outros alfabetos) nao
+  passa da tela, e o banco o recusa num INSERT direto, com a frase do alvo (tambem a porta longa demais para o
+  ``integer``); a producao escrita de outro jeito no cadastro e pega pela forma de conexao, na tela e no banco
+  (``selo_endereco_conexao``, que junta os mesmos enderecos que a tela, menos o nome fora de ASCII, que fica so com a
+  tela). O 6to4 e o Teredo valem como IPv6 nos dois lados (o residuo escrito).
 - O que a tela aceita o banco guarda: o caractere nulo, que o jsonb nao guarda, e os niveis demais, que o pydantic
   nao serializa, sao recusados com ``DeclaracaoRecusada`` antes da gravacao.
 - ``salvar`` grava a versao seguinte, com as colunas iguais ao JSON, pela entrada; duas gravacoes ao mesmo tempo
   entram uma depois da outra. ``ultima`` devolve a mais recente, que o pedido de teste aceita.
+- O ``cena`` grava de vez (alguns testes usam duas conexoes) e, no fim, tira as ferramentas do sistema da vitrine
+  ativa: o nome de vitrine sorteado e unico entre as ativas da sessao inteira (e o sufixo agora tem 48 bits).
 """
 
 from __future__ import annotations
@@ -21,8 +25,10 @@ import asyncio
 import ipaddress
 import json
 import random
+import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -52,14 +58,65 @@ class Cena:
     sistema: apoio.SistemaDoSelo
 
 
-@pytest.fixture
-async def cena(dono: AsyncEngine) -> Cena:
+@asynccontextmanager
+async def _cena_gravada(dono: AsyncEngine) -> AsyncIterator[Cena]:
+    """Um ADMIN e um sistema com duas acoes e duas leituras, gravados de vez: alguns testes usam duas conexoes.
+
+    No fim, as ferramentas do sistema deixam de ser ativas (etapa 3, G02rr, item 3). O nome de vitrine que
+    ``apoio_terceiros.revisar_ferramenta`` sorteia e unico entre as ativas da sessao inteira (indice
+    ``ferramentas_vitrine_ativa``). Com o sufixo de 24 bits de antes, cada teste que usa o ``cena`` deixava quatro
+    nomes ativos de vez, e uma rodada do grupo deixava centenas de cada nome (``enviar_lembrete_xxxxxx``...): a chance
+    de dois sorteios iguais era de cerca de 1% por rodada, e a colisao virava ERROR no preparo de outro teste. Agora o
+    sufixo tem 48 bits (``revisar_ferramenta``), e o ``cena`` nao deixa nada ativo."""
     async with dono.begin() as c:
         admin = await apoio.nova_pessoa(c, admin=True)
         sistema = await apoio.proprio_com_acoes(
             c, acoes=("enviar_lembrete", "apagar_lembrete"), leituras=("listar_lembretes", "ver_lembrete")
         )
-        return Cena(admin, sistema)
+    try:
+        yield Cena(admin, sistema)
+    finally:
+        async with dono.begin() as c:
+            await c.execute(
+                text(
+                    "UPDATE ferramentas_revisadas SET situacao = 'substituida'"
+                    " WHERE sistema_id = :s AND situacao = 'ativa'"
+                ),
+                {"s": sistema.id},
+            )
+
+
+@pytest.fixture
+async def cena(dono: AsyncEngine) -> AsyncIterator[Cena]:
+    async with _cena_gravada(dono) as gravada:
+        yield gravada
+
+
+async def _ativas(dono: AsyncEngine, sistema_id: uuid.UUID) -> int:
+    async with dono.connect() as c:
+        return int(
+            (
+                await c.execute(
+                    text("SELECT count(*) FROM ferramentas_revisadas WHERE sistema_id = :s AND situacao = 'ativa'"),
+                    {"s": sistema_id},
+                )
+            ).scalar_one()
+        )
+
+
+async def test_o_cena_tira_as_ferramentas_da_vitrine_ativa_no_fim(dono: AsyncEngine) -> None:
+    """O ``cena`` grava de vez e, no fim, nao deixa nome de vitrine ativo (a causa do ERROR intermitente no preparo:
+    nomes sorteados com 24 bits, unicos entre as ativas da sessao). Tambem quando o teste falha."""
+    async with _cena_gravada(dono) as gravada:
+        assert await _ativas(dono, gravada.sistema.id) == 4  # gravadas de vez: outra conexao as ve
+        revisadas = [*gravada.sistema.acoes, *gravada.sistema.leituras]
+        # O sufixo sorteado do nome de vitrine tem 48 bits (12 letras hexadecimais), nao 24.
+        assert all(re.fullmatch(f"{r.nome_original}_[0-9a-f]{{12}}", r.nome_vitrine) for r in revisadas), revisadas
+    assert await _ativas(dono, gravada.sistema.id) == 0
+    with pytest.raises(RuntimeError, match="o teste falhou"):
+        async with _cena_gravada(dono) as outra:
+            raise RuntimeError("o teste falhou")
+    assert await _ativas(dono, outra.sistema.id) == 0
 
 
 async def num_rascunho(engine: AsyncEngine, passos: Callable[[AsyncConnection], Awaitable[Any]]) -> Any:
@@ -313,6 +370,16 @@ FORMAS_DO_NOME: Final = (
     "[::ffff:0]",
     "[::ffff:0:a00:5]",
     "[64:ff9b::a00:5]",
+    "[64:FF9B::A00:5]",
+    "[64:ff9b::10.0.0.5]",
+    "[64:ff9b::7f00:1]",
+    "[64:ff9b::]",
+    "[64:ff9b::1:a00:5]",
+    "[64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff]",
+    # O 6to4 e o Teredo levam um IPv4 dentro (10.0.0.5), mas valem como IPv6 nos dois lados (o residuo escrito).
+    "[2002:a00:5::1]",
+    "[2001:0:4136:e378:8000:63bf:f5ff:fffa]",
+    "[2001::f5ff:fffa]",
     "[::10.0.0.5]",
     "[::a00:5]",
     "[::1:0]",
@@ -326,6 +393,45 @@ FORMAS_DO_NOME: Final = (
 """Nomes do alvo, do jeito comum e de outros jeitos: a tela (``declaracao._endereco``) e o banco
 (``selo_alvo_bem_escrito``) tem de dizer o mesmo de cada um."""
 
+FORMAS_DA_PORTA: Final = (
+    "",
+    ":",
+    ":8123",
+    ":0",
+    ":00",
+    ":0443",
+    ":65535",
+    ":0000000000065535",
+    ":65536",
+    ":99999",
+    ":100000",
+    ":+8123",
+    ":+0443",
+    ":-0",
+    ":4_43",
+    ": 443",
+    ":443 ",
+    ":\u0664\u0664\u0663",
+    ":\uff14\uff14\uff13",
+    ":0x1bb",
+    ":8123:8123",
+    ":8123:",
+    "::8123",
+    ":4294967296",
+    ":99999999999",
+    ":" + "9" * 40,
+    ":" + "0" * 30 + "65536",
+    ":" + "0" * 30 + "65535",
+)
+"""A porta do alvo (etapa 3, G02rr, item 1): vazia, so com digitos ASCII (de 0 a 65535 e fora disso) e escrita como o
+``int()`` do leitor do cliente tambem le (``+``, ``_``, espaco, digitos de outros alfabetos). E as longas, com mais
+digitos que o ``integer`` do banco guarda (11 e 40 digitos, e 30 zeros a esquerda): a tela as recusa (``.port`` fora
+de 0 a 65535), e o banco tem de dizer ``false`` sem estourar a conta (a guarda do tamanho em ``selo_alvo_bem_escrito``;
+sem ela, a consulta inteira para com ``value ... is out of range for type integer``)."""
+
+USUARIOS: Final = ("u@", "u:s@", "a@b@", "@", "u:8123@")
+"""O usuario antes do nome: a tela o recusa sempre; o banco olha o nome e a porta depois do ultimo ``@``."""
+
 
 def _a_tela_aceita(endereco: str) -> bool:
     try:
@@ -335,17 +441,74 @@ def _a_tela_aceita(endereco: str) -> bool:
     return True
 
 
+async def _bem_escritos(c: AsyncConnection, enderecos: list[str]) -> list[bool]:
+    return [
+        bool(b)
+        for b in (
+            await c.execute(
+                text(
+                    "SELECT selo_alvo_bem_escrito(e) FROM unnest(CAST(:e AS text[])) WITH ORDINALITY AS x(e, n)"
+                    " ORDER BY n"
+                ),
+                {"e": enderecos},
+            )
+        )
+        .scalars()
+        .all()
+    ]
+
+
 async def test_a_tela_e_o_banco_concordam_no_nome_do_alvo(dono: AsyncEngine) -> None:
-    """A regra do nome no banco e a da tela (``_NOME_ASCII``, ``_IPV4_ESCRITO``, ``_ip_comum``), forma por forma: com
-    porta, sem porta e com usuario (o banco olha so o nome; a tela recusa o usuario por outro motivo)."""
-    assert any(_a_tela_aceita(f"http://{n}/mcp") for n in FORMAS_DO_NOME)
-    assert not all(_a_tela_aceita(f"http://{n}/mcp") for n in FORMAS_DO_NOME)
+    """A regra do nome e da porta no banco e a da tela (``_NOME_ASCII``, ``_IPV4_ESCRITO``, ``_ip_comum``,
+    ``_ipv6_com_ipv4_dentro`` e ``urlsplit(...).port``), forma por forma: cada nome com cada porta, nos dois esquemas.
+    Com usuario, o banco olha so o nome e a porta (depois do ultimo ``@``, como ``urlsplit``) e diz o que a tela diz do
+    mesmo endereco sem o usuario; a tela recusa o usuario por outro motivo."""
+    pares = [
+        (endereco, endereco)
+        for nome in FORMAS_DO_NOME
+        for porta in FORMAS_DA_PORTA
+        for endereco in (f"http://{nome}{porta}/selo/mcp", f"https://{nome}{porta}/mcp")
+    ]
+    for usuario in USUARIOS:
+        pares += [(f"http://{usuario}{nome}:8123/mcp", f"http://{nome}:8123/mcp") for nome in FORMAS_DO_NOME]
+        pares += [
+            (f"https://{usuario}cobranca.exemplo.teste{p}/mcp", f"https://cobranca.exemplo.teste{p}/mcp")
+            for p in FORMAS_DA_PORTA
+        ]
+    tela = [_a_tela_aceita(t) for _, t in pares]
     async with dono.connect() as c:
-        for nome in FORMAS_DO_NOME:
-            for endereco in (f"http://{nome}:8123/selo/mcp", f"https://{nome}/mcp"):
-                banco = (await c.execute(text("SELECT selo_alvo_bem_escrito(:e)"), {"e": endereco})).scalar_one()
-                assert banco is _a_tela_aceita(endereco), endereco
+        banco = await _bem_escritos(c, [b for b, _ in pares])
         assert (await c.execute(text("SELECT selo_alvo_bem_escrito(NULL)"))).scalar_one() is True
+    assert [b for (b, _), no_banco, na_tela in zip(pares, banco, tela, strict=True) if no_banco is not na_tela] == []
+    # O corpo tem de tudo: aceitos e recusados, e o nome bom com a porta escrita de outro jeito, que o banco aceitava.
+    assert any(tela)
+    assert not all(tela)
+    assert _a_tela_aceita("https://cobranca.exemplo.teste:8123/mcp")
+    assert not _a_tela_aceita("https://cobranca.exemplo.teste:+8123/mcp")
+    assert not _a_tela_aceita("https://cobranca.exemplo.teste:99999999999/mcp")
+    assert _a_tela_aceita("https://cobranca.exemplo.teste:" + "0" * 30 + "65535/mcp")
+
+
+@pytest.mark.parametrize("porta", ["99999999999", "9" * 40], ids=["11_digitos", "40_digitos"])
+@pytest.mark.parametrize("papel", [None, ENTRADA])
+async def test_o_banco_recusa_a_porta_longa_com_a_frase_do_alvo(
+    dono: AsyncEngine, cena: Cena, porta: str, papel: str | None
+) -> None:
+    """Etapa 3 (G02rr, retoque): a porta com mais digitos do que o ``integer`` guarda. A tela a recusa
+    (``urlsplit(...).port``), e o banco tambem, num INSERT direto, com a frase do alvo (``check_violation``), e nao
+    com o erro da conta (``value ... is out of range for type integer``, que nao diz ao ADMIN o que esta errado). Sem
+    a guarda do tamanho em ``selo_alvo_bem_escrito``, a conversao da porta estourava antes da comparacao."""
+    alvo = f"https://alvo-{uuid.uuid4().hex[:6]}.exemplo.teste:{porta}/mcp"
+    assert not _a_tela_aceita(alvo)
+    dados = apoio.declaracao(["apagar_lembrete", "enviar_lembrete"], endereco_teste=alvo)
+
+    async def passos(c: AsyncConnection) -> None:
+        await como(c, papel)
+        await apoio.salvar_declaracao(c, cena.sistema.id, cena.admin_id, dados)
+
+    with pytest.raises(DBAPIError, match="escrito de um jeito so") as recusa:
+        await num_rascunho(dono, passos)
+    assert getattr(recusa.value.orig, "sqlstate", None) == "23514"  # check_violation
 
 
 @pytest.mark.parametrize(
@@ -356,18 +519,42 @@ async def test_a_tela_e_o_banco_concordam_no_nome_do_alvo(dono: AsyncEngine) -> 
         ("http://127.0.0.1:{porta}/{nome}/mcp", "http://127.1:{porta}/{nome}/mcp"),
         ("http://127.0.0.1:{porta}/{nome}/mcp", "http://2130706433:{porta}/{nome}/mcp"),
         ("http://127.0.0.1:{porta}/{nome}/mcp", "http://0x7f.0.0.1:{porta}/{nome}/mcp"),
+        # Etapa 3 (G02rr, item 1; a prova do verificador, adaptada): a porta que o leitor do cliente le com int().
+        ("https://{nome}.exemplo.teste/mcp", "https://{nome}.exemplo.teste:+443/mcp"),
+        ("https://{nome}.exemplo.teste/mcp", "https://{nome}.exemplo.teste:4_43/mcp"),
+        ("https://{nome}.exemplo.teste/mcp", "https://{nome}.exemplo.teste:\u0664\u0664\u0663/mcp"),
+        ("https://{nome}.exemplo.teste/mcp", "https://{nome}.exemplo.teste:443 /mcp"),
+        ("http://127.0.0.1:{porta}/{nome}/mcp", "http://localhost:+{porta}/{nome}/mcp"),
+        ("http://127.0.0.1:{porta}/{nome}/mcp", "http://[::1]:+{porta}/{nome}/mcp"),
+        ("http://127.0.0.1:{porta}/{nome}/mcp", "http://127.0.0.1:+{porta}/{nome}/mcp"),
     ],
-    ids=["u3002", "uff0e", "ipv4_curto", "ipv4_decimal", "ipv4_hexa"],
+    ids=[
+        "u3002",
+        "uff0e",
+        "ipv4_curto",
+        "ipv4_decimal",
+        "ipv4_hexa",
+        "porta_mais",
+        "porta_sublinhado",
+        "porta_arabe",
+        "porta_espaco",
+        "porta_localhost_mais",
+        "porta_ipv6_mais",
+        "porta_mesmo_ip_mais",
+    ],
 )
 @pytest.mark.parametrize("papel", [None, ENTRADA])
 async def test_o_banco_recusa_o_alvo_escrito_de_outro_jeito_num_insert_direto(
     dono: AsyncEngine, cena: Cena, producao: str, alvo: str, papel: str | None
 ) -> None:
     """A segunda barreira (critica A4): sem a tela, o INSERT direto do alvo que e a producao escrita de outro jeito e
-    recusado pelo nome (antes, so a comparacao de texto valia, e as cinco formas eram gravadas)."""
+    recusado pelo nome ou pela porta (antes, so a comparacao de texto valia, e as cinco formas do nome eram gravadas;
+    ate a etapa 3, as sete da porta tambem). O cliente conecta na producao em todas."""
     nome, porta = f"prod-{uuid.uuid4().hex[:6]}", 20000 + uuid.uuid4().int % 20000
     producao, alvo = producao.format(nome=nome, porta=porta), alvo.format(nome=nome, porta=porta)
     assert not contrato.mesmo_endereco(producao, alvo)  # o texto normalizado nao pegava
+    assert d.forma_de_conexao(alvo) == d.forma_de_conexao(producao)  # o cliente conecta na producao
+    assert not _a_tela_aceita(alvo)
     dados = apoio.declaracao(["apagar_lembrete", "enviar_lembrete"], endereco_teste=alvo)
 
     async def passos(c: AsyncConnection) -> None:
@@ -442,8 +629,32 @@ async def test_o_banco_compara_o_alvo_com_a_producao_como_a_tela(
             "http://{nome}.localhost:{porta}/{nome}/mcp",
             "nao escreve na producao",
         ),
+        # Etapa 3 (G02rr, item 2): o prefixo NAT64 (64:ff9b::/96) leva o IPv4 dentro, como o mapeado.
+        ("http://10.{a}.{b}.5:8123/{nome}/mcp", "http://[{nat64}]:8123/{nome}/mcp", "escrito de um jeito so"),
+        (
+            "http://127.0.0.1:{porta}/{nome}/mcp",
+            "http://[64:ff9b::7f00:1]:{porta}/{nome}/mcp",
+            "escrito de um jeito so",
+        ),
+        ("http://[{nat64}]:8123/{nome}/mcp", "http://10.{a}.{b}.5:8123/{nome}/mcp", "nao escreve na producao"),
+        (
+            "http://[64:ff9b::7f00:1]:{porta}/{nome}/mcp",
+            "http://localhost:{porta}/{nome}/mcp",
+            "nao escreve na producao",
+        ),
     ],
-    ids=["mapeado_10", "mapeado_loopback", "localhost", "ipv6_loopback", "outro_loopback", "sub_localhost"],
+    ids=[
+        "mapeado_10",
+        "mapeado_loopback",
+        "localhost",
+        "ipv6_loopback",
+        "outro_loopback",
+        "sub_localhost",
+        "nat64_10",
+        "nat64_loopback",
+        "producao_nat64_10",
+        "producao_nat64_loopback",
+    ],
 )
 @pytest.mark.parametrize("papel", [None, ENTRADA])
 async def test_o_banco_recusa_a_producao_escrita_de_outro_jeito_num_insert_direto(
@@ -451,14 +662,18 @@ async def test_o_banco_recusa_a_producao_escrita_de_outro_jeito_num_insert_diret
 ) -> None:
     """As seis formas da conferencia do retoque (a producao no cadastro e o alvo que chega nela, escrito de outro
     jeito), num INSERT direto, como o dono e como a entrada: antes eram todas gravadas. O IPv6 mapeado sai pelo nome
-    (``selo_alvo_bem_escrito``, como na tela), e o loopback pela forma de conexao (``selo_alvo_na_producao``)."""
+    (``selo_alvo_bem_escrito``, como na tela), e o loopback pela forma de conexao (``selo_alvo_na_producao``). E as
+    quatro do NAT64 (etapa 3, G02rr, item 2), que eram gravadas ate a etapa 3: o alvo ``64:ff9b::a.b.c.d`` sai pelo
+    nome, e a producao assim escrita e pega pela forma de conexao, que conta o IPv4 de dentro."""
     sorteio = uuid.uuid4().int
-    campos = {
+    campos: dict[str, Any] = {
         "nome": f"prod-{uuid.uuid4().hex[:6]}",
         "porta": 20000 + sorteio % 20000,
         "a": sorteio % 256,
         "b": sorteio % 251,
     }
+    ipv4 = ipaddress.IPv4Address(f"10.{campos['a']}.{campos['b']}.5")
+    campos["nat64"] = ipaddress.IPv6Address(int(ipaddress.IPv6Address("64:ff9b::")) + int(ipv4)).compressed
     producao, alvo = producao.format(**campos), alvo.format(**campos)
     assert not contrato.mesmo_endereco(producao, alvo)  # o texto normalizado nao pegava
     assert d.alvo_na_producao(alvo, [producao])  # a tela pega (pela forma de conexao, ou antes, pelo nome)
@@ -548,6 +763,17 @@ def _enderecos_de_conexao() -> list[str]:
         "[::a00:5]",
         "[::ffff]",
         "[::ffff:0]",
+        "[64:ff9b::a00:5]",
+        "[64:ff9b::10.0.0.5]",
+        "[64:FF9B::7F00:1]",
+        "[64:ff9b::]",
+        "[0064:ff9b:0:0:0:0:a00:5]",
+        "[64:ff9b::1:a00:5]",
+        "[64:ff9b:1::a00:5]",
+        "[2002:a00:5::1]",
+        "[2002:7f00:1::]",
+        "[2001:0:4136:e378:8000:63bf:f5ff:fffa]",
+        "[2001::f5ff:fffa]",
         "[2001:db8::1]",
         "[2001:DB8:0:0::1]",
         "[1:2:3:4:5:6:1.2.3.4]",
@@ -630,6 +856,35 @@ async def test_o_nome_fora_de_ascii_fica_com_a_tela(dono: AsyncEngine) -> None:
     assert banco[1] == ["xn--cobrana-zxa.exemplo.teste", "443", "/mcp"]
 
 
+async def test_o_6to4_e_o_teredo_valem_como_ipv6_nos_dois_lados(dono: AsyncEngine) -> None:
+    """O residuo escrito (etapa 3, G02rr, retoque): o 6to4 (``2002::/16``) e o Teredo (``2001::/32``) levam um IPv4
+    dentro, que a Fase 3 le para saber se o IP e da internet (``telas.admin._ip_publico``), mas aqui valem como IPv6,
+    na tela e no banco: o alvo pode ser um deles, e a forma de conexao nao os troca pelo IPv4 de dentro. Se um lado so
+    passar a le-los, os testes de concordancia falham; se os dois passarem, este teste muda junto com a lista do que
+    fica de fora (``selo_endereco_conexao`` e ``declaracao._ipv6_com_ipv4_dentro``)."""
+    seis_para_quatro, teredo = "2002:a00:5::1", "2001:0:4136:e378:8000:63bf:f5ff:fffa"
+    assert ipaddress.IPv6Address(seis_para_quatro).sixtofour == ipaddress.IPv4Address("10.0.0.5")
+    assert (ipaddress.IPv6Address(teredo).teredo or ())[1:] == (ipaddress.IPv4Address("10.0.0.5"),)
+    alvos = [f"http://[{seis_para_quatro}]:8123/mcp", f"http://[{teredo}]:8123/mcp"]
+    for alvo in alvos:
+        assert _a_tela_aceita(alvo)
+        assert not d.alvo_na_producao(alvo, ["http://10.0.0.5:8123/mcp"])
+    async with dono.connect() as c:
+        assert await _bem_escritos(c, alvos) == [True, True]
+        banco = (
+            await c.execute(
+                text("SELECT selo_endereco_conexao(:a), selo_endereco_conexao(:b), selo_endereco_conexao(:p)"),
+                {"a": alvos[0], "b": alvos[1], "p": "http://10.0.0.5:8123/mcp"},
+            )
+        ).one()
+    assert list(banco) == [
+        [seis_para_quatro, "8123", "/mcp"],
+        [teredo, "8123", "/mcp"],
+        ["10.0.0.5", "8123", "/mcp"],
+    ]
+    assert [d.forma_de_conexao(a) for a in alvos] == [(seis_para_quatro, 8123, "/mcp"), (teredo, 8123, "/mcp")]
+
+
 @pytest.mark.parametrize(
     "alvo",
     [
@@ -687,11 +942,17 @@ async def _com_alvo_estragado(c: AsyncConnection, declaracao_id: uuid.UUID, alvo
     await c.execute(text("ALTER TABLE declaracoes_selo ENABLE TRIGGER declaracoes_selo_sem_update_delete"))
 
 
+@pytest.mark.parametrize(
+    "estragado",
+    ["https://alvo\uff0eexemplo\uff0eteste/mcp", "https://alvo.exemplo.teste:99999999999/mcp"],
+    ids=["ponto_de_outro_alfabeto", "porta_longa"],
+)
 @pytest.mark.parametrize("passo", ["pedido", "rodando", "teste"])
 async def test_pedido_rodando_e_teste_conferem_o_nome_do_alvo_de_novo(
-    dono: AsyncEngine, cena: Cena, passo: str
+    dono: AsyncEngine, cena: Cena, passo: str, estragado: str
 ) -> None:
-    estragado = "https://alvo\uff0eexemplo\uff0eteste/mcp"
+    """A regra do nome e da porta vale de novo no pedido, em ``rodando`` e no teste, com a frase do alvo: tambem a
+    porta longa (etapa 3, G02rr, retoque), que sem a guarda do tamanho estourava a conta do ``integer``."""
 
     async def passos(c: AsyncConnection) -> None:
         declaracao_id = await apoio.salvar_declaracao(c, cena.sistema.id, cena.admin_id)

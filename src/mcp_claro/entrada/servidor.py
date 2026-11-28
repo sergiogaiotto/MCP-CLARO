@@ -46,6 +46,18 @@ Fase 3, servidores de terceiros:
   (``regras.estranhos.marcar``). Se ela chegar sem a marca, a entrada emoldura
   aqui, para nada de um terceiro (ou de ferramenta marcada) passar sem moldura;
 - -32021 de terceiro: sempre o erro legivel, nunca o -32021 (D13).
+
+Fase 4, selos de nivel 2 e 3 (desenho 7.3, critica B1):
+
+- ``tools/list`` leva no ``_meta`` de cada ferramenta o selo EFETIVO da pessoa (``selo.vigente.efetivo``, com
+  ``FEATURE_PHASE4_BADGES`` e ``pessoas.teste``), calculado sobre o selo lido na MESMA linha da vitrine
+  (``FerramentaVitrine.sistema.selo_vigente``), nunca a coluna antiga ``sistemas.selo``;
+- ``tools/call`` le a ferramenta com o selo, para a ficha nascer com o retrato dele (``fila.registrar_pedido``). Se a
+  leitura com o selo falhar, a chamada segue com a ferramenta sem o selo (``com_selo=False``): o selo nunca para a
+  leitura (A1), e a ficha le o selo de novo na transacao do pedido. ``tipo_da_recusa`` so quer a classe e nao le o
+  selo;
+- ``agir`` e a consulta pelo protocolo devolvem o selo da operacao (``Pedidos.selo_da_operacao``) e, na "nao
+  confirmada" com resposta do sistema, o que ele informou (so o vocabulario do contrato).
 """
 
 from __future__ import annotations
@@ -58,6 +70,7 @@ from typing import Any
 import mcp_types as types
 from mcp.server import Server, ServerRequestContext
 from mcp.shared.exceptions import MCPError
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from mcp_claro import __version__
@@ -83,6 +96,7 @@ from mcp_claro.saida import pedidos as saida_pedidos
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.fila import Operacao
 from mcp_claro.saida.pedidos import AcaoRecusada, Pedido, Pedidos
+from mcp_claro.selo.vigente import efetivo
 from mcp_claro.versao import CAPACIDADES_DO_CLIENTE, MOTIVO_EXIGE_CAPACIDADE, PREFIXO_META, VERSAO_MCP
 
 log = logger("mcp_claro.entrada.servidor")
@@ -204,6 +218,28 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         """Servidores de terceiros na vitrine e na chamada: chave da Fase 3 ligada, ou pessoa de teste."""
         return p.FEATURE_PHASE3_THIRD_PARTY or q.pessoa.teste
 
+    def selo_na_vitrine(q: Quem, f: FerramentaVitrine) -> int:
+        """O nivel do selo efetivo da pessoa para a ferramenta da vitrine, sobre o selo lido na mesma linha."""
+        return efetivo(
+            f.sistema.selo_vigente, ligada=p.FEATURE_PHASE4_BADGES is True, pessoa_teste=q.pessoa.teste
+        ).nivel
+
+    async def ferramenta_da_chamada(q: Quem, nome: str) -> FerramentaVitrine | None:
+        """A ferramenta que o aplicativo chama, com o selo vigente do sistema (para a ficha). Se a leitura com o selo
+        falhar no banco, a mesma leitura sem ele (o selo nunca para a leitura, A1); a ficha le o selo de novo."""
+        try:
+            async with engine.connect() as c:
+                return await repositorio.ferramenta_na_vitrine(
+                    c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP, terceiros=terceiros_ligados(q)
+                )
+        except DBAPIError as erro:
+            log.warning("vitrine_sem_selo_na_chamada", erro=type(erro).__name__)
+            CONTADORES.somar("selo_nao_lido_na_chamada")
+        async with engine.connect() as c:
+            return await repositorio.ferramenta_na_vitrine(
+                c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP, terceiros=terceiros_ligados(q), com_selo=False
+            )
+
     async def gravar_sinais(q: Quem, ferramenta_id: uuid.UUID) -> None:
         """Grava os sinais e confirma, antes de o texto do sistema sair para o aplicativo."""
         async with engine.begin() as c:
@@ -278,7 +314,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         ferramentas = programas.filtrar_vitrine(q.aplicativo.tipo, ferramentas)
         if not acoes_ligadas(q) or (q.aplicativo.tipo == "programa" and not p.PROGRAM_ACTIONS_ENABLED):
             ferramentas = [f for f in ferramentas if f.classe == "le"]
-        tools = [types.Tool.model_validate(f.como_tool()) for f in ferramentas]
+        tools = [types.Tool.model_validate(f.como_tool(selo_efetivo=selo_na_vitrine(q, f))) for f in ferramentas]
         if acoes_ligadas(q) and any(f.classe != "le" for f in ferramentas):
             # A consulta pelo protocolo entra na vitrine junto com as acoes (e segue valendo na chamada).
             tools.append(types.Tool.model_validate(saida_pedidos.FERRAMENTA_CONSULTA))
@@ -308,7 +344,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
         """Recusa antes de olhar a ferramenta (entrada fechada, bloqueio): o extrato diz se era uma acao."""
         async with engine.connect() as c:
             f = await repositorio.ferramenta_na_vitrine(
-                c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP, terceiros=terceiros_ligados(q)
+                c, q.pessoa.id, q.aplicativo.id, nome, VERSAO_MCP, terceiros=terceiros_ligados(q), com_selo=False
             )
         return "acao_recusada" if f is not None and f.classe != "le" else "leitura_recusada"
 
@@ -327,10 +363,7 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
             raise await recusar(q, params.name, b.motivo_recusa(), b.mensagem(), trace, tipo)
         if params.name == saida_pedidos.CONSULTA and acoes_ligadas(q):
             return await consultar(q, params)
-        async with engine.connect() as c:
-            ferramenta: FerramentaVitrine | None = await repositorio.ferramenta_na_vitrine(
-                c, q.pessoa.id, q.aplicativo.id, params.name, VERSAO_MCP, terceiros=terceiros_ligados(q)
-            )
+        ferramenta = await ferramenta_da_chamada(q, params.name)
         if ferramenta is None or ferramenta.ordem_id is None:
             raise await recusar(
                 q,
@@ -468,8 +501,9 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 await repositorio.marcar_uso_da_ordem(c, ferramenta.ordem_id)
         op = await pedidos.aguardar(op)
         await sinais_da_acao(q, op)
+        selo = await pedidos.selo_da_operacao(op, pessoa_teste=q.pessoa.teste)
         return types.CallToolResult.model_validate(
-            saida_pedidos.resposta(op, selo=ferramenta.sistema.selo, repetida=repetida)
+            saida_pedidos.resposta(op, selo=selo, repetida=repetida, consultas_maximas=p.BADGE_LOOKUP_MAX_ATTEMPTS)
         )
 
     async def consultar(q: Quem, params: types.CallToolRequestParams) -> types.CallToolResult:
@@ -489,7 +523,10 @@ def criar_servidor(p: Parametros, engine: AsyncEngine, ler: Leitor) -> Server[An
                 }
             )
         await sinais_da_acao(q, op)
-        return types.CallToolResult.model_validate(saida_pedidos.resposta(op))
+        selo = await pedidos.selo_da_operacao(op, pessoa_teste=q.pessoa.teste)
+        return types.CallToolResult.model_validate(
+            saida_pedidos.resposta(op, selo=selo, consultas_maximas=p.BADGE_LOOKUP_MAX_ATTEMPTS)
+        )
 
     def esquema_da_ferramenta(nome: str) -> dict[str, Any] | None:
         # O kit pede o esquema so para conferir cabecalhos Mcp-Param-*; a vitrine revisada nao os usa.

@@ -11,7 +11,8 @@ Tres conferencias, nesta ordem:
    sem chave repetida nem NaN, sem o caractere nulo (que o jsonb do banco nao guarda), ate ``FUNDO_MAXIMO`` niveis, e a
    forma do modelo ``Declaracao`` (nada a mais, em nivel nenhum). O alvo de teste tem o nome escrito de um jeito so:
    ASCII, e um IP so por inteiro (``10.0.0.5``, nunca ``10.5`` nem ``0x0a000005``; um IPv6 sem um IPv4 dentro, nunca
-   ``[::ffff:10.0.0.5]``), para que o texto guardado seja o nome que o cliente conecta;
+   ``[::ffff:10.0.0.5]`` nem ``[64:ff9b::a00:5]``; o 6to4 e o Teredo ficam de fora, veja ``_ipv6_com_ipv4_dentro``),
+   e a porta so com digitos ASCII, ate 65535, para que o texto guardado seja o nome e a porta que o cliente conecta;
 2. ``conferir``, contra o cadastro de agora (``cadastro_do_sistema``): terceiro recusado ate o G7; https fora de
    desenvolvimento e teste; o alvo de teste nunca e o endereco de producao de NENHUM sistema do cadastro, de qualquer
    situacao, nem na forma normalizada (``contrato.mesmo_endereco``) nem na forma de conexao (``forma_de_conexao``: o
@@ -100,6 +101,9 @@ _IPV4_ESCRITO: Final = re.compile(r"(?:0x[0-9a-f]*|[0-9]+)(?:\.(?:0x[0-9a-f]*|[0
 hexadecimal (``0x7f.0.0.1``) ou octal (``0177.0.0.1``): ``socket.inet_aton`` aceita e chega ao mesmo IP. A mesma
 regra de ``telas.admin._IPV4_CURTO`` (Fase 3)."""
 _PORTA_PADRAO: Final = {"http": 80, "https": 443}
+_NAT64: Final = ipaddress.IPv6Network("64:ff9b::/96")
+"""O prefixo NAT64 conhecido: o IPv6 ``64:ff9b::a.b.c.d`` chega ao IPv4 ``a.b.c.d`` (a mesma regra de
+``telas.admin._NAT64``, Fase 3)."""
 _LOCAL: Final = "localhost"
 _CATEGORIAS_DE_CONTROLE: Final = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 """Caracteres de controle, de formato (inclusive os de direcao do texto), metades de par e quebras de linha."""
@@ -207,14 +211,24 @@ def _ipv6_com_ipv4_dentro(nome: str) -> bool:
       ``[::ffff:10.0.0.5]`` e a producao ``10.0.0.5`` escrita de outro jeito (e ``[::ffff:127.0.0.1]``, a maquina
       local). A tela pega a producao assim escrita pela forma de conexao, mas o banco compara o texto: sem esta regra,
       o INSERT direto passava;
+    - o do prefixo NAT64 ``64:ff9b::a.b.c.d`` (``64:ff9b::/96``): numa rede so IPv6, com NAT64, ele chega ao proprio
+      IPv4, entao ``[64:ff9b::a00:5]`` e a producao ``10.0.0.5`` escrita de outro jeito. A Fase 3 ja o trata assim
+      (``telas.admin._NAT64`` e ``ligacao.cliente``). Outro prefixo NAT64 (o de uso local ``64:ff9b:1::/48``, ou um da
+      propria rede) so a rede sabe, e fica de fora desta regra;
     - o da forma antiga ``::a.b.c.d`` (os 96 primeiros bits zerados e o IPv4 nos 32 do fim, fora ``::`` e ``::N``),
       que o Python escreve em hexadecimal (``::a00:5``) e o banco com pontos (``::10.0.0.5``): sem forma comum aos
-      dois, fica de fora nos dois."""
+      dois, fica de fora nos dois.
+
+    Ficam fora desta regra, nos dois lados, o 6to4 (``2002::/16``) e o Teredo (``2001::/32``). Eles tambem levam um
+    IPv4 dentro, e a Fase 3 o le para saber se o IP e da internet (``telas.admin._ip_publico`` e
+    ``ligacao.cliente._ip_publico``). Aqui, eles valem como IPv6: o alvo pode ser um deles, e ``forma_de_conexao`` e
+    o banco (``selo_endereco_conexao``) nao os trocam pelo IPv4 de dentro. Um deles so chega a maquina desse IPv4
+    quando ela e a propria ponta do tunel, e o 6to4 esta em desuso (RFC 7526)."""
     try:
         ip = ipaddress.IPv6Address(nome)
     except ValueError:
         return False
-    return ip.ipv4_mapped is not None or (ip.packed[:12] == bytes(12) and ip.packed[12:14] != bytes(2))
+    return ip.ipv4_mapped is not None or ip in _NAT64 or (ip.packed[:12] == bytes(12) and ip.packed[12:14] != bytes(2))
 
 
 def _nome_do_alvo(nome: str, ipv6: bool) -> None:
@@ -228,8 +242,14 @@ def _nome_do_alvo(nome: str, ipv6: bool) -> None:
 
     E a mesma regra de ``selo_alvo_bem_escrito`` no banco (a segunda barreira, no INSERT da declaracao, no pedido, em
     ``rodando`` e no teste; o teste confere as duas numa lista de formas), com o nome so em ASCII conferido antes por
-    ``_endereco``: o IPv6 que leva um IPv4 dentro (``::ffff:a.b.c.d`` e ``::a.b.c.d``) fica de fora
-    (``_ipv6_com_ipv4_dentro``)."""
+    ``_endereco``: o IPv6 que leva um IPv4 dentro (``::ffff:a.b.c.d``, ``64:ff9b::a.b.c.d`` e ``::a.b.c.d``) fica de
+    fora (``_ipv6_com_ipv4_dentro``).
+
+    A porta tambem vai escrita de um jeito so, e o banco confere a mesma regra: vazia ou so com os digitos ASCII de 0 a
+    9, de 0 a 65535. Na tela, quem a confere e ``urlsplit(...).port``, em ``_endereco`` (o teste de unidade prende
+    esse comportamento). O leitor do cliente (``httpx2``) le a porta com ``int()``, que aceita ``+443``, ``4_43``,
+    `` 443`` e digitos de outros alfabetos: com ela, o alvo ``https://p.exemplo:+443/mcp`` conecta na producao
+    ``https://p.exemplo/mcp``, e a comparacao de texto do banco nao pegava."""
     if ipv6:
         if not _ip_comum(nome) or _ipv6_com_ipv4_dentro(nome):
             raise _erro("alvo_nome", _ALVO_NOME)
@@ -238,8 +258,9 @@ def _nome_do_alvo(nome: str, ipv6: bool) -> None:
 
 
 def _endereco(valor: str) -> str:
-    """A forma do endereco (``^https?://`` como o banco, nome, porta valida, sem usuario, consulta nem fragmento) e
-    o nome escrito de um jeito so (``_nome_do_alvo``). https e a comparacao com a producao ficam com ``conferir``."""
+    """A forma do endereco (``^https?://`` como o banco, nome, porta so de digitos ASCII de 0 a 65535 pela regra de
+    ``urlsplit(...).port``, sem usuario, consulta nem fragmento) e o nome escrito de um jeito so (``_nome_do_alvo``).
+    https e a comparacao com a producao ficam com ``conferir``."""
     mensagem = (
         "O alvo de teste é um endereço http:// ou https:// com o nome, a porta e o caminho, sem usuário, sem consulta"
         " (?) e sem fragmento (#)."
@@ -250,7 +271,7 @@ def _endereco(valor: str) -> str:
         raise _erro("alvo_invalido", mensagem)
     try:
         partes = urlsplit(valor)
-        partes.port  # noqa: B018 - porta invalida levanta ValueError
+        partes.port  # noqa: B018 - porta fora de 0 a 65535 ou com algo alem de digitos ASCII levanta ValueError
     except ValueError:
         raise _erro("alvo_invalido", mensagem) from None
     if not partes.hostname or "@" in partes.netloc or partes.query or partes.fragment or "?" in valor or "#" in valor:
@@ -633,15 +654,18 @@ def forma_de_conexao(endereco: str) -> tuple[str, int, str] | None:
 
     O nome e o que o leitor do cliente devolve (``httpx2``: IDNA, pontos de outros alfabetos trocados por pontos
     comuns), em minusculas e sem ponto no fim. Um IP escrito de qualquer jeito (``127.1``, ``2130706433``, IPv6
-    longo) vai na forma comum, e um IPv4 dentro de um IPv6 (``::ffff:10.0.0.5``) vale pelo IPv4. ``localhost``, os
-    nomes ``.localhost``, todo IP de loopback e o IP nao especificado (``0.0.0.0``, ``::``) chegam a mesma maquina:
-    viram um nome so. A porta e a efetiva (80 no http e 443 no https sem porta) e o caminho e o de
-    ``contrato.endereco_normalizado``. O esquema nao entra: o mesmo nome na mesma porta e o mesmo servico. Como
-    ``endereco_normalizado``, e de proposito mais largo que a igualdade de URL.
+    longo) vai na forma comum, e um IPv4 dentro de um IPv6 mapeado (``::ffff:10.0.0.5``) ou do prefixo NAT64
+    (``64:ff9b::10.0.0.5``, ``_NAT64``) vale pelo IPv4. ``localhost``, os nomes ``.localhost``, todo IP de loopback e
+    o IP nao especificado (``0.0.0.0``, ``::``) chegam a mesma maquina: viram um nome so. A porta e a efetiva (80 no
+    http e 443 no https sem porta) e o caminho e o de ``contrato.endereco_normalizado``. O esquema nao entra: o mesmo
+    nome na mesma porta e o mesmo servico. Como ``endereco_normalizado``, e de proposito mais largo que a igualdade de
+    URL.
 
     O banco tem a mesma regra (``selo_endereco_conexao``, em ``selo_alvo_na_producao``; o teste confere que os dois
-    juntam os mesmos enderecos), menos o nome fora de ASCII: o ``httpx2`` o escreve na forma ``xn--`` (IDNA), que o
-    banco nao calcula. Esse caso fica so com a tela (``alvo_na_producao``)."""
+    juntam os mesmos enderecos), menos o nome fora de ASCII, que o ``httpx2`` escreve na forma ``xn--`` (IDNA) e o
+    banco nao calcula, e a porta escrita como ``int()`` a le (``+443``, digitos de outros alfabetos), que o banco nao
+    le. O alvo nunca tem uma nem outra (``_endereco``); a producao assim escrita fica so com a tela
+    (``alvo_na_producao``). O 6to4 e o Teredo valem como IPv6, aqui e no banco (``_ipv6_com_ipv4_dentro``)."""
     try:
         url = httpx2.URL(endereco)
         nome = url.raw_host.decode("ascii").lower().rstrip(".")
@@ -653,6 +677,8 @@ def forma_de_conexao(endereco: str) -> tuple[str, int, str] | None:
     ip = _ip_escrito(nome)
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
+    elif isinstance(ip, ipaddress.IPv6Address) and ip in _NAT64:
+        ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     if nome == _LOCAL or nome.endswith("." + _LOCAL) or (ip is not None and (ip.is_loopback or ip.is_unspecified)):
         nome = _LOCAL
     elif ip is not None:

@@ -211,6 +211,12 @@ PONTOS_DE_OUTROS_ALFABETOS = ("\u3002", "\uff0e", "\uff61")
         "http://[::ffff:10.0.0.5]/mcp",
         "http://[::ffff:127.0.0.1]:8123/mcp",
         "http://[::ffff:0.0.0.0]:8123/mcp",
+        # Etapa 3 (G02rr): o IPv6 do prefixo NAT64 (64:ff9b::/96) leva um IPv4 dentro, e numa rede so IPv6 chega a ele.
+        "http://[64:ff9b::a00:5]:8123/mcp",
+        "https://[64:ff9b::cb00:7105]/mcp",
+        "http://[64:ff9b::7f00:1]:8123/mcp",
+        "http://[64:ff9b::]:8123/mcp",
+        "http://[64:ff9b::ffff:ffff]:8123/mcp",
     ],
 )
 def test_alvo_com_o_nome_escrito_de_outro_jeito_e_recusado_na_forma(alvo: str) -> None:
@@ -237,6 +243,16 @@ def test_alvo_com_o_nome_escrito_de_outro_jeito_e_recusado_na_forma(alvo: str) -
         "http://[::ffff:0:a00:5]/mcp",
         "http://[::100]/mcp",
         "http://[::]:8124/mcp",
+        "http://[64:ff9b::1:a00:5]/mcp",  # fora de 64:ff9b::/96 (o sexto grupo nao e zero)
+        "http://[64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff]/mcp",  # logo antes do prefixo NAT64
+        # O 6to4 e o Teredo levam um IPv4 dentro, mas valem como IPv6 nos dois lados (o residuo escrito em
+        # ``_ipv6_com_ipv4_dentro``).
+        "http://[2002:a00:5::1]:8123/mcp",
+        "http://[2001:0:4136:e378:8000:63bf:f5ff:fffa]/mcp",
+        "https://teste.exemplo.teste:0443/mcp",
+        "https://teste.exemplo.teste:/mcp",
+        "http://127.0.0.1:65535/mcp",
+        "http://127.0.0.1:0/mcp",
     ],
 )
 def test_alvo_com_o_nome_escrito_de_um_jeito_so_passa(alvo: str) -> None:
@@ -245,8 +261,42 @@ def test_alvo_com_o_nome_escrito_de_um_jeito_so_passa(alvo: str) -> None:
         cadastro(producoes=(PRODUCAO, "http://127.0.0.1:8123/mcp")),
         ambiente=Ambiente.TESTE,
     )
-    # O nome do texto e o que o cliente conecta (o leitor do ``httpx2``).
+    # O nome do texto e o que o cliente conecta (o leitor do ``httpx2``), e a porta tambem.
     assert httpx2.URL(alvo).raw_host.decode("ascii").lower() == urlsplit(alvo).hostname
+    assert (httpx2.URL(alvo).port or d._PORTA_PADRAO[urlsplit(alvo).scheme]) == (
+        urlsplit(alvo).port or d._PORTA_PADRAO[urlsplit(alvo).scheme]
+    )
+
+
+PORTAS_ESCRITAS_DE_OUTRO_JEITO: Final = (
+    "+443",
+    "+0443",
+    "4_43",
+    "\u0664\u0664\u0663",  # digitos arabes
+    "\uff14\uff14\uff13",  # digitos de largura cheia
+    "\u096a\u096a\u0969",  # digitos devanagari
+    "-0",
+    "0x1bb",
+    "65536",
+    "99999",
+    "443:443",
+    "99999999999",  # mais digitos do que o integer do banco guarda
+    "9" * 40,
+)
+"""Portas que a tela (``urlsplit(...).port``) e o banco (``selo_alvo_bem_escrito``) recusam no alvo. O leitor do
+cliente (``httpx2``) le as do comeco com ``int()`` e conecta na porta da producao."""
+
+
+@pytest.mark.parametrize("porta", PORTAS_ESCRITAS_DE_OUTRO_JEITO)
+def test_alvo_com_a_porta_escrita_de_outro_jeito_e_recusado_na_forma(porta: str) -> None:
+    """Etapa 3 (G02rr, item 1): a porta vazia ou so com os digitos ASCII de 0 a 65535, a regra de
+    ``urlsplit(...).port``. Este teste prende esse comportamento do Python (em versoes antigas, ``.port`` lia com
+    ``int()``), porque o banco segue a mesma regra e o teste do banco compara os dois lados."""
+    for alvo in (f"https://teste.exemplo.teste:{porta}/mcp", f"http://[2001:db8::1]:{porta}/mcp"):
+        recusa_na_forma(dados(endereco_teste=alvo), "alvo de teste é um endereço")
+    # O cliente conecta: as do comeco valem 443, como a producao https://teste.exemplo.teste/mcp.
+    if porta in ("+443", "+0443", "4_43", "\u0664\u0664\u0663", "\uff14\uff14\uff13", "\u096a\u096a\u0969"):
+        assert d.forma_de_conexao(f"https://teste.exemplo.teste:{porta}/mcp") == ("teste.exemplo.teste", 443, "/mcp")
 
 
 NO_MESMO_LUGAR: Final = (
@@ -272,6 +322,10 @@ NO_MESMO_LUGAR: Final = (
     ("http://[::ffff:127.0.0.1]:8123/mcp", "http://localhost:8123/mcp"),
     ("http://localhost:8123/mcp", "http://x.localhost:8123/mcp"),
     ("http://0x7f000001:8123/mcp", "http://127.0.0.1:8123/mcp"),
+    # O IPv6 do prefixo NAT64 (64:ff9b::/96) vale pelo IPv4 de dentro, como o mapeado (etapa 3, G02rr).
+    ("http://[64:ff9b::a00:5]:8123/mcp", "http://10.0.0.5:8123/mcp"),
+    ("https://[64:ff9b::cb00:7105]/mcp", "https://203.0.113.5/mcp"),
+    ("http://[64:FF9B::7F00:1]:8123/mcp", "http://localhost:8123/mcp"),
     # O mesmo nome na mesma porta, com o outro esquema: o mesmo servico.
     ("https://cobranca.exemplo.teste/mcp", "http://cobranca.exemplo.teste:443/mcp"),
     ("http://127.0.0.1:8123/mcp", "https://127.0.0.1:8123/mcp"),
@@ -289,6 +343,7 @@ EM_OUTRO_LUGAR: Final = (
     ("http://localhost:8123/mcp", "http://localhost.exemplo.teste:8123/mcp"),
     ("http://10.0.0.5:8123/mcp", "http://[::ffff]:8123/mcp"),
     ("http://10.0.0.5:8123/mcp", "http://[::ffff:0:a00:5]:8123/mcp"),
+    ("http://10.0.0.5:8123/mcp", "http://[64:ff9b::1:a00:5]:8123/mcp"),
 )
 """Producao e alvo em lugares diferentes: a tela e o banco deixam passar."""
 
@@ -313,6 +368,12 @@ def test_forma_de_conexao() -> None:
     assert d.forma_de_conexao("https://Cobranca\u3002Exemplo.TESTE./a//b/") == ("cobranca.exemplo.teste", 443, "/a/b")
     assert d.forma_de_conexao("http://0x0a000005:0080/mcp") == ("10.0.0.5", 80, "/mcp")
     assert d.forma_de_conexao("http://[::ffff:127.0.0.1]:8123") == ("localhost", 8123, "")
+    assert d.forma_de_conexao("http://[64:ff9b::10.0.0.5]:8123/mcp") == ("10.0.0.5", 8123, "/mcp")
+    assert d.forma_de_conexao("http://[64:ff9b::7f00:2]:8123") == ("localhost", 8123, "")
+    assert d.forma_de_conexao("http://[64:ff9b::1:a00:5]/") == ("64:ff9b::1:a00:5", 80, "")
+    # O 6to4 e o Teredo de 10.0.0.5 valem como IPv6 (o residuo escrito em ``_ipv6_com_ipv4_dentro``).
+    assert d.forma_de_conexao("http://[2002:a00:5::1]:8123/mcp") == ("2002:a00:5::1", 8123, "/mcp")
+    assert d.forma_de_conexao("http://[2001::f5ff:fffa]/") == ("2001::f5ff:fffa", 80, "")
     assert d.forma_de_conexao("http://cobran\u00e7a.exemplo:8123/") == ("xn--cobrana-zxa.exemplo", 8123, "")
     assert d.forma_de_conexao("http://\u2603.exemplo/mcp") is None  # o IDNA recusa: o cliente nao conecta
     assert d.forma_de_conexao("https://\uff23obranca.exemplo/mcp") is None

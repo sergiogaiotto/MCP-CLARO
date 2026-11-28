@@ -14,8 +14,19 @@ Rotas internas (nunca expostas ao portao):
   resposta" do servidor (critica A5). O log dessa falha leva so o tipo do erro;
 - ``POST /interno/revisao_servidor``: conclusao da revisao de um servidor de terceiros pelo ADMIN (texto que o
   banco nao guarda, com caractere nulo ou com um pedaco de par UTF-16 sozinho, e pedido invalido: 400);
-- ``POST /interno/chaves``: guarda uma chave cifrada (vinda da autorizacao da pessoa ou do ADMIN);
-- ``POST /interno/autorizacao/*``: autorizacao OAuth por pessoa (``despachante.autorizacao``).
+- ``POST /interno/chaves``: guarda uma chave cifrada do ADMIN, de um tipo da lista fechada
+  ``contrato.TIPOS_DE_CHAVE_DO_ADMIN`` (``acesso``, o padrao; ``declaracoes``; ``teste_selo``, a chave da bateria do
+  selo). Outro tipo e 400, nunca ``acesso`` no lugar dele (critica M11): a chave de teste nunca sobrescreve a de
+  producao. A de leitura das declaracoes e a de teste sao do sistema (sem programa);
+- ``POST /interno/autorizacao/*``: autorizacao OAuth por pessoa (``despachante.autorizacao``);
+- ``POST /interno/selo/consultar`` (``contrato.ROTA_CONSULTAR``): a consulta ao proprio sistema, pedida pelas rotinas,
+  com ``{"operacao_id": "<uuid>"}`` e nada mais no corpo (``selo.consulta``). O despachante confere pelo banco se ja e
+  a vez: 200 com o desfecho, 404 ``sem_envio``, 409 ``nada_a_perguntar``, e 503 ``conferencia_nao_feita`` quando a
+  falha e do MCP-CLARO no banco (nada gravado), como as declaracoes (contrato K5).
+
+Fase 4: duas tarefas do despachante cuidam do aviso de bloqueio (``selo.consulta.Perguntador``): uma deriva os avisos
+dos comprovantes novos e outra os manda, a cada ``OUTBOX_SWEEP_SECONDS``. Com varias copias do papel no ar, cada aviso
+sai uma vez por tentativa (a vez e reservada no banco antes de chamar).
 
 Nenhuma rota ``/interno/*`` recebe texto que o banco nao guarda (``_texto_valido``): um texto de primeiro nivel do
 corpo com caractere nulo (U+0000) ou com um pedaco de par UTF-16 sozinho (``\\ud800``, que o JSON aceita) e pedido
@@ -72,6 +83,8 @@ from mcp_claro.ligacao.ponto import Ligacao
 from mcp_claro.ligacao.sala_cliente import ClienteSala
 from mcp_claro.logs import logger
 from mcp_claro.saida.despachante import PortaDeSaida
+from mcp_claro.selo import contrato
+from mcp_claro.selo.consulta import NadaAPerguntar, Perguntador, SemEnvio
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
 from mcp_claro.visitas.tls import contexto_do_despachante
@@ -196,6 +209,28 @@ async def _conferir_continuidade_na_partida(p: Parametros, engine: AsyncEngine) 
     log.info("continuidade", desfecho=str(getattr(resultado, "desfecho", resultado)))
 
 
+DONO_DA_CHAVE: Final = {
+    "declaracoes": "de leitura das declaracoes",
+    "teste_selo": "de teste do selo",
+}
+"""O dono da chave na linha ``chave_guardada`` do extrato (critica M11). ``acesso``: ``programa`` (com o aplicativo)
+ou ``compartilhada``, como antes."""
+
+
+async def rodar_avisos_de_bloqueio(perguntador: Perguntador, intervalo: float) -> None:
+    """As tarefas do aviso de bloqueio (critica A1): deriva os avisos dos comprovantes novos e manda os pendentes, a
+    cada ``intervalo`` segundos, ate ser cancelada. Uma falha (o banco fora, por exemplo) so espera a proxima volta."""
+    while True:
+        try:
+            await perguntador.derivar_avisos()
+            await perguntador.avisar_bloqueios()
+        except asyncio.CancelledError:
+            raise
+        except Exception as erro:  # noqa: BLE001 - a tarefa nunca morre por uma volta que falhou
+            log.warning("avisos_de_bloqueio_falharam", erro=type(erro).__name__)
+        await asyncio.sleep(intervalo)
+
+
 async def _parar_tarefa(tarefa: asyncio.Task[None]) -> None:
     tarefa.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -223,6 +258,7 @@ def criar_app_despachante(
         cifra = do_cofre
     ambiente = str(p.APP_ENV)
     terceiros_ligados = bool(p.FEATURE_PHASE3_THIRD_PARTY)
+    selos_ligados = p.FEATURE_PHASE4_BADGES is True
     despachante = Despachante(
         engine,
         cifra,
@@ -232,6 +268,7 @@ def criar_app_despachante(
         local_para_terceiro=local_para_terceiro,
         liberar_locais=liberar_locais,
         terceiros_ligados=terceiros_ligados,
+        selos_ligados=selos_ligados,
     )
     porta = PortaDeSaida(
         engine,
@@ -241,11 +278,25 @@ def criar_app_despachante(
         acoes_de_programas=p.PROGRAM_ACTIONS_ENABLED,
         limite_exige_passkey=p.FEATURE_PASSKEY,
         terceiros_ligados=terceiros_ligados,
+        selos_ligados=selos_ligados,
         ligacao=despachante.ligacao,
         ambiente=ambiente,
         liberar_locais=liberar_locais,
         conferir_cofre=float(p.VAULT_CHECK_SECONDS),
         emails_admin=p.NOTIFY_ADMIN_EMAILS,
+    )
+    perguntador = Perguntador(
+        engine,
+        cifra,
+        despachante.ligacao,
+        maximo=int(p.BADGE_LOOKUP_MAX_ATTEMPTS),
+        prazo=float(p.BADGE_LOOKUP_TIMEOUT_SECONDS),
+        prazo_envio=float(p.RESPONSE_MAX_WAIT_SECONDS),
+        falhas_para_retirar=int(p.BADGE_LOOKUP_FAILS_TO_WITHDRAW),
+        tentativas_do_aviso=int(p.BADGE_BLOCK_NOTICE_ATTEMPTS),
+        emails_admin=tuple(p.NOTIFY_ADMIN_EMAILS),
+        ambiente=ambiente,
+        liberar_locais=liberar_locais,
     )
 
     async def ler(pedido: Request) -> JSONResponse:
@@ -350,23 +401,50 @@ def criar_app_despachante(
         quem = corpo.get("quem") or "admin"
         if not _texto_valido(quem):
             return _pedido_invalido()  # vai ao extrato (jsonb)
+        tipo = corpo.get("tipo") or "acesso"
+        if tipo not in contrato.TIPOS_DE_CHAVE_DO_ADMIN:
+            # Critica M11: um tipo fora da lista fechada nunca vira "acesso" (a chave de producao do sistema).
+            return JSONResponse({"motivo": "tipo_de_chave", "mensagem": "tipo de chave desconhecido"}, status_code=400)
+        if tipo != "acesso" and (aplicativo_id is not None or corpo.get("aplicativo_id")):
+            return JSONResponse(
+                {"motivo": "tipo_de_chave", "mensagem": "esta chave e do sistema, nao de um programa"}, status_code=400
+            )
         async with engine.begin() as c:
             existe = (await c.execute(text("SELECT 1 FROM sistemas WHERE id = :s"), {"s": sistema_id})).first()
             if existe is None:  # sem isto, a cifra (origem) ou a chave estrangeira davam erro 500
                 return JSONResponse({"mensagem": "sistema desconhecido"}, status_code=404)
-            tipo = "declaracoes" if corpo.get("tipo") == "declaracoes" else "acesso"
             await chaves.guardar(
                 c, cifra, sistema_id=sistema_id, segredo=segredo, aplicativo_id=aplicativo_id, tipo=tipo
             )
+            dono = DONO_DA_CHAVE.get(tipo) or ("programa" if aplicativo_id else "compartilhada")
             await registrar(
                 c,
                 papel="despachante",
                 tipo="chave_guardada",
-                campos={"dono": "programa" if aplicativo_id else "compartilhada", "quem": quem[:80]},
+                campos={"dono": dono, "quem": quem[:80]},
                 sistema_id=sistema_id,
                 aplicativo_id=aplicativo_id,
+                dados={"tipo": tipo},
             )
         return JSONResponse({"guardada": True})
+
+    async def consultar_selo(pedido: Request) -> JSONResponse:
+        """``contrato.ROTA_CONSULTAR``: so ``operacao_id`` no corpo. O despachante nao confia em quem chama (critica
+        M7): confere tudo pelo banco antes de perguntar."""
+        corpo = await _corpo(pedido)
+        operacao_id = _uuid(corpo.get("operacao_id"))
+        if operacao_id is None or set(corpo) != {"operacao_id"} or not isinstance(corpo.get("operacao_id"), str):
+            return _pedido_invalido()
+        try:
+            desfecho = await perguntador.consultar(operacao_id)
+        except SemEnvio:
+            return JSONResponse({"motivo": "sem_envio"}, status_code=404)
+        except NadaAPerguntar:
+            return JSONResponse({"motivo": "nada_a_perguntar"}, status_code=409)
+        except FALHA_DO_BANCO as erro:
+            log.warning("consulta_sem_banco", erro=type(erro).__name__)
+            return JSONResponse({"motivo": CONFERENCIA_NAO_FEITA, "mensagem": MENSAGEM_SEM_BANCO}, status_code=503)
+        return JSONResponse(desfecho.como_json())
 
     async def saude(_: Request) -> JSONResponse:
         return JSONResponse({"papel": "despachante", "versao": __version__, "mcp": VERSAO_MCP, "vivo": True})
@@ -396,6 +474,10 @@ def criar_app_despachante(
             # banco voltou de um backup. Varias copias do papel podem subir; so uma envia por vez.
             tarefa = asyncio.create_task(porta.rodar(), name="porta-de-saida")
             pilha.push_async_callback(_parar_tarefa, tarefa)
+            avisos = asyncio.create_task(
+                rodar_avisos_de_bloqueio(perguntador, float(p.OUTBOX_SWEEP_SECONDS)), name="avisos-de-bloqueio"
+            )
+            pilha.push_async_callback(_parar_tarefa, avisos)
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 
@@ -405,6 +487,7 @@ def criar_app_despachante(
         Route("/interno/declaracoes", declaracoes, methods=["POST"]),
         Route("/interno/revisao_servidor", revisao_servidor, methods=["POST"]),
         Route("/interno/chaves", guardar_chave, methods=["POST"]),
+        Route(contrato.ROTA_CONSULTAR, consultar_selo, methods=["POST"]),
         *rotas_autorizacao(
             engine, cifra, ambiente=ambiente, liberar_locais=liberar_locais, terceiros_ligados=terceiros_ligados
         ),
@@ -416,4 +499,5 @@ def criar_app_despachante(
     # Para as provas: o despachante e a porta de saida montados aqui (a mesma ligacao nos dois).
     app.state.despachante = despachante
     app.state.porta = porta
+    app.state.perguntador = perguntador
     return app

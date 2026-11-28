@@ -7,16 +7,27 @@ B8 e B9). Esta e a referencia do G3:
 - cada modo de ``selo_mentiroso`` falha exatamente os casos de ``selo_mentiroso.CASOS_QUE_FALHAM`` (com as acoes de
   ``selo_mentiroso.ACOES_DO_MODO``), e todo caso de ``contrato.CASOS`` e falhado por pelo menos um modo (ou esta em
   ``selo_mentiroso.CASOS_SEM_MODO``, com a razao); o ``recusa_mas_aplica`` aplica em cada caminho em que o honesto
-  recusa (``CAMINHOS_DA_RECUSA``).
+  recusa (``CAMINHOS_DA_RECUSA``);
+- dentro de cada caso, a bateria julga por partes (``selo_mentiroso.PARTES``, todas avaliadas, sem curto-circuito), e
+  cada modo de ``selo_mentiroso.PARTES_FORCADAS`` falha o caso so pela parte dita, em toda ferramenta em que falha.
 
 A bateria daqui e pequena e so de caixa-preta, como a do desenho: chama o duble pelo cliente fixado do MCP-CLARO
 (``cliente.chamar_ferramenta`` com ``chave_operacao``), le o rastro pela leitura declarada e julga cada caso pelo
 contrato (``mcp_claro.selo.contrato``). So o C-2.6a sai por um socket cru, que manda o pedido inteiro e fecha a
 conexao logo depois, sem esperar a resposta (critica A3; no produto, ``selo/alvo.py`` do G3). Ela nao e a bateria do
-produto (G3, ``selo/bateria.py``): serve para provar que os dubles fazem o que a tabela diz. Por isso pode usar a rota
-de controle ``/contagem`` do duble para esperar que ele recebeu a chamada antes de consultar (C-2.6a e C-2.6b): sem
-isso, sob carga, a consulta pode chegar antes da chamada e mudar o que o caso mede. Todo endereco de duble sai de
+produto (G3, ``selo/bateria.py``): serve para provar que os dubles fazem o que a tabela diz. Por isso pode usar as
+rotas de controle do duble (``Controle``): ``/contagem`` para esperar que ele recebeu a chamada antes de consultar
+(C-2.6a e C-2.6b; sem isso, sob carga, a consulta pode chegar antes da chamada e mudar o que o caso mede) e para
+esperar o fim dos efeitos adiados (C-3.6b), e ``/soltar`` para terminar a escrita lenta depois da consulta de
+durante (C-2.6b). As duas ultimas tiram a espera do relogio sem mudar o que o caso mede: o efeito que o aviso de fato
+parou termina na hora; o que ele nao parou (``ignora_bloqueio``), e o que o sistema poe mesmo dizendo ``parada``
+(``escreve_escondido``), so termina no fim dos segundos declarados. A bateria le o rastro do C-3.6b so depois desse
+fim: lido logo depois do aviso, ele ainda nao mostra o efeito do ``escreve_escondido``. Todo endereco de duble sai de
 ``tests.apoio_selos.endereco_de_duble``.
+
+Em todo modo, a bateria de referencia nunca escreve na producao do duble (critica A4): no modo ambiente, a producao
+so ve a consulta de controle e o ``selo_alvo``, com a chave das declaracoes, e nenhuma escrita aplicada; no de
+ferramentas de teste, nenhuma acao real (``_producao_sem_acao``).
 """
 
 from __future__ import annotations
@@ -156,6 +167,34 @@ async def esperar_a_chegada(contar: Callable[[], Awaitable[int]], antes: int) ->
             await anyio.sleep(0.02)
 
 
+@dataclass
+class Controle:
+    """O que a bateria de referencia le e pede pelas rotas de controle do duble, no lado do alvo (``teste`` no modo
+    ambiente, ``producao`` no de ferramentas de teste). A bateria do produto nao tem estas rotas: espera pelo relogio
+    (``selo/alvo.py``, G3). Aqui elas tiram a espera do relogio sem mudar o que cada caso mede."""
+
+    duble: Duble
+    lado: str
+
+    async def chegadas(self, nome: str) -> int:
+        """Quantas chamadas de ``nome`` o alvo recebeu."""
+        return await self.duble.chamadas(self.lado, nome)
+
+    async def esperar_os_adiados(self, prazo: float) -> None:
+        """Espera o alvo terminar os efeitos adiados: o que o aviso parou termina na hora; o que ele nao parou, e o
+        que o sistema poe mesmo parado (``escreve_escondido``), no fim dos ``segundos`` declarados (e entao o efeito ja
+        aconteceu)."""
+        with anyio.fail_after(prazo):
+            while True:  # como em esperar_a_chegada: a contagem so se le pela rota de controle
+                if not (await self.duble.controle("/contagem"))[self.lado]["adiados"]:
+                    return
+                await anyio.sleep(0.02)
+
+    async def soltar(self, numero: str) -> None:
+        """Termina agora a espera da escrita lenta com ``numero`` (a escrita acontece do mesmo jeito)."""
+        await self.duble.controle("/soltar", {"operacao": numero})
+
+
 class ChamadaQueDemora:
     """Segura cada ``tools/call`` de uma ferramenta de acao ``segundos`` antes de entrega-lo ao duble, como numa
     maquina carregada: a chamada chega ao sistema depois de quem a mandou ja ter seguido em frente."""
@@ -263,12 +302,15 @@ class Bateria:
     alvo: Lado
     declaracao: Mapping[str, Any]
     nivel: int
-    chegadas: Callable[[str], Awaitable[int]]
-    """Quantas chamadas de uma ferramenta o alvo recebeu (rota de controle do duble)."""
+    controle: Controle
+    """As rotas de controle do duble, no lado do alvo."""
     itens: list[dict[str, Any]] = field(default_factory=list)
+    partes: dict[tuple[str, str | None], dict[str, bool]] = field(default_factory=dict)
+    """O resultado de cada parte de cada caso julgado (caso, ferramenta): as de ``selo_mentiroso.PARTES``."""
     marcas: list[bool] = field(default_factory=list)
     recibos_ruins: dict[str, int] = field(default_factory=dict)
-    alvos_declarados: bool = False
+    producao_diz_producao: bool = False
+    alvo_diz_teste: bool = False
 
     @property
     def de_teste(self) -> bool:
@@ -287,8 +329,23 @@ class Bateria:
             }
         )
 
-    def _julgar(self, caso: str, ferramenta: str | None, ok: bool) -> None:
-        self._item(caso, ferramenta, "cumpriu" if ok else "falhou")
+    def _julgar(
+        self,
+        caso: str,
+        ferramenta: str | None,
+        partes: Mapping[str, bool],
+        *,
+        sem_falha: str = "cumpriu",
+        razao: str | None = None,
+    ) -> None:
+        """Julga o caso pelas partes (``selo_mentiroso.PARTES[caso]``, todas, sem curto-circuito): ``falhou`` se uma
+        falha; senao ``sem_falha`` (``cumpriu``, ou o maximo que o metodo permite, com a razao)."""
+        assert set(partes) == set(selo_mentiroso.PARTES[caso]), (caso, sorted(partes))
+        self.partes[(caso, ferramenta)] = dict(partes)
+        if all(partes.values()):
+            self._item(caso, ferramenta, sem_falha, razao)
+        else:
+            self._item(caso, ferramenta, "falhou")
 
     async def consultar(self, numero: str, lado: Lado | None = None) -> tuple[str | None, Any]:
         """O estado que a consulta diz, ou None se ela nao respondeu ou saiu da forma do contrato."""
@@ -305,15 +362,17 @@ class Bateria:
             return None, None
         if dados.get("operacao") != numero or dados.get("estado") not in contrato.ESTADOS:
             return None, None
-        depois = dados.get("depois")
-        if depois is not None:
-            if not isinstance(depois, list) or len(depois) > contrato.MAX_EVENTOS_DEPOIS:
+        if "depois" not in dados:
+            # No nivel 3, depois e exigido, mesmo vazio (desenho 2.2), como em respostas.conferir_consulta.
+            return (None, None) if self.nivel >= 3 else (str(dados["estado"]), None)
+        depois = dados["depois"]
+        if not isinstance(depois, list) or len(depois) > contrato.MAX_EVENTOS_DEPOIS:
+            return None, None
+        for evento in depois:
+            if not isinstance(evento, dict) or set(evento) != {"evento", "em"}:
                 return None, None
-            for evento in depois:
-                if not isinstance(evento, dict) or set(evento) != {"evento", "em"}:
-                    return None, None
-                if evento["evento"] not in contrato.EVENTOS_DEPOIS or not isinstance(evento["em"], str):
-                    return None, None
+            if evento["evento"] not in contrato.EVENTOS_DEPOIS or not isinstance(evento["em"], str):
+                return None, None
         return str(dados["estado"]), depois
 
     async def _acao(self, nome: str, argumentos: Mapping[str, Any], numero: str, **kw: Any) -> cliente.Resposta:
@@ -348,22 +407,34 @@ class Bateria:
         self._julgar(
             "C-0.1",
             None,
-            all(n in p and contrato.definicao_confere(p[n]) for p in por_nome.values() for n in do_nivel),
+            {
+                "listadas": all(n in p for p in por_nome.values() for n in do_nivel),
+                "esquemas": all(
+                    contrato.definicao_confere(p[n]) for p in por_nome.values() for n in do_nivel if n in p
+                ),
+            },
         )
         declaradas = list(self.declaracao["ferramentas"])
-        if self.de_teste:
-            producao = por_nome["producao"]
-            ok = all(
-                (t := self.declaracao["ferramentas"][n]["ferramenta_de_teste"]) in producao
-                and t not in declaradas
-                and producao[t]["inputSchema"] == producao[n]["inputSchema"]
-                for n in declaradas
-            )
-        else:
-            ok = all(por_nome["producao"].get(n) == por_nome["alvo"].get(n) is not None for n in declaradas)
-        self._julgar("C-0.2", None, ok)
+        producao = por_nome["producao"]
+        de_teste = (
+            [(n, self.declaracao["ferramentas"][n]["ferramenta_de_teste"]) for n in declaradas] if self.de_teste else []
+        )
+        self._julgar(
+            "C-0.2",
+            None,
+            {
+                "mesmas_acoes": self.de_teste
+                or all(producao.get(n) == por_nome["alvo"].get(n) is not None for n in declaradas),
+                "teste_listada": all(t in producao for _, t in de_teste),
+                "nome_proprio": all(t not in declaradas for _, t in de_teste),
+                "mesmo_esquema": all(
+                    t not in producao or producao[t]["inputSchema"] == (producao.get(n) or {}).get("inputSchema")
+                    for n, t in de_teste
+                ),
+            },
+        )
         estado, _ = await self.consultar(_novo(), self.producao)
-        self._julgar("C-0.3", None, estado == "nao_recebida")
+        self._julgar("C-0.3", None, {"nao_recebida": estado == "nao_recebida"})
 
         # C-0.4, antes da primeira escrita: a producao se declara de producao e, no modo ambiente, o alvo de teste se
         # declara de teste. No modo de ferramentas de teste, a marca de cada resposta fecha o caso no fim.
@@ -371,15 +442,14 @@ class Bateria:
             r = await lado.chamar(contrato.FERRAMENTA_ALVO, {}, prazo=PRAZO_DO_CONTRATO)
             return (r.resultado.structured_content or {}).get("alvo") if _sucesso(r) else None  # type: ignore[union-attr]
 
-        self.alvos_declarados = await alvo_de(self.producao) == "producao"
-        if not self.de_teste:
-            self.alvos_declarados = self.alvos_declarados and await alvo_de(self.alvo) == "teste"
+        self.producao_diz_producao = await alvo_de(self.producao) == "producao"
+        self.alvo_diz_teste = self.de_teste or await alvo_de(self.alvo) == "teste"
 
     def alvos(self) -> None:
-        ok = self.alvos_declarados
-        if self.de_teste:
-            ok = ok and bool(self.marcas) and all(self.marcas)
-        self._julgar("C-0.4", None, ok)
+        marcas = not self.de_teste or (bool(self.marcas) and all(self.marcas))
+        self._julgar(
+            "C-0.4", None, {"producao": self.producao_diz_producao, "alvo": self.alvo_diz_teste, "marcas": marcas}
+        )
 
     # --- casos por ferramenta -----------------------------------------------------------------------------------
 
@@ -394,7 +464,7 @@ class Bateria:
         k1 = _novo()
         r1 = await self._acao(chamado, args, k1)
         subiu = await self.rastro(rastro) - antes
-        self._julgar("C-2.1", nome, _sucesso(r1) and subiu == 1)
+        self._julgar("C-2.1", nome, {"aceita": _sucesso(r1), "sobe_um": subiu == 1})
         recibo1 = _recibo(r1, k1)
         lista_depois = await self.lista_do_rastro(rastro)
         criados1 = None
@@ -403,16 +473,24 @@ class Bateria:
                 json.dumps(x, sort_keys=True) for x in lista_antes
             }
 
-        # C-2.2a: a repeticao nao aplica, nao e erro se a primeira nao foi, e a consulta diz concluida.
+        # C-2.2a: a repeticao nao aplica, nao e erro se a primeira nao foi, e a consulta diz concluida. No nivel 3, o
+        # recibo da repeticao diz repetida e traz os mesmos objetos.
         antes = await self.rastro(rastro)
         r2 = await self._acao(chamado, args, k1)
-        ok = await self.rastro(rastro) == antes and (not _sucesso(r1) or _sucesso(r2))
-        ok = ok and (await self.consultar(k1))[0] == "concluida"
+        partes = {
+            "rastro": await self.rastro(rastro) == antes,
+            "sem_erro": not _sucesso(r1) or _sucesso(r2),
+            "consulta": (await self.consultar(k1))[0] == "concluida",
+            "recibos": True,
+            "repetida": True,
+            "objetos": True,
+        }
         if self.nivel == 3:
             recibo2 = _recibo(r2, k1)
-            ok = ok and recibo1 is not None and recibo2 is not None and recibo2["repetida"] is True
-            ok = ok and recibo2 is not None and recibo1 is not None and recibo2["objetos"] == recibo1["objetos"]
-        self._julgar("C-2.2a", nome, ok)
+            partes["recibos"] = recibo1 is not None and recibo2 is not None
+            partes["repetida"] = recibo2 is None or recibo2["repetida"] is True
+            partes["objetos"] = recibo1 is None or recibo2 is None or recibo2["objetos"] == recibo1["objetos"]
+        self._julgar("C-2.2a", nome, partes)
 
         # C-2.2b: numero novo e escrita nova (ou recusada pelo proprio merito).
         if idempotente:
@@ -421,12 +499,13 @@ class Bateria:
             antes = await self.rastro(rastro)
             r = await self._acao(chamado, args, _novo())
             subiu = await self.rastro(rastro) - antes
-            self._julgar("C-2.2b", nome, (_sucesso(r) and subiu == 1) or (_recusada(r) and subiu == 0))
+            ok = (_sucesso(r) and subiu == 1) or (_recusada(r) and subiu == 0)
+            self._julgar("C-2.2b", nome, {"aplicada_ou_recusada": ok})
 
         # C-2.2c: o mesmo numero com outros argumentos e recusado, sem aplicar.
         antes = await self.rastro(rastro)
         r = await self._acao(chamado, e["argumentos_outros"], k1)
-        self._julgar("C-2.2c", nome, _recusada(r) and await self.rastro(rastro) == antes)
+        self._julgar("C-2.2c", nome, {"recusada": _recusada(r), "rastro": await self.rastro(rastro) == antes})
 
         # C-2.2d: pares simultaneos com o mesmo numero; aplicar duas vezes reprova.
         antes = await self.rastro(rastro)
@@ -435,66 +514,79 @@ class Bateria:
             for numero in numeros:
                 for _ in range(2):
                     tg.start_soon(self._acao, chamado, args, numero)
-        if await self.rastro(rastro) - antes > PARES:
-            self._item("C-2.2d", nome, "falhou")
-        else:
-            self._item("C-2.2d", nome, "nao_testado", "poucos_pares")
+        dobrou = await self.rastro(rastro) - antes > PARES
+        self._julgar("C-2.2d", nome, {"nao_dobrou": not dobrou}, sem_falha="nao_testado", razao="poucos_pares")
 
         # C-2.3: o pedido de dados nao pos nada em efeito.
         if "pede_dados" in e:
             antes = await self.rastro(rastro)
             r = await self._acao(chamado, e["pede_dados"]["argumentos"], _novo())
-            ok = isinstance(r.resultado, types.InputRequiredResult) and await self.rastro(rastro) == antes
-            self._item("C-2.3", nome, "nao_observado" if ok else "falhou")
+            partes = {
+                "input_required": isinstance(r.resultado, types.InputRequiredResult),
+                "rastro": await self.rastro(rastro) == antes,
+            }
+            self._julgar("C-2.3", nome, partes, sem_falha="nao_observado")
         else:
             self._item("C-2.3", nome, "nao_se_aplica", "sem_condicao_declarada")
 
         # C-2.4a: a consulta diz concluida do aplicado e nao_recebida do nunca mandado, sem mudar o rastro.
         antes = await self.rastro(rastro)
-        ok = (await self.consultar(k1))[0] == "concluida" and (await self.consultar(_novo()))[0] == "nao_recebida"
-        self._julgar("C-2.4a", nome, ok and await self.rastro(rastro) == antes)
+        concluida = (await self.consultar(k1))[0] == "concluida"
+        nao_recebida = (await self.consultar(_novo()))[0] == "nao_recebida"
+        partes = {"concluida": concluida, "nao_recebida": nao_recebida, "rastro": await self.rastro(rastro) == antes}
+        self._julgar("C-2.4a", nome, partes)
 
         # C-2.4b: a chamada recusada e a consulta do numero dela.
         await self._acao(chamado, e["argumentos_recusados"], k3 := _novo())
-        self._julgar("C-2.4b", nome, (await self.consultar(k3))[0] in ("recusada", "nao_recebida"))
+        estado_k3 = (await self.consultar(k3))[0]
+        self._julgar("C-2.4b", nome, {"recusada_ou_nao_recebida": estado_k3 in ("recusada", "nao_recebida")})
 
         # C-2.5: o numero dado como nao recebido fica queimado.
         k4 = _novo()
         primeiro = (await self.consultar(k4))[0]
         antes = await self.rastro(rastro)
         r = await self._acao(chamado, args, k4)
-        self._julgar("C-2.5", nome, primeiro == "nao_recebida" and _recusada(r) and await self.rastro(rastro) == antes)
+        partes = {
+            "nao_recebida": primeiro == "nao_recebida",
+            "recusada": _recusada(r),
+            "rastro": await self.rastro(rastro) == antes,
+        }
+        self._julgar("C-2.5", nome, partes)
 
         # C-2.6a: a escrita com a conexao cortada logo depois de mandar (critica A3).
         antes = await self.rastro(rastro)
         k6 = _novo()
-        chegaram = await self.chegadas(chamado)
+        chegaram = await self.controle.chegadas(chamado)
         await self.alvo.mandar_e_cortar(chamado, args, k6)
-        await esperar_a_chegada(lambda: self.chegadas(chamado), chegaram)
+        await esperar_a_chegada(lambda: self.controle.chegadas(chamado), chegaram)
         await anyio.sleep(DEPOIS_DO_CORTE)
         na_hora = (await self.consultar(k6))[0]
         await anyio.sleep(INTERVALO_DA_CONSULTA)
         depois_do_intervalo = (await self.consultar(k6))[0]
         aplicada = await self.rastro(rastro) - antes
         respostas = (na_hora, depois_do_intervalo)
-        ok = all(x is not None for x in respostas)
-        if aplicada:
-            ok = ok and all(x in ("concluida", "em_andamento", "desconhecido") for x in respostas)
         antes_da_repeticao = await self.rastro(rastro)
         await self._acao(chamado, args, k6)
-        self._julgar("C-2.6a", nome, ok and await self.rastro(rastro) == antes_da_repeticao)
+        partes = {
+            "responderam": all(x is not None for x in respostas),
+            "nunca_nao_recebida": not aplicada
+            or all(x is None or x in ("concluida", "em_andamento", "desconhecido") for x in respostas),
+            "repeticao_nao_aplica": await self.rastro(rastro) == antes_da_repeticao,
+        }
+        self._julgar("C-2.6a", nome, partes)
 
         # C-2.6b: a consulta durante a escrita lenta.
         if "escrita_lenta" in e:
             lenta = e["escrita_lenta"]
             k7 = _novo()
             durante: list[str | None] = []
-            chegaram = await self.chegadas(chamado)
+            chegaram = await self.controle.chegadas(chamado)
             async with anyio.create_task_group() as tg:
                 tg.start_soon(lambda: self._acao(chamado, lenta["argumentos"], k7, prazo=float(lenta["segundos"]) + 5))
-                await esperar_a_chegada(lambda: self.chegadas(chamado), chegaram)
+                await esperar_a_chegada(lambda: self.controle.chegadas(chamado), chegaram)
                 durante.append((await self.consultar(k7))[0])
-            self._julgar("C-2.6b", nome, durante[0] in ("em_andamento", "desconhecido"))
+                await self.controle.soltar(k7)  # medido o durante, a escrita termina sem esperar o relogio
+            self._julgar("C-2.6b", nome, {"durante": durante[0] in ("em_andamento", "desconhecido")})
         else:
             self._item("C-2.6b", nome, "nao_se_aplica", "sem_condicao_declarada")
 
@@ -505,7 +597,8 @@ class Bateria:
             await self._acao(chamado, args, _novo())
             antes = await self.rastro(conteudo)
             await self._acao(chamado, args, _novo())
-            self._item("C-2.7", nome, "nao_observado" if await self.rastro(conteudo) == antes else "falhou")
+            nao_muda = await self.rastro(conteudo) == antes
+            self._julgar("C-2.7", nome, {"nao_muda": nao_muda}, sem_falha="nao_observado")
         else:
             self._item("C-2.7", nome, "nao_se_aplica", "sem_condicao_declarada")
 
@@ -531,15 +624,19 @@ class Bateria:
         # C-3.1a: o sucesso veio com o efeito lido de volta.
         antes = await self.rastro(rastro)
         r = await self._acao(chamado, args, _novo())
-        self._julgar("C-3.1a", nome, _sucesso(r) and await self.rastro(rastro) - antes == 1)
+        self._julgar("C-3.1a", nome, {"aceita": _sucesso(r), "sobe_um": await self.rastro(rastro) - antes == 1})
 
         # C-3.1b: a recusa volta como erro, com o recibo recusada.
         antes = await self.rastro(rastro)
         k8 = _novo()
         r = await self._acao(chamado, e["argumentos_recusados"], k8)
         recibo = _recibo(r, k8)
-        ok = _recusada(r) and recibo is not None and recibo["estado"] == "recusada"
-        self._julgar("C-3.1b", nome, ok and await self.rastro(rastro) == antes)
+        partes = {
+            "recusada": _recusada(r),
+            "recibo_recusada": recibo is not None and recibo["estado"] == "recusada",
+            "rastro": await self.rastro(rastro) == antes,
+        }
+        self._julgar("C-3.1b", nome, partes)
 
         # C-3.3: varios itens com um ruim.
         if "varios_itens" in e:
@@ -550,7 +647,8 @@ class Bateria:
             aplicados = await self.rastro(rastro) - antes
             recibo = _recibo(r, k9)
             esperado = {"aplicados": aplicados, "nao_aplicados": varios["itens"] - aplicados}
-            self._julgar("C-3.3", nome, _recusada(r) and recibo is not None and recibo.get("itens") == esperado)
+            partes = {"recusada": _recusada(r), "itens": recibo is not None and recibo.get("itens") == esperado}
+            self._julgar("C-3.3", nome, partes)
         else:
             self._item("C-3.3", nome, "nao_se_aplica", "sem_condicao_declarada")
 
@@ -565,15 +663,20 @@ class Bateria:
             independentes = _ponteiro(depois_de_a, c["leitura"]["campo_concorrente"]) == concorrente
             antes = await self.rastro(rastro)
             b = await self._acao(chamado, c["argumentos_concorrente"] | {c["argumento_versao"]: versao}, _novo())
-            ok = _sucesso(a) and independentes and _recusada(b) and await self.rastro(rastro) == antes
-            self._julgar("C-3.4", nome, ok)
+            partes = {
+                "a_aceita": _sucesso(a),
+                "independentes": independentes,
+                "b_recusada": _recusada(b),
+                "rastro": await self.rastro(rastro) == antes,
+            }
+            self._julgar("C-3.4", nome, partes)
         else:
             self._item("C-3.4", nome, "nao_se_aplica", "sem_condicao_declarada")
 
         # C-3.5: a consulta do aplicado traz depois, coerente com o recibo.
         estado, depois = await self.consultar(k1)
         coerente = recibo1 is not None and estado == recibo1["estado"] == "concluida"
-        self._julgar("C-3.5", nome, isinstance(depois, list) and coerente)
+        self._julgar("C-3.5", nome, {"depois": isinstance(depois, list), "coerente": coerente})
 
         # C-3.6a: o aviso com um numero concluido e um nunca mandado; repetido, as mesmas respostas.
         k5, aviso = _novo(), _novo()
@@ -581,16 +684,20 @@ class Bateria:
         primeira = await self.alvo.chamar(contrato.FERRAMENTA_BLOQUEIO, pedido, prazo=PRAZO_DO_CONTRATO)
         segunda = await self.alvo.chamar(contrato.FERRAMENTA_BLOQUEIO, pedido, prazo=PRAZO_DO_CONTRATO)
         esperado_aviso = [{"operacao": k1, "estado": "concluida"}, {"operacao": k5, "estado": "nao_recebida"}]
-        ok = _sucesso(primeira) and _sucesso(segunda)
-        if ok:
-            dados1 = primeira.resultado.structured_content  # type: ignore[union-attr]
-            dados2 = segunda.resultado.structured_content  # type: ignore[union-attr]
-            ok = dados1 == dados2 and isinstance(dados1, dict) and dados1.get("operacoes") == esperado_aviso
+        dados1 = primeira.resultado.structured_content if _sucesso(primeira) else None  # type: ignore[union-attr]
+        dados2 = segunda.resultado.structured_content if _sucesso(segunda) else None  # type: ignore[union-attr]
         antes = await self.rastro(rastro)
         r = await self._acao(chamado, args, k5)
-        self._julgar("C-3.6a", nome, ok and _recusada(r) and await self.rastro(rastro) == antes)
+        partes = {
+            "estados": isinstance(dados1, dict) and dados1.get("operacoes") == esperado_aviso,
+            "repetido": dados1 is not None and dados2 == dados1,
+            "recusada": _recusada(r),
+            "rastro": await self.rastro(rastro) == antes,
+        }
+        self._julgar("C-3.6a", nome, partes)
 
-        # C-3.6b: o efeito adiado parado pelo aviso.
+        # C-3.6b: o efeito adiado parado pelo aviso. O rastro e lido so depois de passados os segundos declarados (o
+        # fim dos adiados): o escreve_escondido poe o efeito no fim do prazo, dizendo parada.
         if "efeito_adiado" in e:
             adiado = e["efeito_adiado"]
             antes = await self.rastro(rastro)
@@ -603,20 +710,25 @@ class Bateria:
             parou = _sucesso(aviso_b) and (aviso_b.resultado.structured_content or {}).get("operacoes") == [  # type: ignore[union-attr]
                 {"operacao": k10, "estado": "parada"}
             ]
-            await anyio.sleep(float(adiado["segundos"]) + 0.5)
-            ok = recibo is not None and recibo["estado"] == "em_andamento" and parou
-            ok = ok and await self.rastro(rastro) == antes and (await self.consultar(k10))[0] == "parada"
-            self._julgar("C-3.6b", nome, ok)
+            await self.controle.esperar_os_adiados(float(adiado["segundos"]) + PRAZO_DA_CHEGADA)
+            partes = {
+                "recibo_em_andamento": recibo is not None and recibo["estado"] == "em_andamento",
+                "aviso_parada": parou,
+                "rastro": await self.rastro(rastro) == antes,
+                "consulta_parada": (await self.consultar(k10))[0] == "parada",
+            }
+            self._julgar("C-3.6b", nome, partes)
         else:
             self._item("C-3.6b", nome, "nao_se_aplica", "sem_condicao_declarada")
 
         # C-3.2: todo recibo das acoes desta ferramenta tem a forma e combina com o erro; numa criacao (rastro que e
         # uma lista), o recibo da primeira chamada traz o identificador de cada objeto criado, e eles existem.
-        objetos_ok = recibo1 is not None
+        objetos_ok = True
         if recibo1 is not None and criados1 is not None:
             ditos = {json.dumps(o["id"]) for o in recibo1["objetos"]}
             objetos_ok = bool(criados1) and ditos == criados1
-        self._julgar("C-3.2", nome, self.recibos_ruins.get(chamado, 0) == 0 and objetos_ok)
+        recibos_ok = self.recibos_ruins.get(chamado, 0) == 0 and recibo1 is not None
+        self._julgar("C-3.2", nome, {"recibos": recibos_ok, "objetos": objetos_ok})
 
     async def rodar(self) -> list[dict[str, Any]]:
         await self.sistema()
@@ -635,9 +747,35 @@ def aprova(itens: Sequence[Mapping[str, Any]], nivel: int, ferramentas: Sequence
     return contrato.casos_aprovam(itens, list(ferramentas), nivel)
 
 
-async def _testar(
+def _producao_sem_acao(contagem: Mapping[str, Any], *, de_teste: bool, acoes: Sequence[str]) -> None:
+    """O que a producao do duble viu da bateria de referencia (critica A4), pela ``/contagem``. No modo ambiente: so a
+    consulta de controle e o ``selo_alvo``, com a chave das declaracoes, e nenhuma escrita aplicada (o alvo de teste so
+    ve a chave da bateria). No modo de ferramentas de teste: so as ferramentas de teste, as leituras do rastro e as do
+    contrato, nenhuma acao real."""
+    producao = contagem["producao"]["chamadas"]
+    if de_teste:
+        assert not set(producao) & set(selo_nivel2.ACOES), producao
+        assert {a + selo_nivel2.SUFIXO_TESTE for a in acoes} <= set(producao), producao
+        assert set(contagem["producao"]["pessoas"]) == {"bateria", "declaracoes"}
+    else:
+        assert set(producao) == {contrato.FERRAMENTA_CONSULTAR, contrato.FERRAMENTA_ALVO}, producao
+        assert contagem["producao"]["aplicadas"] == {}
+        assert set(contagem["producao"]["pessoas"]) == {"declaracoes"}
+        assert set(contagem["teste"]["pessoas"]) == {"bateria"}
+
+
+def partes_que_falham(bateria: Bateria, caso: str) -> dict[str | None, set[str]]:
+    """Por ferramenta (``None`` num caso de sistema), as partes de ``caso`` que falharam, so onde o caso falhou."""
+    return {
+        f: falharam
+        for (c, f), partes in bateria.partes.items()
+        if c == caso and (falharam := {p for p, ok in partes.items() if not ok})
+    }
+
+
+async def _rodar_bateria(
     duble: Duble, nivel: int, *, modo: str = "ambiente_de_teste", acoes: Sequence[str] = selo_nivel2.ACOES
-) -> list[dict[str, Any]]:
+) -> Bateria:
     """A bateria de referencia no duble: no modo ambiente, o alvo e o endereco de teste; no modo de ferramentas de
     teste, o endereco de producao, com as ferramentas de teste. Nos dois, com a chave da bateria. ``acoes``: as do
     duble, que a declaracao cobre."""
@@ -652,10 +790,16 @@ async def _testar(
         segundos=SEGUNDOS_DECLARADOS,
     )
 
-    async def chegadas(nome: str) -> int:
-        return await duble.chamadas(lado, nome)
+    bateria = Bateria(duble.producao, alvo, dados, nivel, Controle(duble, lado))
+    await bateria.rodar()
+    return bateria
 
-    return await Bateria(duble.producao, alvo, dados, nivel, chegadas).rodar()
+
+async def _testar(
+    duble: Duble, nivel: int, *, modo: str = "ambiente_de_teste", acoes: Sequence[str] = selo_nivel2.ACOES
+) -> list[dict[str, Any]]:
+    """Os itens da bateria de referencia no duble (``_rodar_bateria``)."""
+    return (await _rodar_bateria(duble, nivel, modo=modo, acoes=acoes)).itens
 
 
 # --- O honesto -------------------------------------------------------------------------------------------------
@@ -688,19 +832,7 @@ async def test_duble_de_nivel_3_cumpre_todos_os_casos(ferramentas_de_teste: bool
     assert por_caso[("C-2.2b", "marcar_lido")] == ("nao_se_aplica", "sem_segundo_efeito")
     assert por_caso[("C-2.7", "marcar_lido")] == ("nao_observado", None)
     assert por_caso[("C-2.2d", "enviar_lembrete")] == ("nao_testado", "poucos_pares")
-    producao = contagem["producao"]["chamadas"]
-    if ferramentas_de_teste:
-        # So as ferramentas de teste, as leituras do rastro e as do contrato: nenhuma acao real.
-        assert not set(producao) & set(selo_nivel2.ACOES)
-        assert {a + selo_nivel2.SUFIXO_TESTE for a in selo_nivel2.ACOES} <= set(producao)
-        assert set(contagem["producao"]["pessoas"]) == {"bateria", "declaracoes"}
-    else:
-        # No modo ambiente, a producao so ve a consulta de controle e o selo_alvo, com a chave das declaracoes; o alvo
-        # de teste so ve a chave da bateria.
-        assert set(producao) == {contrato.FERRAMENTA_CONSULTAR, contrato.FERRAMENTA_ALVO}
-        assert contagem["producao"]["aplicadas"] == {}
-        assert set(contagem["producao"]["pessoas"]) == {"declaracoes"}
-        assert set(contagem["teste"]["pessoas"]) == {"bateria"}
+    _producao_sem_acao(contagem, de_teste=ferramentas_de_teste, acoes=selo_nivel2.ACOES)
 
 
 async def test_esquemas_do_kit_tem_titulos_e_conferem_na_forma_essencial() -> None:
@@ -746,10 +878,7 @@ async def test_a_bateria_espera_a_chamada_chegar_antes_de_consultar(
         assert alvo is not None
         dados = selo_nivel2.declaracao(endereco_teste=alvo.url, segundos=SEGUNDOS_DECLARADOS)
 
-        async def chegadas(nome: str) -> int:
-            return await duble.chamadas("teste", nome)
-
-        bateria = Bateria(duble.producao, alvo, dados, 2, chegadas)
+        bateria = Bateria(duble.producao, alvo, dados, 2, Controle(duble, "teste"))
         await bateria.ferramenta("enviar_lembrete")
     por_caso = {i["caso"]: i["resultado"] for i in bateria.itens}
     assert {c for c in ("C-2.6a", "C-2.6b") if por_caso[c] == "falhou"} == falham
@@ -772,11 +901,20 @@ def test_a_tabela_do_mentiroso_cobre_todo_modo_com_casos_do_contrato() -> None:
 
 
 def test_todo_caso_do_contrato_tem_um_modo_que_o_falha() -> None:
-    """Completude da tabela: todo caso de ``contrato.CASOS`` (os obrigatorios dos niveis 2 e 3 e tambem o C-2.2d,
-    que nao pode falhar) e falhado por pelo menos um modo do mentiroso, ou esta em ``CASOS_SEM_MODO`` com a razao. Sem
-    isso, uma bateria que pulasse a conferencia de um caso casaria com a tabela (mutacoes Z1, Z2 e Y14 do
-    verificador). O mesmo vale para cada parte de um caso: o ``recusa_mas_aplica`` obriga a ler o rastro depois de
-    cada recusa, e o ``objeto_omitido`` obriga a conferir que todo objeto criado esta no recibo (mutacoes P1 a P6).
+    """Completude da tabela, por caso e por parte (este teste confere a forma das listas, sem rodar a bateria).
+
+    Por caso: todo caso de ``contrato.CASOS`` (os obrigatorios dos niveis 2 e 3 e tambem o C-2.2d, que nao pode
+    falhar) e falhado por pelo menos um modo do mentiroso, ou esta em ``CASOS_SEM_MODO`` com a razao (mutacoes Z1, Z2
+    e Y14 do verificador).
+
+    Por parte: todo caso tem as suas partes em ``selo_mentiroso.PARTES``, e cada parte esta em ``PARTES_FORCADAS``,
+    com modos que tem o caso na tabela, ou em ``PARTES_SEM_MODO``, com a razao, nunca nas duas. Que a bateria confere
+    exatamente essas partes, ``Bateria._julgar`` confere a cada caso julgado. Que cada modo de ``PARTES_FORCADAS``
+    falha o caso so por aquela parte, em toda ferramenta em que o caso falha, quem confere e
+    ``test_cada_modo_do_mentiroso_falha_os_casos_da_tabela``, rodando o modo: uma bateria que nao confira uma parte
+    forcada deixa o caso passar nesse modo e nao casa com a tabela (mutacoes P1 a P6 e Q do verificador). Uma parte de
+    ``PARTES_SEM_MODO`` nao e forcada: a razao diz por que nenhum modo a pega sozinha.
+
     Os modos sem caso sao exatamente os de ``MODOS_SEM_CASO``, cada um com a razao (o ``compara_token`` pela decisao 1
     do coordenador)."""
     falhados = {c for casos in selo_mentiroso.CASOS_QUE_FALHAM.values() for c in casos}
@@ -793,16 +931,41 @@ def test_todo_caso_do_contrato_tem_um_modo_que_o_falha() -> None:
     assert all(r.strip() for r in selo_mentiroso.MODOS_SEM_CASO.values())
     assert "Decisao 1 do coordenador" in selo_mentiroso.MODOS_SEM_CASO["compara_token"]
 
+    assert set(selo_mentiroso.PARTES) == set(contrato.CASOS_POR_NOME)
+    todas = {(caso, parte) for caso, partes in selo_mentiroso.PARTES.items() for parte in partes}
+    assert all(selo_mentiroso.PARTES.values())
+    assert all(d.strip() for partes in selo_mentiroso.PARTES.values() for d in partes.values())
+    forcadas, sem = set(selo_mentiroso.PARTES_FORCADAS), set(selo_mentiroso.PARTES_SEM_MODO)
+    assert not forcadas & sem
+    assert forcadas | sem == todas
+    for (caso, parte), modos in selo_mentiroso.PARTES_FORCADAS.items():
+        assert modos, (caso, parte)
+        assert len(set(modos)) == len(modos), (caso, parte)
+        for m in modos:
+            assert caso in selo_mentiroso.CASOS_QUE_FALHAM[m], (caso, parte, m)
+    assert all(r.strip() for r in selo_mentiroso.PARTES_SEM_MODO.values())
+
 
 @pytest.mark.parametrize("modo", selo_mentiroso.MODOS)
 async def test_cada_modo_do_mentiroso_falha_os_casos_da_tabela(modo: str) -> None:
-    de_teste = modo == "ferramenta_de_teste_sem_marca"
+    de_teste = modo in selo_mentiroso.MODOS_COM_FERRAMENTAS_DE_TESTE
     acoes = selo_mentiroso.ACOES_DO_MODO[modo]
     async with no_ar(selo_mentiroso.criar, modo=modo, ferramentas_de_teste=de_teste, acoes=acoes) as duble:
-        itens = await _testar(duble, 3, modo="ferramentas_de_teste" if de_teste else "ambiente_de_teste", acoes=acoes)
+        modo_da_declaracao = "ferramentas_de_teste" if de_teste else "ambiente_de_teste"
+        bateria = await _rodar_bateria(duble, 3, modo=modo_da_declaracao, acoes=acoes)
+        contagem = await duble.controle("/contagem")
     esperado = set(selo_mentiroso.CASOS_QUE_FALHAM[modo])
-    assert falhas(itens) == esperado
-    assert aprova(itens, 3, acoes) == (not esperado)
+    assert falhas(bateria.itens) == esperado
+    assert aprova(bateria.itens, 3, acoes) == (not esperado)
+    # Cada parte que este modo forca (PARTES_FORCADAS): o caso falha, e em toda ferramenta em que falha, so por ela.
+    for (caso, parte), modos in selo_mentiroso.PARTES_FORCADAS.items():
+        if modo in modos:
+            por_ferramenta = partes_que_falham(bateria, caso)
+            assert por_ferramenta, (caso, parte)
+            assert all(ps == {parte} for ps in por_ferramenta.values()), (caso, parte, por_ferramenta)
+    # Em modo nenhum a bateria escreve na producao do duble, nem pelo defeito do modo: o consulta_escreve escreve so no
+    # alvo (escrevendo em toda consulta de numero novo, ele escreveria na producao na consulta de controle do C-0.3).
+    _producao_sem_acao(contagem, de_teste=de_teste, acoes=acoes)
 
 
 def _contexto(pessoa: str = "bateria") -> Any:
@@ -1246,6 +1409,87 @@ async def test_escrita_lenta_cortada_no_meio_termina_e_a_repeticao_nao_aplica() 
     assert (recibo["estado"], recibo["repetida"]) == ("concluida", True)
     assert contagem["teste"]["aplicadas"] == {"enviar_lembrete": 1}
     assert contagem["teste"]["chamadas"]["enviar_lembrete"] == 2
+
+
+PRAZO_DOS_CONTROLES = 5.0
+"""Na prova dos controles: o prazo da chamada com a escrita lenta e o da espera dos efeitos adiados."""
+DEMORA_LONGA = 20
+"""No honesto, os segundos da escrita lenta e do efeito adiado na prova dos controles: bem mais que
+``PRAZO_DOS_CONTROLES``, entao so o controle (``/soltar``, o aviso) termina a espera dentro do prazo. E curto para o
+teste nao ficar preso se o controle falhar: o duble so para depois de terminar a escrita blindada (no pior caso,
+uns ``DEMORA_LONGA`` segundos, e nao os 10 minutos de antes)."""
+
+
+@pytest.mark.parametrize(
+    ("fabrica", "kw"),
+    [
+        (selo_nivel3.criar, {}),
+        (selo_mentiroso.criar, {"modo": "ignora_bloqueio"}),
+        (selo_mentiroso.criar, {"modo": "escreve_escondido"}),
+    ],
+    ids=["honesto", "ignora_bloqueio", "escreve_escondido"],
+)
+async def test_os_controles_da_bateria_tiram_a_espera_sem_mudar_o_que_o_caso_mede(
+    fabrica: Callable[..., Starlette], kw: dict[str, Any]
+) -> None:
+    """``Controle``. O efeito adiado que o aviso parou termina na hora: ``adiados`` zera e o efeito nunca acontece. O
+    que o aviso nao parou (``ignora_bloqueio``) e o que o sistema poe mesmo dizendo ``parada`` (``escreve_escondido``)
+    so acontecem no fim dos segundos marcados: logo depois do aviso o rastro ainda nao mudou, e ``esperar_os_adiados``
+    so volta depois do efeito, passados os segundos. Por isso a bateria espera antes de ler o rastro do C-3.6b: lido
+    sem a espera, o rastro deixaria o ``escreve_escondido`` passar (mutacao VT1 do verificador).
+
+    E ``/soltar`` termina a escrita lenta antes da hora, com a escrita aplicada como sempre. No honesto, os segundos da
+    escrita lenta e do efeito adiado (``DEMORA_LONGA``) sao bem maiores que ``PRAZO_DOS_CONTROLES``: so o controle
+    termina a espera dentro do prazo. Nos mentirosos, o efeito adiado vai com os segundos declarados da bateria."""
+    honesto = fabrica is selo_nivel3.criar
+    async with no_ar(fabrica, **kw) as duble:
+        alvo = duble.teste
+        assert alvo is not None
+        controle = Controle(duble, "teste")
+        entrada = selo_nivel2.entrada_da_declaracao("enviar_lembrete", de_teste=False)
+        lembretes = {"ferramenta": "listar_lembretes", "argumentos": {}, "conta": "/itens"}
+        bateria = Bateria(duble.producao, alvo, selo_nivel2.declaracao(endereco_teste=alvo.url), 3, controle)
+        # O efeito adiado e o aviso que o para (ou que diz parada sem parar).
+        segundos = DEMORA_LONGA if honesto else SEGUNDOS_DECLARADOS
+        adiado, k_adiado = entrada["efeito_adiado"]["argumentos"] | {"daqui_a": segundos}, _novo()
+        inicio = anyio.current_time()
+        assert _sucesso(await alvo.chamar("enviar_lembrete", adiado, k_adiado))
+        assert (await duble.controle("/contagem"))["teste"]["adiados"] == 1
+        aviso = await alvo.chamar(contrato.FERRAMENTA_BLOQUEIO, {"bloqueio": _novo(), "operacoes": [k_adiado]})
+        logo_depois_do_aviso = await bateria.rastro(lembretes)
+        await controle.esperar_os_adiados(PRAZO_DOS_CONTROLES)
+        esperou = anyio.current_time() - inicio
+        depois_da_espera = await bateria.rastro(lembretes)
+        # A escrita lenta, terminada por /soltar.
+        lenta, k_lento = entrada["escrita_lenta"]["argumentos"] | {"demora": DEMORA_LONGA}, _novo()
+        respostas: list[cliente.Resposta] = []
+        chegaram = await controle.chegadas("enviar_lembrete")
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                lambda: _guardar(respostas, alvo.chamar("enviar_lembrete", lenta, k_lento, prazo=PRAZO_DOS_CONTROLES))
+            )
+            await esperar_a_chegada(lambda: controle.chegadas("enviar_lembrete"), chegaram)
+            durante = _estado(await alvo.chamar(contrato.FERRAMENTA_CONSULTAR, {"operacao": k_lento}))
+            assert (await duble.controle("/soltar", {"operacao": k_lento}))["ok"]
+        consulta = _estado(await alvo.chamar(contrato.FERRAMENTA_CONSULTAR, {"operacao": k_lento}))
+        no_fim = await bateria.rastro(lembretes)
+        sem_lenta = await duble.controle("/soltar", {"operacao": k_lento})
+    assert aviso.resultado.structured_content["operacoes"] == [{"operacao": k_adiado, "estado": "parada"}]  # type: ignore[union-attr]
+    assert logo_depois_do_aviso == 0  # nenhum efeito na hora do aviso, nem o que sai no fim dos segundos
+    if honesto:
+        assert depois_da_espera == 0
+    else:
+        assert depois_da_espera == 1
+        assert esperou >= segundos - 0.05  # o efeito saiu no fim dos segundos marcados, e nao antes
+    # A chamada lenta terminou dentro do prazo (bem antes da DEMORA_LONGA): foi o /soltar.
+    assert _sucesso(respostas[0])
+    assert (durante, consulta) == ("em_andamento", "concluida")
+    assert no_fim == depois_da_espera + 1
+    assert sem_lenta == {"ok": False}
+
+
+async def _guardar(lista: list[cliente.Resposta], chamada: Awaitable[cliente.Resposta]) -> None:
+    lista.append(await chamada)
 
 
 @pytest.mark.parametrize(

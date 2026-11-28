@@ -16,31 +16,63 @@ Fase 3: a operacao sabe a origem do sistema e se a ferramenta traz texto de fora
 a ficha guarda o retrato do alerta dos tres sinais (``fichas.sinais``), quando nasceu com ele; a quarentena de
 um servidor de terceiros para o que esperava (``parar_por_quarentena``) e suspende os limites dele
 (``suspender_limites``).
+
+Fase 4 (selos de nivel 2 e 3):
+
+- a operacao traz o retrato do selo da ficha (``Operacao.selo``, ``fichas.selo``), o envio com numero
+  (``envios_selo``: o nivel e, quando o banco copiou o numero de outra, o protocolo dela) e a ultima informacao do
+  sistema (``Operacao.informado``, ``contrato.Informado``), com o estado final do banco (``selo_estado_final``). So
+  o estado final resolve o "estamos confirmando"; uma ``nao_recebida`` sozinha nao (critica A3.3). A resposta do
+  sistema nunca muda a fila, a decisao da pessoa nem o pedido igual (``conta_como_repeticao``, D15);
+- a ficha nasce com o retrato do selo efetivo da pessoa na hora (``registrar_pedido``), gravado num ponto de
+  salvamento: se o banco recusar o retrato (o selo caiu entre a leitura e o INSERT), o selo e lido de novo e o
+  retrato de agora e gravado, em vez de falhar o pedido (A1);
+- o pedido igual a uma "nao confirmada" que saiu com numero leva ``repete_operacao_id`` (D16): o banco decide, no
+  envio, se o numero e o mesmo (``envios_selo_nasce``). Um numero cujo desfecho ja se sabe (uma acao com ele
+  ``enviada`` ou com a decisao ``aconteceu``) nao e repetido (``original_que_repete``);
+- "Registrar o que o sistema informou" (``registrar_o_que_o_sistema_informou``) reusa ``decidir_nao_confirmada``; a
+  pessoa que registra o contrario do que o sistema informou gera ``sistema_contradito`` e aviso ao ADMIN, e o selo
+  fica (D19);
+- o comprovante do bloqueio junta, na leitura, o que os sistemas informaram (``Comprovante.informado``). O bloqueio
+  em si e o da Fase 2: os avisos de bloqueio sao derivados depois, pelo despachante (critica A1).
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
 from sqlalchemy import Row, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from mcp_claro.avisos import avisar_admin
 from mcp_claro.cadastro.modelos import Aplicativo, FerramentaVitrine
 from mcp_claro.extrato import registrar
+from mcp_claro.extrato.frases import aviso_admin
+from mcp_claro.logs import logger
+from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras import programas, sinais
 from mcp_claro.regras.bloqueios import Bloqueio, quem_rotina
 from mcp_claro.regras.estranhos import vem_de_estranhos
 from mcp_claro.saida import travas
 from mcp_claro.saida.estados import ANTES_DE_SAIR, FRASE, Estado
 from mcp_claro.saida.protocolo import FUSO, chave_pedido_igual, codigo_conferencia, novo_protocolo
+from mcp_claro.selo import contrato, vigente
+from mcp_claro.selo.vigente import SeloVigente
 from mcp_claro.versao import PREFIXO_META
 
+log = logger("mcp_claro.saida.fila")
+
 JA_SAIRAM: Final = (Estado.ENVIANDO, Estado.ENVIADA, Estado.NAO_CONFIRMADA, Estado.SISTEMA_PEDIU_DADOS)
+PASSOU_POR_ENVIANDO: Final = frozenset(
+    {Estado.ENVIANDO, Estado.ENVIADA, Estado.NAO_SAIU, Estado.SISTEMA_PEDIU_DADOS, Estado.NAO_CONFIRMADA}
+)
+"""Os estados de uma acao que ja passou por "enviando": o envio com numero (``envios_selo``), se houve, nasceu ali."""
 QUEM_TETO: Final = quem_rotina("teto_confirmacoes")
 """Quem liga a pausa do teto de fichas por hora (``CONFIRM_CAP_PER_HOUR``)."""
 SALTO_NA_RESTAURACAO: Final = 1_000_000
@@ -70,6 +102,34 @@ class DecisaoRecusada(Exception):
         self.motivo = motivo
         self.mensagem = mensagem
         super().__init__(mensagem)
+
+
+@dataclass(frozen=True, slots=True)
+class InformadoDoSistema:
+    """A ultima informacao do sistema sobre a operacao (``contrato.Informado``), de ``informacoes_sistema``: a ultima
+    linha com ``respondeu`` e, sem ela, a ultima linha. So as categorias do contrato e a hora do gateway
+    (``gravado_em``, nunca ``depois[].em``, critica B12); nenhum texto do sistema.
+
+    - ``estado_final``: ``selo_estado_final(operacao)``, do banco. So ele resolve o "estamos confirmando" e libera o
+      botao "Registrar o que o sistema informou" (``registrar_o_que_o_sistema_informou``). Com ``estado``
+      ``nao_recebida`` e ``estado_final`` nulo, o sistema disse uma vez que nao recebeu: a tela mostra o que ele disse,
+      com "continuamos perguntando", sem o botao (critica A3.3);
+    - ``de_terceiro``: o que um servidor de terceiros informou (critica M9);
+    - ``tentativas``: as consultas que gastaram a vez (origem ``consulta``, ``contrato.DESFECHOS_QUE_GASTAM_TENTATIVA``)
+      e ``ultimo_desfecho``, o desfecho da ultima linha de qualquer origem. Com eles, ``Operacao.consulta_acabou`` diz
+      se a escada acabou sem resposta que encerra ("o sistema nao confirmou; a decisao e sua")."""
+
+    estado: str | None
+    desfecho: str
+    origem: str
+    gravado_em: datetime
+    de_terceiro: bool
+    estado_final: str | None
+    tentativas: int = 0
+    ultimo_desfecho: str | None = None
+
+
+_INFORMADO: Final[type[contrato.Informado]] = InformadoDoSistema  # o mypy confere o contrato
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +166,51 @@ class Operacao:
     texto_de_fora: bool = False
     ficha_sinais: dict[str, Any] | None = None
     """Retrato do alerta dos tres sinais na ficha (``sinais.Alerta.retrato``); None sem alerta."""
+    selo: dict[str, Any] | None = None
+    """Retrato do selo efetivo da pessoa quando a ficha nasceu (``fichas.selo``, ``contrato.RETRATO_DO_SELO``); None
+    sem ficha (limite) ou em ficha de antes da 0007 ("nao guardado")."""
+    informado: InformadoDoSistema | None = None
+    """A ultima informacao do sistema sobre a operacao (``contrato.Informado``); None sem nenhuma."""
+    envio_nivel: int | None = None
+    """O nivel do envio com numero (``envios_selo.nivel``, 2 ou 3); None quando a acao nao saiu com numero."""
+    repete_protocolo: str | None = None
+    """O protocolo da "nao confirmada" que este pedido igual repete (``operacoes.repete_operacao_id``, D16): o que a
+    entrada pediu. Se o numero foi o mesmo, quem decide e o banco no envio (``mesmo_numero_de``)."""
+    mesmo_numero_de: str | None = None
+    """O protocolo cujo numero esta acao levou ao sistema (``envios_selo.repete_operacao_id``: so preenchido quando o
+    banco copiou o numero); None com numero proprio."""
+    substituto: str | None = None
+    """Um protocolo que saiu depois ao sistema com o numero desta acao (``selo_substituto``, do banco, critica M4): o
+    fim da cadeia de pedidos iguais que copiaram o numero (o passo mais longo). O que o sistema informar aparece nele,
+    esta acao para de ser consultada e o botao de um toque fica desligado aqui. Dois pedidos iguais que repetem esta
+    mesma acao (no mesmo passo) so acontecem se o primeiro nao chegou ao fim (por exemplo, ``nao_saiu``): o numero de
+    uma acao cujo pedido igual foi ``enviada`` nao e mais repetido (``original_que_repete``). Nesse caso raro, o banco
+    escolhe entre os dois pelo id, nao pelo mais novo."""
+
+    @property
+    def nivel_do_selo(self) -> int | None:
+        """O nivel do selo desta operacao, o que vai no ``_meta`` ao aplicativo: o do envio com numero; 1 para a acao
+        que passou por "enviando" sem numero (saiu como nivel 1); antes disso, o do retrato da ficha. None quando nada
+        disso diz (limite que ainda nao saiu, ficha de antes da 0007): quem chama calcula o efetivo de agora."""
+        if self.envio_nivel is not None:
+            return self.envio_nivel
+        if self.estado in PASSOU_POR_ENVIANDO:
+            return 1
+        nivel = (self.selo or {}).get("nivel")
+        return nivel if type(nivel) is int and nivel in (1, 2, 3) else None
+
+    def consulta_acabou(self, maximo: int) -> bool:
+        """A escada da consulta acabou sem resposta que encerra (``contrato.ESCADA_DA_CONSULTA_MINUTOS``): a acao
+        saiu com numero, o sistema nao deu estado final e ou as tentativas chegaram a ``maximo``
+        (``BADGE_LOOKUP_MAX_ATTEMPTS``), ou a ultima linha e ``sistema_fora``, ou outro protocolo saiu depois com o
+        mesmo numero (``substituto``). A tela diz "o sistema nao confirmou; a decisao e sua"."""
+        if self.envio_nivel is None or (self.informado is not None and self.informado.estado_final is not None):
+            return False
+        if self.substituto is not None:
+            return True
+        if self.informado is None:
+            return False
+        return self.informado.ultimo_desfecho == "sistema_fora" or self.informado.tentativas >= maximo
 
     @property
     def de_estranhos(self) -> bool:
@@ -128,26 +233,59 @@ class Operacao:
         return self.estado in ANTES_DE_SAIR
 
     def conta_como_repeticao(self) -> bool:
-        """Um pedido igual devolve esta operacao se ela pode ter efeito no sistema ou ainda pode sair."""
+        """Um pedido igual devolve esta operacao se ela pode ter efeito no sistema ou ainda pode sair.
+
+        So a decisao da pessoa conta: a resposta do sistema (``informado``) nunca muda isto (D15), nem uma
+        ``nao_recebida`` confirmada."""
         if self.estado in (Estado.AGUARDANDO_FICHA, Estado.LIBERADA, Estado.ENVIANDO, Estado.ENVIADA):
             return True
         return self.estado == Estado.NAO_CONFIRMADA and self.decisao_pessoa != "nao_aconteceu"
 
 
+# Fase 4: o envio com numero (so as colunas que a entrada e as rotinas leem: nunca envios_selo.chave, critica M10), a
+# ultima informacao do sistema, o estado final do banco e o protocolo que saiu depois com o mesmo numero. Sem envio,
+# nada disso e lido (as subconsultas param no primeiro teste). As tentativas contam como
+# contrato.tentativas_da_consulta.
 _SQL_OPERACAO = """
 SELECT o.id, o.protocolo, o.codigo_conferencia, o.pessoa_id, o.aplicativo_id, o.ordem_id, o.ferramenta_id,
        o.sistema_id, o.argumentos, o.aplicativo_diz, o.resultado, o.desfecho, o.criada_em,
        f.id AS fila_id, f.estado, f.ficha_id, f.limite_id, f.hora_saida, f.enviada_em, f.mudou_em, f.mudou_por,
        r.nome_vitrine, s.nome AS sistema_nome, d.decisao AS decisao_pessoa,
        fi.expira_em AS ficha_expira_em, fi.exige_passkey AS ficha_exige_passkey, fi.risco AS ficha_risco,
-       fi.decisao AS ficha_decisao, s.origem AS sistema_origem, r.texto_de_fora, fi.sinais AS ficha_sinais
+       fi.decisao AS ficha_decisao, s.origem AS sistema_origem, r.texto_de_fora, fi.sinais AS ficha_sinais,
+       fi.selo AS ficha_selo, e.nivel AS envio_nivel, ro.protocolo AS repete_protocolo,
+       me.protocolo AS mesmo_numero_de, inf.origem AS inf_origem, inf.desfecho AS inf_desfecho,
+       inf.estado AS inf_estado, inf.gravado_em AS inf_gravado_em, ult.desfecho AS inf_ultimo_desfecho,
+       ult.tentativas AS inf_tentativas, ult.estado_final AS inf_estado_final, sub.protocolo AS substituto
 FROM operacoes o
 JOIN fila_saida f ON f.operacao_id = o.id
 JOIN ferramentas_revisadas r ON r.id = o.ferramenta_id
 JOIN sistemas s ON s.id = o.sistema_id
 LEFT JOIN fichas fi ON fi.id = f.ficha_id
 LEFT JOIN decisoes_nao_confirmada d ON d.operacao_id = o.id
+LEFT JOIN operacoes ro ON ro.id = o.repete_operacao_id
+LEFT JOIN envios_selo e ON e.operacao_id = o.id
+LEFT JOIN operacoes me ON me.id = e.repete_operacao_id
+LEFT JOIN LATERAL (
+  SELECT i.origem, i.desfecho, i.estado, i.gravado_em FROM informacoes_sistema i
+  WHERE e.operacao_id IS NOT NULL AND i.operacao_id = o.id
+  ORDER BY (i.desfecho = 'respondeu') DESC, i.gravado_em DESC, i.id DESC LIMIT 1
+) inf ON true
+LEFT JOIN LATERAL (
+  SELECT (SELECT i.desfecho FROM informacoes_sistema i WHERE i.operacao_id = o.id
+          ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS desfecho,
+         (SELECT count(*) FROM informacoes_sistema i WHERE i.operacao_id = o.id AND i.origem = 'consulta'
+            AND i.desfecho = ANY (selo_vocabulario('desfechos_que_gastam_tentativa'))) AS tentativas,
+         selo_estado_final(o.id) AS estado_final
+  WHERE e.operacao_id IS NOT NULL
+) ult ON true
+LEFT JOIN LATERAL (
+  SELECT x.protocolo FROM operacoes x WHERE e.operacao_id IS NOT NULL AND x.id = selo_substituto(o.id)
+) sub ON true
 """
+
+
+_TEM_INFORMADO: Final[type[contrato.TemInformado]] = Operacao  # o mypy confere o contrato
 
 
 def _existe(op: Operacao | None) -> Operacao:
@@ -193,6 +331,27 @@ def _operacao(linha: Row[Any]) -> Operacao:
         sistema_origem=linha.sistema_origem,
         texto_de_fora=bool(linha.texto_de_fora),
         ficha_sinais=_json(linha.ficha_sinais),
+        selo=_json(linha.ficha_selo),
+        informado=_informado(linha),
+        envio_nivel=None if linha.envio_nivel is None else int(linha.envio_nivel),
+        repete_protocolo=linha.repete_protocolo,
+        mesmo_numero_de=linha.mesmo_numero_de,
+        substituto=linha.substituto,
+    )
+
+
+def _informado(linha: Row[Any]) -> InformadoDoSistema | None:
+    if linha.inf_desfecho is None:
+        return None
+    return InformadoDoSistema(
+        estado=linha.inf_estado,
+        desfecho=linha.inf_desfecho,
+        origem=linha.inf_origem,
+        gravado_em=linha.inf_gravado_em,
+        de_terceiro=linha.sistema_origem != "proprio",
+        estado_final=linha.inf_estado_final,
+        tentativas=int(linha.inf_tentativas or 0),
+        ultimo_desfecho=linha.inf_ultimo_desfecho,
     )
 
 
@@ -273,6 +432,62 @@ async def pedido_igual(c: AsyncConnection, chave: str, janela_minutos: int) -> O
         if op.conta_como_repeticao():
             return op
     return None
+
+
+async def original_que_repete(
+    c: AsyncConnection, *, chave: str, codigo: str, sistema_id: uuid.UUID, pessoa_id: uuid.UUID
+) -> uuid.UUID | None:
+    """O pedido igual nos niveis 2 e 3 (desenho 5.4, D16): a "nao confirmada" mais recente com a mesma
+    ``chave_pedido_igual`` e o mesmo ``codigo_conferencia`` (os mesmos argumentos), do mesmo sistema e da mesma pessoa,
+    de ate ``contrato.REAPROVEITAR_NUMERO_DIAS`` dias, sem a decisao ``aconteceu`` e que saiu com numero
+    (``envios_selo``, critica A1). E a regra de ``operacoes_repete_confere``; so a operacao nova a guarda em
+    ``repete_operacao_id``, e o banco decide no envio se o numero e o mesmo (``envios_selo_nasce``: numero novo se o
+    sistema ja disse algo que o queima). Sem envio na original (nivel 1, ou antes da 0007), nenhuma repeticao.
+
+    A mais que a guarda do banco (critica M4): o numero cujo desfecho ja se sabe nao e repetido. Se uma das acoes que
+    sairam com esse numero (a original da cadeia e os pedidos iguais que o copiaram, por
+    ``envios_selo.repete_operacao_id``; a entrada nunca le ``envios_selo.chave``) ficou ``enviada`` ou tem a decisao
+    ``aconteceu`` da pessoa, o sistema ja recebeu a escrita desse numero e respondeu. Um pedido igual que chega
+    depois, fora da janela do pedido igual, e um pedido novo: com o mesmo numero, um sistema honesto responderia "ja
+    feito" e nao faria. Por isso ele sai com numero novo. Sem isso, a mesma original ganharia dois pedidos iguais com
+    o numero dela, e ``selo_substituto`` escolheria entre eles pelo id.
+
+    So e chamada quando ``pedido_igual`` nao devolveu nada: a resposta do sistema nao muda quem conta como repeticao."""
+    valor = (
+        await c.execute(
+            text(
+                "SELECT o.id FROM operacoes o JOIN fila_saida f ON f.operacao_id = o.id AND f.estado = 'nao_confirmada'"
+                " JOIN envios_selo e ON e.operacao_id = o.id"
+                " LEFT JOIN decisoes_nao_confirmada d ON d.operacao_id = o.id"
+                " WHERE o.chave_pedido_igual = :k AND o.codigo_conferencia = :co AND o.sistema_id = :s"
+                " AND o.pessoa_id = :p AND o.criada_em >= now() - make_interval(days => :dias)"
+                " AND d.decisao IS DISTINCT FROM 'aconteceu'"
+                # As acoes que sairam com o mesmo numero de ``e``: sobe pela cadeia de envios_selo.repete_operacao_id
+                # ate a que tem o numero proprio e desce por todos os pedidos iguais que o copiaram (teto de 100
+                # passos, o de selo_substituto). Alguma ``enviada`` ou com ``aconteceu``: o desfecho ja se sabe.
+                " AND NOT EXISTS (WITH RECURSIVE acima (operacao_id, repete, passo) AS ("
+                " SELECT e.operacao_id, e.repete_operacao_id, 0 UNION ALL"
+                " SELECT x.operacao_id, x.repete_operacao_id, a.passo + 1 FROM envios_selo x"
+                " JOIN acima a ON x.operacao_id = a.repete WHERE a.passo < 100"
+                " ), numero (operacao_id, passo) AS ("
+                " SELECT a.operacao_id, 0 FROM acima a WHERE a.repete IS NULL UNION ALL"
+                " SELECT x.operacao_id, n.passo + 1 FROM envios_selo x"
+                " JOIN numero n ON x.repete_operacao_id = n.operacao_id WHERE n.passo < 100"
+                " ) SELECT 1 FROM numero n LEFT JOIN fila_saida fx ON fx.operacao_id = n.operacao_id"
+                " LEFT JOIN decisoes_nao_confirmada dx ON dx.operacao_id = n.operacao_id"
+                " WHERE fx.estado = 'enviada' OR dx.decisao = 'aconteceu')"
+                " ORDER BY o.criada_em DESC, o.id DESC LIMIT 1"
+            ),
+            {
+                "k": chave,
+                "co": codigo,
+                "s": sistema_id,
+                "p": pessoa_id,
+                "dias": contrato.REAPROVEITAR_NUMERO_DIAS,
+            },
+        )
+    ).scalar_one_or_none()
+    return None if valor is None else uuid.UUID(str(valor))
 
 
 # Limites por aproximacao
@@ -432,36 +647,59 @@ async def registrar_pedido(
     espera_segundos: int,
     trace_id: str | None = None,
     aplicativo: Aplicativo | None = None,
+    selo_ligado: bool = False,
 ) -> Operacao:
     """``aplicativo`` (opcional, o mesmo de ``aplicativo_id``) poupa a consulta do extrato para um assistente.
 
     Com ``rota.sinais`` (alerta dos tres sinais), a ficha guarda o retrato, ``acao_pedida`` leva
-    ``dados.tres_sinais`` e o extrato ganha a linha ``tres_sinais``. Um limite nunca leva o retrato."""
+    ``dados.tres_sinais`` e o extrato ganha a linha ``tres_sinais``. Um limite nunca leva o retrato.
+
+    Fase 4:
+
+    - ``selo_ligado`` e ``FEATURE_PHASE4_BADGES``. O selo efetivo da pessoa (``vigente.efetivo``, com
+      ``pessoas.teste`` lido aqui) sai do selo lido de ``ferramenta.sistema.selo_vigente`` (a vitrine) ou, sem ele, de
+      ``selo_vigente()`` agora. O retrato vai na ficha (``fichas.selo``) e em ``dados.selo`` de ``acao_pedida``. A
+      ficha e gravada num ponto de salvamento: se o banco recusar o retrato (o selo caiu entre a leitura e o INSERT,
+      ``fichas_guarda``), o selo e lido de novo e o retrato de agora e gravado; se ainda assim nao der, a ficha nasce
+      sem retrato ("nao guardado"). O selo nunca faz o pedido da pessoa falhar (A1);
+    - o pedido igual a uma "nao confirmada" que saiu com numero guarda ``repete_operacao_id`` (``original_que_repete``,
+      D16). Se o banco recusar a repeticao, a operacao nasce sem ela (numero novo no envio), nunca erro."""
     if rota.por_limite and rota.sinais is not None:
         raise ValueError("Com o alerta dos tres sinais nenhum limite vale: a acao vai para a ficha.")
     protocolo = await novo_protocolo(c)
     codigo = codigo_conferencia(ferramenta.sistema.id, ferramenta.nome_original, argumentos)
-    operacao_id = (
-        await c.execute(
-            text(
-                "INSERT INTO operacoes (protocolo, codigo_conferencia, pessoa_id, aplicativo_id, ordem_id,"
-                " ferramenta_id, sistema_id, argumentos, aplicativo_diz, chave_pedido_igual)"
-                " VALUES (:pr, :co, :pe, :a, :o, :f, :s, CAST(:ar AS jsonb), :diz, :k) RETURNING id"
-            ),
-            {
-                "pr": protocolo,
-                "co": codigo,
-                "pe": pessoa_id,
-                "a": aplicativo_id,
-                "o": ordem_id,
-                "f": ferramenta.id,
-                "s": ferramenta.sistema.id,
-                "ar": json.dumps(argumentos, ensure_ascii=False),
-                "diz": aplicativo_diz,
-                "k": chave_pedido_igual(pessoa_id, aplicativo_id, ferramenta.id, argumentos),
-            },
-        )
-    ).scalar_one()
+    chave = chave_pedido_igual(pessoa_id, aplicativo_id, ferramenta.id, argumentos)
+    pessoa_teste = await _pessoa_de_teste(c, pessoa_id)
+    repete = await original_que_repete(
+        c, chave=chave, codigo=codigo, sistema_id=ferramenta.sistema.id, pessoa_id=pessoa_id
+    )
+    valores = {
+        "pr": protocolo,
+        "co": codigo,
+        "pe": pessoa_id,
+        "a": aplicativo_id,
+        "o": ordem_id,
+        "f": ferramenta.id,
+        "s": ferramenta.sistema.id,
+        "ar": json.dumps(argumentos, ensure_ascii=False),
+        "diz": aplicativo_diz,
+        "k": chave,
+    }
+    operacao_id = None
+    if repete is not None:
+        try:
+            async with c.begin_nested():
+                operacao_id = (await c.execute(text(_SQL_NOVA_OPERACAO), valores | {"r": repete})).scalar_one()
+        except DBAPIError as erro:
+            # O banco confere a mesma regra (operacoes_repete_confere): recusada, a operacao nasce sem repeticao.
+            log.warning("pedido_igual_sem_repeticao", erro=type(erro).__name__)
+            CONTADORES.somar("selo_pedido_igual_sem_repeticao")
+        else:
+            CONTADORES.somar("selo_pedido_igual_repete")
+    if operacao_id is None:
+        operacao_id = (await c.execute(text(_SQL_NOVA_OPERACAO), valores | {"r": None})).scalar_one()
+    selo = await _selo_efetivo(c, ferramenta, ligada=selo_ligado, pessoa_teste=pessoa_teste)
+    retrato = None if selo is None else selo.retrato()
     if rota.por_limite:
         await c.execute(
             text(
@@ -471,22 +709,21 @@ async def registrar_pedido(
             {"o": operacao_id, "l": rota.limite_id, "e": espera_segundos},
         )
     else:
-        ficha_id = (
-            await c.execute(
-                text(
-                    "INSERT INTO fichas (operacao_id, codigo_conferencia, expira_em, risco, exige_passkey, sinais)"
-                    " VALUES (:o, :co, now() + make_interval(mins => :m), :r, :pk, CAST(:si AS jsonb)) RETURNING id"
-                ),
-                {
-                    "o": operacao_id,
-                    "co": codigo,
-                    "m": prazo_ficha_minutos,
-                    "r": ferramenta.risco,
-                    "pk": rota.exige_passkey,
-                    "si": json.dumps(rota.sinais, ensure_ascii=False) if rota.sinais is not None else None,
-                },
-            )
-        ).scalar_one()
+        ficha_id, retrato = await _gravar_ficha(
+            c,
+            {
+                "o": operacao_id,
+                "co": codigo,
+                "m": prazo_ficha_minutos,
+                "r": ferramenta.risco,
+                "pk": rota.exige_passkey,
+                "si": json.dumps(rota.sinais, ensure_ascii=False) if rota.sinais is not None else None,
+            },
+            retrato,
+            sistema_id=ferramenta.sistema.id,
+            ligada=selo_ligado,
+            pessoa_teste=pessoa_teste,
+        )
         await c.execute(
             text(
                 "INSERT INTO fila_saida (operacao_id, estado, ficha_id, mudou_por)"
@@ -501,6 +738,14 @@ async def registrar_pedido(
         "acao_pedida",
         {"ferramenta": ferramenta.nome_vitrine, "protocolo": protocolo},
     )
+    dados: dict[str, Any] = {
+        "rota": rota.motivo,
+        "risco": ferramenta.risco,
+        "passkey": rota.exige_passkey,
+        "tres_sinais": rota.sinais is not None,
+    }
+    if retrato is not None:
+        dados["selo"] = retrato
     await registrar(
         c,
         papel="entrada",
@@ -511,12 +756,7 @@ async def registrar_pedido(
         pessoa_id=pessoa_id,
         sistema_id=ferramenta.sistema.id,
         ferramenta=ferramenta.nome_vitrine,
-        dados={
-            "rota": rota.motivo,
-            "risco": ferramenta.risco,
-            "passkey": rota.exige_passkey,
-            "tres_sinais": rota.sinais is not None,
-        },
+        dados=dados,
         trace_id=trace_id,
     )
     if rota.sinais is not None:
@@ -536,6 +776,91 @@ async def registrar_pedido(
         )
     op = _existe(await por_id(c, operacao_id))
     return op
+
+
+_SQL_NOVA_OPERACAO: Final = (
+    "INSERT INTO operacoes (protocolo, codigo_conferencia, pessoa_id, aplicativo_id, ordem_id,"
+    " ferramenta_id, sistema_id, argumentos, aplicativo_diz, chave_pedido_igual, repete_operacao_id)"
+    " VALUES (:pr, :co, :pe, :a, :o, :f, :s, CAST(:ar AS jsonb), :diz, :k, :r) RETURNING id"
+)
+_SQL_NOVA_FICHA: Final = (
+    "INSERT INTO fichas (operacao_id, codigo_conferencia, expira_em, risco, exige_passkey, sinais, selo)"
+    " VALUES (:o, :co, now() + make_interval(mins => :m), :r, :pk, CAST(:si AS jsonb), CAST(:selo AS jsonb))"
+    " RETURNING id"
+)
+
+
+async def _pessoa_de_teste(c: AsyncConnection, pessoa_id: uuid.UUID) -> bool:
+    """``pessoas.teste``, lido na transacao do pedido (como a porta de saida le no envio)."""
+    valor = (await c.execute(text("SELECT teste FROM pessoas WHERE id = :p"), {"p": pessoa_id})).scalar_one_or_none()
+    return valor is True
+
+
+async def _selo_lido_agora(c: AsyncConnection, sistema_id: uuid.UUID) -> SeloVigente | None:
+    """O selo vigente de agora (``selo_vigente()``), num ponto de salvamento: uma falha vira None, nunca erro (A1)."""
+    try:
+        async with c.begin_nested():
+            return await vigente.ler(c, sistema_id)
+    except (DBAPIError, ValueError) as erro:
+        log.warning("selo_nao_lido_no_pedido", erro=type(erro).__name__)
+        CONTADORES.somar("selo_nao_lido_no_pedido")
+        return None
+
+
+async def _efetivo_de_agora(
+    c: AsyncConnection, sistema_id: uuid.UUID, *, ligada: bool, pessoa_teste: bool
+) -> SeloVigente | None:
+    """O selo efetivo da pessoa sobre o selo vigente de agora; None quando o selo nao pode ser lido."""
+    agora = await _selo_lido_agora(c, sistema_id)
+    return None if agora is None else vigente.efetivo(agora, ligada=ligada, pessoa_teste=pessoa_teste)
+
+
+async def _selo_efetivo(
+    c: AsyncConnection, ferramenta: FerramentaVitrine, *, ligada: bool, pessoa_teste: bool
+) -> SeloVigente | None:
+    """O selo efetivo da pessoa para a operacao: sobre o selo lido da vitrine (``ferramenta.sistema.selo_vigente``) ou,
+    sem ele (``SELO_NAO_LIDO``), sobre o de agora. None quando o selo nao pode ser lido."""
+    lido = ferramenta.sistema.selo_vigente
+    if vigente.foi_lido(lido):
+        return vigente.efetivo(lido, ligada=ligada, pessoa_teste=pessoa_teste)
+    return await _efetivo_de_agora(c, ferramenta.sistema.id, ligada=ligada, pessoa_teste=pessoa_teste)
+
+
+async def _gravar_ficha(
+    c: AsyncConnection,
+    valores: dict[str, Any],
+    retrato: dict[str, Any] | None,
+    *,
+    sistema_id: uuid.UUID,
+    ligada: bool,
+    pessoa_teste: bool,
+) -> tuple[uuid.UUID, dict[str, Any] | None]:
+    """INSERT da ficha com o retrato do selo, num ponto de salvamento (``contrato.RETRATO_DO_SELO``). O banco confere o
+    retrato contra ``selo_vigente`` agora (``fichas_guarda``, critica M3): se recusar (uma retirada, um teste novo ou
+    uma ferramenta revisada entre a leitura e o INSERT), o selo e lido de novo e o retrato de agora e gravado (nivel
+    1, se o selo caiu). Sem selo que o banco aceite, a ficha nasce sem retrato. Devolve o id e o retrato gravado."""
+    if retrato is not None:
+        try:
+            async with c.begin_nested():
+                ficha = (await c.execute(text(_SQL_NOVA_FICHA), valores | {"selo": json.dumps(retrato)})).scalar_one()
+            return uuid.UUID(str(ficha)), retrato
+        except DBAPIError as erro:
+            log.info("ficha_retrato_relido", erro=type(erro).__name__)
+            CONTADORES.somar("selo_ficha_retrato_relido")
+        agora = await _efetivo_de_agora(c, sistema_id, ligada=ligada, pessoa_teste=pessoa_teste)
+        if agora is not None:
+            retrato = agora.retrato()
+            try:
+                async with c.begin_nested():
+                    ficha = (
+                        await c.execute(text(_SQL_NOVA_FICHA), valores | {"selo": json.dumps(retrato)})
+                    ).scalar_one()
+                return uuid.UUID(str(ficha)), retrato
+            except DBAPIError as erro:
+                log.warning("ficha_sem_retrato", erro=type(erro).__name__)
+        CONTADORES.somar("selo_ficha_sem_retrato")
+    ficha = (await c.execute(text(_SQL_NOVA_FICHA), valores | {"selo": None})).scalar_one()
+    return uuid.UUID(str(ficha)), None
 
 
 async def travar_teto(c: AsyncConnection, aplicativo_id: uuid.UUID) -> None:
@@ -799,9 +1124,19 @@ async def seguir_agora(c: AsyncConnection, operacao_id: uuid.UUID, *, pessoa_id:
 
 
 async def decidir_nao_confirmada(
-    c: AsyncConnection, operacao_id: uuid.UUID, *, pessoa_id: uuid.UUID, decisao: str, observacao: str | None
+    c: AsyncConnection,
+    operacao_id: uuid.UUID,
+    *,
+    pessoa_id: uuid.UUID,
+    decisao: str,
+    observacao: str | None,
+    emails_admin: Sequence[str] = (),
 ) -> Operacao:
-    """Registra o que a pessoa apurou sobre um resultado nao confirmado. A acao nunca e reenviada."""
+    """Registra o que a pessoa apurou sobre um resultado nao confirmado. A acao nunca e reenviada.
+
+    Fase 4 (desenho 5.5, D19): se a decisao contraria o que o sistema informou (``contradiz_o_sistema``), o extrato
+    ganha ``sistema_contradito`` e o ADMIN e avisado (``emails_admin``: ``NOTIFY_ADMIN_EMAILS``; os webhooks que
+    assinam o evento recebem sempre). O selo do sistema fica: a pessoa pode ter se enganado, e o ADMIN decide."""
     if decisao not in DECISOES_NAO_CONFIRMADA:
         raise DecisaoRecusada("decisao_invalida", "Escolha: aconteceu, nao aconteceu ou nao sei.")
     op = await por_id(c, operacao_id)
@@ -830,8 +1165,128 @@ async def decidir_nao_confirmada(
         aplicativo_id=op.aplicativo_id,
         sistema_id=op.sistema_id,
     )
+    contrariado = contradiz_o_sistema(decisao, op.informado)
+    if contrariado is not None:
+        await _sistema_contradito(c, op, decisao, contrariado, emails_admin)
     atual = _existe(await por_id(c, operacao_id))
     return atual
+
+
+DECISAO_PELO_SISTEMA: Final[Mapping[str, str]] = {
+    "concluida": "aconteceu",
+    "recusada": "nao_aconteceu",
+    "nao_recebida": "nao_aconteceu",
+    "parada": "nao_aconteceu",
+}
+"""A decisao que o botao "Registrar o que o sistema informou" grava para cada estado final (desenho 5.3). ``parcial`` e
+``desfeita`` ficam de fora: "feito so em parte" e "feito e depois desfeito" nao cabem em "aconteceu" nem em "nao
+aconteceu", e a pessoa decide com o formulario de sempre."""
+OBSERVACAO_DO_SISTEMA: Final = "conforme o sistema informou"
+"""A observacao que o botao grava na decisao (desenho 5.3)."""
+
+
+def contradiz_o_sistema(decisao: str, informado: contrato.Informado | None) -> str | None:
+    """O estado informado pelo sistema que a ``decisao`` da pessoa contraria, ou None (desenho 5.5, D19). Conta como o
+    vocabulario (``contrato.CONTA_COMO``): "aconteceu" contra um estado que "nao aconteceu" (``recusada``,
+    ``nao_recebida``, ``parada``), e "nao aconteceu" contra um que "aconteceu" ou "em parte" (``concluida``,
+    ``parcial``). Vale o estado final do banco e a ultima resposta do sistema (uma ``nao_recebida`` sozinha tambem: o
+    ADMIN fica sabendo). "Nao sei" nunca contraria; ``desfeita``, ``em_andamento`` e ``desconhecido`` tambem nao."""
+    if informado is None or decisao not in ("aconteceu", "nao_aconteceu"):
+        return None
+    ditos = [informado.estado_final]
+    if informado.desfecho == "respondeu":
+        ditos.append(informado.estado)
+    contrarios = ("nao_aconteceu",) if decisao == "aconteceu" else ("aconteceu", "em_parte")
+    for estado in ditos:
+        if estado is not None and contrato.CONTA_COMO.get(estado) in contrarios:
+            return estado
+    return None
+
+
+async def _sistema_contradito(
+    c: AsyncConnection, op: Operacao, decisao: str, estado: str, emails_admin: Sequence[str]
+) -> None:
+    """A linha ``sistema_contradito`` no extrato da pessoa e o aviso ao ADMIN, na transacao da decisao. Nada mais muda:
+    o selo fica (D19)."""
+    await registrar(
+        c,
+        papel="entrada",
+        tipo="sistema_contradito",
+        campos={"protocolo": op.protocolo, "sistema": op.sistema_nome},
+        protocolo=op.protocolo,
+        pessoa_id=op.pessoa_id,
+        aplicativo_id=op.aplicativo_id,
+        sistema_id=op.sistema_id,
+        dados={"estado": estado, "decisao": decisao, "de_terceiro": op.de_terceiro},
+    )
+    assunto, texto = aviso_admin("sistema_contradito", protocolo=op.protocolo, sistema=op.sistema_nome)
+    await avisar_admin(
+        c,
+        "sistema_contradito",
+        assunto,
+        {"texto": texto, "sistema": op.sistema_nome, "sistema_id": str(op.sistema_id), "protocolo": op.protocolo},
+        f"sistema_contradito:{op.id}",
+        emails_admin,
+    )
+    CONTADORES.somar("selo_sistema_contradito")
+
+
+async def registrar_o_que_o_sistema_informou(
+    c: AsyncConnection, operacao_id: uuid.UUID, *, pessoa_id: uuid.UUID, emails_admin: Sequence[str] = ()
+) -> Operacao:
+    """O botao "Registrar o que o sistema informou" (desenho 5.3): grava a decisao da pessoa de acordo com o estado
+    final que o sistema informou (``DECISAO_PELO_SISTEMA``), com a observacao ``OBSERVACAO_DO_SISTEMA``, por
+    ``decidir_nao_confirmada``. Quem decide continua sendo a pessoa, com um toque; nada e reenviado.
+
+    Recusa (``DecisaoRecusada``), sem gravar nada:
+
+    - ``sem_resposta_final``: o sistema nao deu estado final (``selo_estado_final``); uma ``nao_recebida`` sozinha nao
+      basta (critica A3.3);
+    - ``resultado_em_outro_protocolo``: outro protocolo saiu depois com o mesmo numero, e o que o sistema informar
+      aparece nele (``Operacao.substituto``, critica M4);
+    - ``terceiro_nao_recebida``: um servidor de terceiros disse ``nao_recebida``; o que ele informa e texto de
+      estranhos, e a pessoa confere por fora antes de decidir (critica A3.3);
+    - ``decida_pelo_formulario``: ``parcial`` ou ``desfeita``, que nao cabem num toque;
+    - e as de ``decidir_nao_confirmada`` (operacao de outra pessoa, que nao esta nao confirmada, ja decidida)."""
+    op = await por_id(c, operacao_id)
+    if op is None or op.pessoa_id != pessoa_id:
+        raise DecisaoRecusada("operacao_desconhecida", "Acao nao encontrada.")
+    if op.estado != Estado.NAO_CONFIRMADA:
+        raise DecisaoRecusada("nao_e_nao_confirmada", "So um resultado nao confirmado pede esta decisao.")
+    if op.substituto is not None:
+        raise DecisaoRecusada(
+            "resultado_em_outro_protocolo",
+            f"O protocolo {op.substituto} saiu depois com o mesmo numero; o que o sistema informar aparece nele."
+            " Nada foi registrado.",
+        )
+    final = op.informado.estado_final if op.informado is not None else None
+    if final is None:
+        raise DecisaoRecusada(
+            "sem_resposta_final",
+            "O sistema ainda nao deu uma resposta final sobre este pedido. Nada foi registrado; decida pelo"
+            " formulario.",
+        )
+    if op.de_terceiro and final == "nao_recebida":
+        raise DecisaoRecusada(
+            "terceiro_nao_recebida",
+            "Um servidor de terceiros disse que nao recebeu o pedido. Confira no proprio servidor antes de decidir."
+            " Nada foi registrado.",
+        )
+    decisao = DECISAO_PELO_SISTEMA.get(final)
+    if decisao is None:
+        raise DecisaoRecusada(
+            "decida_pelo_formulario",
+            "O que o sistema informou nao cabe num toque (feito so em parte, ou feito e desfeito). Nada foi"
+            " registrado; decida pelo formulario.",
+        )
+    return await decidir_nao_confirmada(
+        c,
+        operacao_id,
+        pessoa_id=pessoa_id,
+        decisao=decisao,
+        observacao=OBSERVACAO_DO_SISTEMA,
+        emails_admin=emails_admin,
+    )
 
 
 # Despachante
@@ -906,6 +1361,7 @@ async def finalizar(
     desfecho: str,
     *,
     pedidos: Sequence[str] = (),
+    selo: Mapping[str, Any] | None = None,
 ) -> bool:
     """Grava o fim do envio. Se outra copia ja deu a acao como nao confirmada, so guarda a resposta.
 
@@ -913,6 +1369,9 @@ async def finalizar(
     em ``dados.pedidos`` da linha do fim, para a tela de pedidos recusados do ADMIN mostrar tambem as acoes: sempre
     em ``acao_sistema_pediu_dados`` e ``acao_enviada`` (como antes, lista vazia sem pedido) e, com pedido, tambem em
     ``acao_nao_confirmada`` e ``acao_nao_saiu`` (contrato K9).
+
+    ``selo`` (Fase 4, desenho 7.2): o retrato do selo com que a acao saiu (``contrato.RETRATO_DO_SELO``, o da hora do
+    passo), em ``dados.selo`` da linha do fim; quem envia (a porta de saida) o passa. Sem ele, a linha fica como antes.
 
     Nova tentativa depois de um COMMIT que deu certo, mas cuja confirmacao se perdeu: a linha ja tem o que este
     fim gravou (``_fim_ja_gravado``), antes ou depois de uma retomada. Nada e gravado de novo."""
@@ -949,6 +1408,8 @@ async def finalizar(
         campos["motivo"] = desfecho
     if pedidos or tipo in ("acao_enviada", "acao_sistema_pediu_dados"):
         dados["pedidos"] = list(pedidos)
+    if selo is not None:
+        dados["selo"] = dict(selo)
     await registrar(
         c,
         papel="despachante",
@@ -1048,7 +1509,13 @@ class Comprovante:
     - ``em_conferencia``: o que ainda esta em conferencia: enviando agora, e nao confirmada sem decisao ou
       com "nao sei" (``{"protocolo", "estado", "desde"}``).
 
-    ``informado`` fica para o que um sistema de nivel 3 relatar (Fase 4): vazio na Fase 2.
+    Fase 4 (desenho 6.3, critica A1): ``informado`` e o que os sistemas informaram sobre as operacoes do comprovante
+    (``{"protocolo", "sistema", "estado", "origem", "gravado_em", "de_terceiro"}``): as respostas ao aviso deste
+    bloqueio e a ultima resposta de recibo ou de consulta de cada operacao, so com ``respondeu``. Sai da leitura
+    (``comprovante_do_bloqueio``), nunca da linha de ``comprovantes``, que nao muda (``informado`` la continua ``[]``).
+    So as categorias do contrato e a hora do gateway, nunca texto nem hora do sistema. ``avisos`` e o andamento de cada
+    aviso do bloqueio (``{"sistema", "estado", "de_terceiro"}``, ``contrato.ESTADOS_DO_AVISO``), para a tela dizer
+    "avisamos os sistemas" ou "o sistema nao respondeu ao aviso".
     """
 
     bloqueio_id: uuid.UUID
@@ -1056,11 +1523,16 @@ class Comprovante:
     ja_saidas: list[dict[str, Any]]
     informado: list[dict[str, Any]]
     em_conferencia: list[dict[str, Any]] = field(default_factory=list)
+    avisos: list[dict[str, Any]] = field(default_factory=list)
 
 
 async def parar_por_bloqueio(c: AsyncConnection, b: Bloqueio, *, papel: str, janela_horas: int = 24) -> Comprovante:
     """Na transacao que liga o bloqueio (com a trava exclusiva do alcance ja tomada): para o que ainda nao
-    saiu e monta o comprovante em tres partes. As linhas paradas sao travadas em ordem de ``id``."""
+    saiu e monta o comprovante em tres partes. As linhas paradas sao travadas em ordem de ``id``.
+
+    Fase 4 (critica A1): esta transacao e a da Fase 2 e nao cria aviso de bloqueio nem le selo. O despachante deriva
+    os avisos depois, do comprovante gravado aqui (que nao muda) e de ``envios_selo``; o que os sistemas informarem
+    aparece na leitura (``comprovante_do_bloqueio``)."""
     filtro, valores = _filtro_alcance(b)
     paradas = (
         await c.execute(
@@ -1220,7 +1692,43 @@ async def suspender_limites(c: AsyncConnection, sistema_id: uuid.UUID, *, motivo
     return len(linhas)
 
 
+# O que os sistemas informaram sobre as operacoes do comprovante (as ja saidas e as em conferencia, pelo protocolo) e
+# sobre as dos avisos deste bloqueio (critica B9: em aberto no alcance, fora do comprovante): a resposta ao aviso deste
+# bloqueio e a ultima de recibo ou de consulta, so com 'respondeu'. Nunca envios_selo.chave (critica M10).
+_SQL_INFORMADO_DO_BLOQUEIO: Final = """
+WITH alvo AS (
+  SELECT o.id, o.protocolo, o.criada_em, s.nome AS sistema, s.origem <> 'proprio' AS de_terceiro
+  FROM comprovantes c
+  CROSS JOIN LATERAL jsonb_array_elements(c.ja_saidas || c.em_conferencia) p
+  JOIN operacoes o ON o.protocolo = p ->> 'protocolo'
+  JOIN sistemas s ON s.id = o.sistema_id
+  WHERE c.bloqueio_id = :b
+  UNION
+  SELECT o.id, o.protocolo, o.criada_em, s.nome, s.origem <> 'proprio'
+  FROM avisos_bloqueio a
+  CROSS JOIN LATERAL unnest(a.operacoes) x
+  JOIN operacoes o ON o.id = x
+  JOIN sistemas s ON s.id = o.sistema_id
+  WHERE a.bloqueio_id = :b
+)
+SELECT alvo.protocolo, alvo.sistema, alvo.de_terceiro, inf.estado, inf.origem, inf.gravado_em
+FROM alvo
+CROSS JOIN LATERAL (
+  (SELECT i.estado, i.origem, i.gravado_em, i.id FROM informacoes_sistema i
+   JOIN avisos_bloqueio a ON a.id = i.aviso_id AND a.bloqueio_id = :b
+   WHERE i.operacao_id = alvo.id AND i.origem = 'aviso' AND i.desfecho = 'respondeu')
+  UNION ALL
+  (SELECT i.estado, i.origem, i.gravado_em, i.id FROM informacoes_sistema i
+   WHERE i.operacao_id = alvo.id AND i.origem IN ('recibo', 'consulta') AND i.desfecho = 'respondeu'
+   ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1)
+) inf
+ORDER BY alvo.criada_em, alvo.protocolo, inf.gravado_em, inf.id
+"""
+
+
 async def comprovante_do_bloqueio(c: AsyncConnection, bloqueio_id: uuid.UUID) -> Comprovante | None:
+    """O comprovante do bloqueio: as tres partes da linha de ``comprovantes`` (que nao muda) e, da leitura de agora, o
+    que os sistemas informaram (``Comprovante.informado``) e o andamento dos avisos (``Comprovante.avisos``)."""
     linha = (
         await c.execute(
             text(
@@ -1232,12 +1740,37 @@ async def comprovante_do_bloqueio(c: AsyncConnection, bloqueio_id: uuid.UUID) ->
     ).first()
     if linha is None:
         return None
+    informado = [
+        {
+            "protocolo": i.protocolo,
+            "sistema": i.sistema,
+            "estado": i.estado,
+            "origem": i.origem,
+            "gravado_em": i.gravado_em.isoformat(),
+            "de_terceiro": bool(i.de_terceiro),
+        }
+        for i in (await c.execute(text(_SQL_INFORMADO_DO_BLOQUEIO), {"b": bloqueio_id})).all()
+    ]
+    avisos = [
+        {"sistema": a.sistema, "estado": a.estado, "de_terceiro": bool(a.de_terceiro)}
+        for a in (
+            await c.execute(
+                text(
+                    "SELECT s.nome AS sistema, a.estado, s.origem <> 'proprio' AS de_terceiro FROM avisos_bloqueio a"
+                    " JOIN sistemas s ON s.id = a.sistema_id WHERE a.bloqueio_id = :b"
+                    " ORDER BY s.nome, a.criado_em, a.parte, a.id"
+                ),
+                {"b": bloqueio_id},
+            )
+        ).all()
+    ]
     return Comprovante(
         linha.bloqueio_id,
         _json(linha.paradas),
         _json(linha.ja_saidas),
-        _json(linha.informado),
+        informado,
         _json(linha.em_conferencia),
+        avisos,
     )
 
 

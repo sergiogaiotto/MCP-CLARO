@@ -29,6 +29,21 @@ Para cada acao liberada e na hora:
    novo algumas vezes; se nao der, encerra o turno: a conexao da trava cai, quem assumir a porta (esta mesma,
    na volta seguinte, ou outra copia) da a linha "enviando" como nao confirmada, e nada e reenviado.
 
+Fase 4 (selos de nivel 2 e 3; desenho 5.1, criticas A1, M3 e M4): na transacao que passa a acao a "enviando", antes
+de marcar, o passo do selo le o selo vigente do sistema (``selo.vigente.ler``) e o efetivo da pessoa
+(``FEATURE_PHASE4_BADGES`` ligada, ou pessoa de teste) e, com nivel 2 ou 3, grava ``envios_selo`` (o banco cria o
+numero, ou copia o da original num pedido igual). Com a chave desligada e pessoa real, nenhum numero iria: o selo
+vigente nem e lido. Tudo num SAVEPOINT: se falhar, a acao sai sem numero e a porta segue (o selo nunca para a
+porta). A linha ``acao_enviada_sem_numero`` (e o contador) so vai quando um numero era devido: o selo lido pedia
+numero, ou, sem conseguir ler o selo, a ficha da pessoa prometia nivel 2 ou 3; sem promessa, so o contador
+``selo_nao_lido{onde=porta}``. O numero vai so no ``_meta``
+do pedido (``chave_operacao``), so quando ha envio; nenhum numero vai a servidor de terceiros ate o contrato da sala
+v2. No nivel 3, o recibo do ``_meta`` do resultado e lido antes de o ``_meta`` do sistema sair, conferido
+(``selo.respostas``) e gravado em ``informacoes_sistema`` (origem ``recibo``) na transacao do fim, por ultimo e num
+SAVEPOINT; recibo ausente ou fora do contrato e ``resposta_invalida``. O recibo nunca muda o estado da fila, nunca
+vai a ``operacoes.resultado`` nem ao aplicativo. A acao que saiu com o numero da original ganha
+``acao_enviada_mesmo_numero``; a que saiu num nivel menor que o da ficha, ``acao_enviada_selo_menor``.
+
 O despachante acorda pelo ``LISTEN mcp_claro_saida`` e, de reserva, por varredura. Com a porta de saida
 fechada, so olha de novo a cada varredura.
 
@@ -48,7 +63,9 @@ import asyncio
 import contextlib
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
@@ -76,6 +93,8 @@ from mcp_claro.saida import fila, travas
 from mcp_claro.saida.estados import Estado
 from mcp_claro.saida.fila import Operacao
 from mcp_claro.saida.protocolo import FUSO, codigo_conferencia
+from mcp_claro.selo import consulta as selo_consulta
+from mcp_claro.selo import respostas, vigente
 from mcp_claro.versao import VERSAO_MCP
 
 log = logger("mcp_claro.saida.despachante")
@@ -177,6 +196,28 @@ def sem_nulo(valor: Any) -> tuple[Any, int]:
     return valor, 0
 
 
+@dataclass(frozen=True, slots=True)
+class SeloDoEnvio:
+    """O que o passo do selo decidiu na transacao de "enviando" (desenho 5.1, critica A1).
+
+    ``nivel``: o selo com que a acao sai (1 sem numero). ``chave``, ``teste_id``: o numero e o teste de
+    ``envios_selo`` (so com nivel 2 ou 3). ``original``: o protocolo da original, quando o banco copiou o numero dela
+    (pedido igual, D16). ``sem_numero``: o selo pedia numero e o passo falhou (a acao sai sem ele). ``nivel_ficha``:
+    o nivel do retrato da ficha (``fichas.selo``), para a linha da acao que saiu num nivel menor (critica M3)."""
+
+    nivel: int = 1
+    chave: str | None = None
+    teste_id: uuid.UUID | None = None
+    original: str | None = None
+    sem_numero: bool = False
+    nivel_ficha: int | None = None
+    retrato: dict[str, Any] | None = None
+
+
+SEM_SELO: Final = SeloDoEnvio()
+"""A acao sai sem numero, como antes da Fase 4 (nivel 1, terceiro, ou nenhuma leitura do selo)."""
+
+
 class PortaDeSaida:
     def __init__(
         self,
@@ -188,6 +229,7 @@ class PortaDeSaida:
         acoes_de_programas: bool = False,
         limite_exige_passkey: bool = True,
         terceiros_ligados: bool = False,
+        selos_ligados: bool = False,
         ligacao: Ligador | None = None,
         ambiente: str = "producao",
         liberar_locais: bool = False,
@@ -206,6 +248,12 @@ class PortaDeSaida:
         # Chave da Fase 3 (``FEATURE_PHASE3_THIRD_PARTY``): sem ela, so a acao de pessoa de teste sai para um
         # servidor de terceiros. A reconferencia da saida decide de novo, na hora do envio.
         self.terceiros_ligados = terceiros_ligados
+        # Chave da Fase 4 (``FEATURE_PHASE4_BADGES``): sem ela, so a acao de pessoa de teste sai com o numero do selo.
+        self.selos_ligados = selos_ligados
+        # O selo de cada acao que esta saindo (pela linha da fila) e o recibo lido da resposta: a porta envia uma acao
+        # por vez, e os metodos do envio (que os testes trocam) mantem a assinatura de antes.
+        self._selos: dict[int, SeloDoEnvio] = {}
+        self._recibos: dict[int, respostas.Recibo | respostas.Invalida] = {}
         # Todo envio sai por ``ligacao(sistema)``: proprio pelo cliente fixado, terceiro pela sala de visitas.
         self.ligacao: Ligador = ligacao or ligacao_sem_sala
         # ``APP_ENV`` e, so em testes, endereco local na troca de chave OAuth de um terceiro: valem para a
@@ -492,11 +540,87 @@ class PortaDeSaida:
                 await c.execute(text("SELECT sondagem FROM sistemas WHERE id = :s"), {"s": ferramenta.sistema.id})
             ).scalar_one_or_none()
             declarado = await repositorio.esquema_declarado(c, ferramenta.sistema.id, ferramenta.nome_original)
+            # Antes de "enviando": o banco so aceita o envio com numero da fila ainda "liberada".
+            selo = await self._passo_do_selo(c, op, ferramenta)
             await fila.marcar_enviando(c, op)
-        final, resultado, desfecho, pedidos = await self._enviar(op, ferramenta, sondagem, declarado)
-        await self._gravar_fim(op, final, resultado, desfecho, pedidos=pedidos)
+        self._selos[op.fila_id] = selo
+        try:
+            final, resultado, desfecho, pedidos = await self._enviar(op, ferramenta, sondagem, declarado)
+            recibo = self._recibos.pop(op.fila_id, None)
+        finally:
+            self._selos.pop(op.fila_id, None)
+            self._recibos.pop(op.fila_id, None)
+        await self._gravar_fim(op, final, resultado, desfecho, pedidos=pedidos, selo=selo, recibo=recibo)
         CONTADORES.somar("acoes", estado=str(final), sistema=ferramenta.sistema.nome)
         return True
+
+    async def _passo_do_selo(self, c: AsyncConnection, op: Operacao, ferramenta: FerramentaVitrine) -> SeloDoEnvio:
+        """O numero do selo, na transacao de "enviando" e num SAVEPOINT (critica A1): le o selo vigente e o efetivo
+        da pessoa e, com nivel 2 ou 3, grava ``envios_selo`` (o banco cria o numero ou copia o da original). Qualquer
+        falha aqui desfaz so o SAVEPOINT: a acao sai sem numero, e a porta segue. Nenhum numero vai a servidor de
+        terceiros ate o contrato da sala v2 (G7): a sala recusaria o pedido inteiro.
+
+        Com ``FEATURE_PHASE4_BADGES`` desligada e pessoa real, o efetivo e sempre ``vigente.FASE_DESLIGADA``: o selo
+        vigente nem e lido. ``sem_numero`` (a linha ``acao_enviada_sem_numero``) so quando um numero era devido: o
+        selo lido pedia numero e o envio nao gravou, ou o selo nao foi lido e a ficha prometia nivel 2 ou 3. Sem
+        promessa nenhuma, a falha so soma ``selo_nao_lido{onde=porta}``: a acao sai como a pessoa esperava."""
+        if ferramenta.sistema.de_terceiro:
+            return SEM_SELO
+        nivel_ficha: int | None = None
+        pediu_numero = False
+        try:
+            async with c.begin_nested():
+                linha = (
+                    await c.execute(
+                        text(
+                            "SELECT (SELECT teste FROM pessoas WHERE id = :p) AS teste,"
+                            " (SELECT selo FROM fichas WHERE id = :f) AS ficha"
+                        ),
+                        {"p": op.pessoa_id, "f": op.ficha_id},
+                    )
+                ).one()
+                nivel_ficha = _nivel_do_retrato(linha.ficha)
+                if not (self.selos_ligados is True or linha.teste is True):
+                    return SeloDoEnvio(nivel_ficha=nivel_ficha, retrato=vigente.FASE_DESLIGADA.retrato())
+                lido = await vigente.ler(c, ferramenta.sistema.id)
+                efetivo = vigente.efetivo(lido, ligada=self.selos_ligados, pessoa_teste=bool(linha.teste))
+                if efetivo.nivel < 2:
+                    return SeloDoEnvio(nivel_ficha=nivel_ficha, retrato=efetivo.retrato())
+                pediu_numero = True
+                envio = (
+                    await c.execute(
+                        text(
+                            "INSERT INTO envios_selo (operacao_id, sistema_id, nivel, teste_id)"
+                            " VALUES (:o, :s, :n, :t) RETURNING chave, nivel, teste_id, repete_operacao_id"
+                        ),
+                        {"o": op.id, "s": ferramenta.sistema.id, "n": efetivo.nivel, "t": efetivo.teste_id},
+                    )
+                ).one()
+                original = None
+                if envio.repete_operacao_id is not None:
+                    original = (
+                        await c.execute(
+                            text("SELECT protocolo FROM operacoes WHERE id = :o"), {"o": envio.repete_operacao_id}
+                        )
+                    ).scalar_one()
+        except Exception as erro:  # noqa: BLE001 - o selo nunca para a porta (A1): a acao sai sem numero
+            log.warning("selo_do_envio_falhou", fila_id=op.fila_id, erro=type(erro).__name__)
+            if pediu_numero or (nivel_ficha or 1) >= 2:
+                CONTADORES.somar("selo_envios", desfecho="sem_numero")
+                return SeloDoEnvio(sem_numero=True, nivel_ficha=nivel_ficha)
+            CONTADORES.somar("selo_nao_lido", onde="porta")
+            return SeloDoEnvio(nivel_ficha=nivel_ficha)
+        CONTADORES.somar("selo_envios", desfecho="mesmo_numero" if original else "com_numero", nivel=str(envio.nivel))
+        if original:
+            CONTADORES.somar("selo_numero_reaproveitado")
+        return SeloDoEnvio(
+            nivel=int(envio.nivel),
+            chave=str(envio.chave),
+            teste_id=uuid.UUID(str(envio.teste_id)),
+            original=None if original is None else str(original),
+            nivel_ficha=nivel_ficha,
+            retrato=efetivo.retrato(),
+        )
 
     async def _gravar_fim(
         self,
@@ -506,9 +630,13 @@ class PortaDeSaida:
         desfecho: str,
         *,
         pedidos: Sequence[str] = (),
+        selo: SeloDoEnvio = SEM_SELO,
+        recibo: respostas.Recibo | respostas.Invalida | None = None,
     ) -> None:
         """Grava o fim do envio, tentando de novo algumas vezes se o banco falhar. ``pedidos``: as categorias do que o
-        sistema pediu no meio (``dados.pedidos`` da linha do fim).
+        sistema pediu no meio (``dados.pedidos`` da linha do fim). ``selo`` e ``recibo``: o que o passo do selo decidiu
+        e o recibo lido do resultado (nivel 3), gravados na mesma transacao, depois do fim e num SAVEPOINT
+        (``_gravar_selo``): uma falha ali nunca impede o fim.
 
         Antes, troca U+0000 por U+FFFD no resultado (o banco recusaria a gravacao todas as vezes). Sem conseguir
         gravar, levanta ``FimNaoGravado``: o turno da porta acaba, a conexao da trava cai, e quem assumir a porta
@@ -524,6 +652,8 @@ class PortaDeSaida:
             try:
                 async with self.engine.begin() as c:
                     await fila.finalizar(c, op, final, resultado, desfecho, pedidos=pedidos)
+                    if selo is not SEM_SELO or recibo is not None:
+                        await self._gravar_selo(c, op, final, selo, recibo)
             except (SQLAlchemyError, OSError, TimeoutError) as erro:
                 log.warning("fim_do_envio_falhou", fila_id=op.fila_id, tentativa=tentativa, erro=type(erro).__name__)
                 if tentativa < TENTATIVAS_DO_FIM:
@@ -532,6 +662,113 @@ class PortaDeSaida:
                 return
         log.error("fim_do_envio_nao_gravado", fila_id=op.fila_id, estado=str(final))
         raise FimNaoGravado(f"O fim do envio da linha {op.fila_id} ({final}) nao gravou; a retomada decide.") from None
+
+    async def _gravar_selo(
+        self,
+        c: AsyncConnection,
+        op: Operacao,
+        final: Estado,
+        selo: SeloDoEnvio,
+        recibo: respostas.Recibo | respostas.Invalida | None,
+    ) -> None:
+        """As linhas do selo no fim do envio, num SAVEPOINT da transacao do fim (A1): a acao sem numero, com o mesmo
+        numero da original, num nivel menor que o da ficha (so se a acao saiu), e o recibo em ``informacoes_sistema``,
+        por ultimo (a trava consultiva do sistema fica com ela ate o fim da transacao). Uma tentativa de novo depois
+        de um COMMIT cuja confirmacao se perdeu nao grava duas vezes."""
+        try:
+            async with c.begin_nested():
+                await self._linhas_do_selo(c, op, final, selo, recibo)
+        except Exception as erro:  # noqa: BLE001 - o selo nunca impede o fim do envio
+            log.warning("selo_do_fim_nao_gravado", fila_id=op.fila_id, erro=type(erro).__name__)
+            CONTADORES.somar("selo_fim_nao_gravado")
+
+    async def _linhas_do_selo(
+        self,
+        c: AsyncConnection,
+        op: Operacao,
+        final: Estado,
+        selo: SeloDoEnvio,
+        recibo: respostas.Recibo | respostas.Invalida | None,
+    ) -> None:
+        saiu = final is not Estado.NAO_SAIU
+        dados: dict[str, Any] = {} if selo.retrato is None else {"selo": selo.retrato}
+        linhas: list[tuple[str, dict[str, object]]] = []
+        if saiu and selo.sem_numero:
+            linhas.append(("acao_enviada_sem_numero", {"ferramenta": op.nome_vitrine, "protocolo": op.protocolo}))
+        if saiu and selo.original is not None:
+            linhas.append(
+                (
+                    "acao_enviada_mesmo_numero",
+                    {"ferramenta": op.nome_vitrine, "original": selo.original, "protocolo": op.protocolo},
+                )
+            )
+        if saiu and not selo.sem_numero and selo.nivel_ficha is not None and selo.nivel < selo.nivel_ficha:
+            # Sem numero por falha do MCP-CLARO, a linha de cima ja diz; esta diz que o selo do sistema mudou.
+            linhas.append(
+                (
+                    "acao_enviada_selo_menor",
+                    {
+                        "ferramenta": op.nome_vitrine,
+                        "nivel": selo.nivel,
+                        "nivel_ficha": selo.nivel_ficha,
+                        "protocolo": op.protocolo,
+                    },
+                )
+            )
+        for tipo, campos in linhas:
+            ja = (
+                await c.execute(
+                    text("SELECT 1 FROM extrato WHERE protocolo = :p AND tipo = :t LIMIT 1"),
+                    {"p": op.protocolo, "t": tipo},
+                )
+            ).first()
+            if ja is None:
+                await registrar(
+                    c,
+                    papel="despachante",
+                    tipo=tipo,
+                    campos=campos,
+                    protocolo=op.protocolo,
+                    pessoa_id=op.pessoa_id,
+                    aplicativo_id=op.aplicativo_id,
+                    sistema_id=op.sistema_id,
+                    ferramenta=op.nome_vitrine,
+                    dados=dados,
+                )
+        if recibo is None or selo.chave is None or selo.teste_id is None:
+            return
+        ja_recibo = (
+            await c.execute(
+                text("SELECT 1 FROM informacoes_sistema WHERE operacao_id = :o AND origem = 'recibo' LIMIT 1"),
+                {"o": op.id},
+            )
+        ).first()
+        if ja_recibo is not None:
+            return
+        if isinstance(recibo, respostas.Invalida):
+            CONTADORES.somar("selo_respostas_invalidas", origem="recibo", motivo=recibo.motivo)
+            info = selo_consulta.Informacao(op.id, op.sistema_id, "recibo", "resposta_invalida")
+        else:
+            info = selo_consulta.Informacao(
+                op.id,
+                op.sistema_id,
+                "recibo",
+                "respondeu",
+                estado=recibo.estado,
+                repetida=recibo.repetida,
+                objetos=recibo.objetos,
+            )
+        if await selo_consulta.gravar_informacao(c, info):
+            await selo_consulta.contradicao(
+                c,
+                sistema_id=op.sistema_id,
+                sistema_nome=op.sistema_nome,
+                protocolo=op.protocolo,
+                pessoa_id=op.pessoa_id,
+                aplicativo_id=op.aplicativo_id,
+                teste_id=selo.teste_id,
+                emails_admin=self.emails_admin,
+            )
 
     async def _conferir(self, c: Any, op: Operacao) -> FerramentaVitrine | tuple[Estado, str]:
         situacoes = (
@@ -732,6 +969,9 @@ class PortaDeSaida:
 
         sondagem = json.dumps(discover_json) if isinstance(discover_json, dict) else discover_json
         chamar = self.chamar or self.ligacao(sistema).chamar_ferramenta
+        selo = self._selos.get(op.fila_id, SEM_SELO)
+        # O numero so vai quando ha envio com numero: os chamadores falsos dos testes antigos nao tem o parametro.
+        com_numero: dict[str, Any] = {} if selo.chave is None else {"chave_operacao": selo.chave}
         try:
             resposta = await chamar(
                 sistema.endereco,
@@ -742,11 +982,17 @@ class PortaDeSaida:
                 traceparent=None,
                 prazo=self.prazo_envio,
                 esquema_declarado=declarado,
+                **com_numero,
             )
         except Exception:
             # Nao sabemos em que ponto parou: o pedido pode ter saido. Nunca reenvia.
             log.exception("envio_falhou")
             return Estado.NAO_CONFIRMADA, None, "falha inesperada durante o envio", ()
+        if selo.chave is not None and selo.nivel == 3:
+            # O recibo e lido aqui, antes de o _meta do sistema sair do resultado (``_estado_final``).
+            recibo = _recibo_da_resposta(resposta, selo.chave)
+            if recibo is not None:
+                self._recibos[op.fila_id] = recibo
         fim = await self._classificar(op, ferramenta, resposta, aberta)
         await self._registrar_sala(op, sistema, resposta)
         return fim
@@ -867,3 +1113,23 @@ class PortaDeSaida:
             codigo = resposta.erro.code if resposta.erro is not None else "?"
             return Estado.NAO_CONFIRMADA, None, f"o sistema devolveu erro depois de receber (codigo {codigo})"
         return Estado.NAO_CONFIRMADA, None, "a resposta do sistema nao chegou inteira"
+
+
+def _recibo_da_resposta(resposta: cliente.Resposta, numero: str) -> respostas.Recibo | respostas.Invalida | None:
+    """O recibo do nivel 3 da resposta de uma acao com ``numero`` (lido do resultado cru, antes de o ``_meta`` sair):
+    valido, ``Invalida`` (ausente ou fora do contrato) ou ``None`` quando nao ha resultado (o recibo so existe quando
+    a resposta chegou; ``input_required`` nao poe nada em efeito e nao traz recibo)."""
+    if resposta.tipo != "resultado" or not isinstance(resposta.resultado, types.CallToolResult):
+        return None
+    try:
+        return respostas.ler_recibo(resposta.resultado, numero=numero)
+    except Exception as erro:  # noqa: BLE001 - nunca para a porta; nunca acontece com o que respostas le
+        log.warning("recibo_nao_lido", erro=type(erro).__name__)
+        return respostas.Invalida("forma")
+
+
+def _nivel_do_retrato(retrato: Any) -> int | None:
+    """O nivel do retrato do selo da ficha (``fichas.selo``), ou None (ficha de antes da 0007, ou acao pelo limite)."""
+    valor = json.loads(retrato) if isinstance(retrato, str) else retrato
+    nivel = valor.get("nivel") if isinstance(valor, dict) else None
+    return nivel if isinstance(nivel, int) and not isinstance(nivel, bool) else None

@@ -453,14 +453,24 @@ END $$;
 -- na mesma porta e o mesmo servico. O nome vai em minusculas e sem ponto no fim; os pontos de outros alfabetos
 -- (U+3002, U+FF0E, U+FF61), que o leitor do cliente troca, viram pontos comuns; um IPv4 escrito de qualquer jeito
 -- vai na forma comum (selo_ipv4_escrito), o IPv6 na forma do banco (host), e o IPv4 dentro de um IPv6 mapeado
--- (::ffff:a.b.c.d) vale pelo IPv4. localhost, os nomes .localhost, todo IP de loopback (127.0.0.0/8, ::1) e o IP
--- nao especificado (0.0.0.0, ::) chegam a mesma maquina: viram o nome localhost. Nulo quando o cliente nao conecta no
--- endereco: IPv4 de quatro numeros fora da forma comum, IPv6 que o cliente nao le, porta que nao e numero, nome
--- vazio, caractere de controle. Fica de fora o nome fora de ASCII (depois de trocar os pontos): o leitor do cliente
--- o escreve na forma xn-- (IDNA), que o banco nao calcula. Esse nome nunca e igual ao de um alvo, que e so ASCII
--- (selo_alvo_bem_escrito); a producao assim escrita, com o alvo na forma xn--, fica so com a tela
--- (declaracao.alvo_na_producao). Com os pontos trocados, o banco e de proposito mais largo que o leitor do cliente,
--- que recusa alguns desses nomes (IDNA).
+-- (::ffff:a.b.c.d) ou do prefixo NAT64 (64:ff9b::a.b.c.d, 64:ff9b::/96, que numa rede so IPv6 chega ao proprio IPv4)
+-- vale pelo IPv4. localhost, os nomes .localhost, todo IP de loopback (127.0.0.0/8, ::1) e o IP nao especificado
+-- (0.0.0.0, ::) chegam a mesma maquina: viram o nome localhost. Nulo quando o cliente nao conecta no endereco ou o
+-- banco nao le o que ele conecta: IPv4 de quatro numeros fora da forma comum, IPv6 que o cliente nao le, porta que nao
+-- e so de digitos ASCII, nome vazio, caractere de controle. Ficam de fora:
+-- * o nome fora de ASCII (depois de trocar os pontos): o leitor do cliente o escreve na forma xn-- (IDNA), que o banco
+--   nao calcula. Esse nome nunca e igual ao de um alvo, que e so ASCII (selo_alvo_bem_escrito); a producao assim
+--   escrita, com o alvo na forma xn--, fica so com a tela (declaracao.alvo_na_producao);
+-- * a porta escrita como o leitor do cliente tambem a le, com int() (+443, 4_43, ' 443', digitos de outros
+--   alfabetos): o alvo nunca a tem (selo_alvo_bem_escrito); a producao assim escrita fica so com a tela, que le a
+--   porta pelo leitor do cliente, e o cadastro a recusa (urlsplit .port);
+-- * outro prefixo NAT64 que nao o 64:ff9b::/96 (o de uso local 64:ff9b:1::/48, ou o da rede), que so a rede sabe;
+-- * o IPv4 que o 6to4 (2002::/16) e o Teredo (2001::/32) levam dentro, que a Fase 3 le para saber se o IP e da
+--   internet (telas/admin._ip_publico, ligacao.cliente._ip_publico): aqui eles valem como IPv6, no banco e na tela
+--   (declaracao._ipv6_com_ipv4_dentro), e o alvo pode ser um deles. Um deles so chega a maquina desse IPv4 quando
+--   ela e a propria ponta do tunel, e o 6to4 esta em desuso (RFC 7526).
+-- Com os pontos trocados, o banco e de proposito mais largo que o leitor do cliente, que recusa alguns desses nomes
+-- (IDNA).
 CREATE FUNCTION selo_endereco_conexao(p_endereco text) RETURNS text[] LANGUAGE plpgsql IMMUTABLE STRICT
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
@@ -494,6 +504,8 @@ BEGIN
     END IF;
     IF ip <<= '::ffff:0.0.0.0/96'::inet THEN
       ip := '0.0.0.0'::inet + (ip - '::ffff:0.0.0.0'::inet);
+    ELSIF ip <<= '64:ff9b::/96'::inet THEN
+      ip := '0.0.0.0'::inet + (ip - '64:ff9b::'::inet);
     END IF;
   ELSE
     partes := regexp_match(autoridade, '^([^:]*)(?::(.*))?$');
@@ -534,34 +546,45 @@ BEGIN
   RETURN ARRAY[nome, porta, substring(selo_endereco_normalizado(p_endereco) FROM '^[^/]*//[^/]*(.*)$')];
 END $$;
 
--- O nome do alvo de teste escrito de um jeito so (critica A4; mesma regra de selo/declaracao.py, _nome_do_alvo, que
--- o teste confere numa lista de formas): o nome que o cliente conecta e o proprio texto. Sem isso, um alvo que e a
--- producao escrita de outro jeito passava pela comparacao de texto (selo_alvo_na_producao): pontos de outros alfabetos
--- (U+3002, U+FF0E, U+FF61), que o leitor do cliente troca por pontos comuns, e um IPv4 curto, decimal ou hexadecimal
--- (127.1, 2130706433, 0x7f.0.0.1), que o resolvedor le como o IP inteiro. Vale:
+-- O nome e a porta do alvo de teste escritos de um jeito so (critica A4; mesma regra de selo/declaracao.py,
+-- _nome_do_alvo, que o teste confere numa lista de formas): o nome e a porta que o cliente conecta sao o proprio texto.
+-- Sem isso, um alvo que e a producao escrita de outro jeito passava pela comparacao de texto (selo_alvo_na_producao):
+-- pontos de outros alfabetos (U+3002, U+FF0E, U+FF61), que o leitor do cliente troca por pontos comuns, um IPv4 curto,
+-- decimal ou hexadecimal (127.1, 2130706433, 0x7f.0.0.1), que o resolvedor le como o IP inteiro, e a porta escrita de
+-- outro jeito. Vale:
 -- * um nome so de letras ASCII (minusculas depois de trocar as maiusculas ASCII), numeros, _ e -, em pedacos
 --   separados por ponto, com um ponto no fim ou nao; um nome com acento vai na forma xn--;
 -- * e, se o nome tem cara de IPv4 (numeros ou 0x... separados por ate tres pontos), so o IPv4 com os quatro numeros,
 --   de 0 a 255 e sem zero a esquerda;
 -- * ou um IPv6 entre colchetes, na forma curta que o banco escreve (host(inet)), sem zona nem mascara e sem um IPv4
 --   dentro: nem o mapeado ::ffff:a.b.c.d, que o cliente conecta no proprio IPv4 (a producao 10.0.0.5, ou a maquina
---   local, escrita de outro jeito), nem a forma antiga ::a.b.c.d (compativel com IPv4), que o banco e o Python
---   escrevem de jeitos diferentes.
--- O nome e o de urllib.parse.urlsplit: depois do ultimo @ e, sem colchete, antes do primeiro ':'. Endereco nulo (o
--- modo ferramentas_de_teste nao tem alvo) vale.
+--   local, escrita de outro jeito), nem o do prefixo NAT64 64:ff9b::a.b.c.d (64:ff9b::/96), que numa rede so IPv6
+--   chega ao proprio IPv4 (a Fase 3 o trata assim, telas/admin._NAT64), nem a forma antiga ::a.b.c.d (compativel com
+--   IPv4), que o banco e o Python escrevem de jeitos diferentes. O 6to4 e o Teredo, que tambem levam um IPv4, valem
+--   como IPv6 (veja selo_endereco_conexao);
+-- * e a porta vazia ou so com os digitos ASCII de 0 a 9, de 0 a 65535 (a regra de urlsplit .port, que a tela usa).
+--   Os zeros a esquerda saem antes da conta, e mais de cinco digitos depois deles ja e demais: a conta nunca passa do
+--   integer (porta com 11 ou 40 digitos da false, nunca erro).
+--   O leitor do cliente (httpx2) le a porta com int(), que aceita +443, 4_43, ' 443' e digitos de outros alfabetos:
+--   sem esta regra, o alvo https://p.exemplo:+443/mcp, que o cliente conecta na producao https://p.exemplo/mcp, era
+--   gravado (as formas normalizada e de conexao do banco nao leem essa porta, e os textos ficavam diferentes).
+-- O nome e o de urllib.parse.urlsplit: depois do ultimo @ e, sem colchete, antes do primeiro ':'; a porta e o que
+-- vem depois do ':' (com colchete, depois do ']'). Endereco nulo (o modo ferramentas_de_teste nao tem alvo) vale.
 CREATE FUNCTION selo_alvo_mal_escrito() RETURNS text LANGUAGE sql IMMUTABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT 'O nome do alvo de teste vai escrito de um jeito so: letras sem acento, numeros, ponto e hifen (a forma xn--'
          ' para nomes com acento), um IPv4 com os quatro numeros ou um IPv6 entre colchetes, na forma curta e sem um'
-         ' IPv4 dentro'::text
+         ' IPv4 mapeado (::ffff:) ou NAT64 (64:ff9b::); e a porta, se houver, so com os digitos de 0 a 9,'
+         ' ate 65535'::text
 $$;
 
 CREATE FUNCTION selo_alvo_bem_escrito(p_endereco text) RETURNS boolean LANGUAGE plpgsql IMMUTABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   hospedeiro text;
-  colchetes text[];
+  partes text[];
   nome text;
+  porta text;
 BEGIN
   IF p_endereco IS NULL THEN
     RETURN true;
@@ -570,17 +593,29 @@ BEGIN
   IF hospedeiro IS NULL THEN
     RETURN false;
   END IF;
+  -- O nome e a porta: com colchete, o IPv6 e depois dele so ':' e digitos; sem colchete, o nome ate o primeiro ':'
+  -- e depois dele so digitos (a regra de urlsplit .port, que a tela usa).
   IF strpos(hospedeiro, '[') > 0 THEN
-    colchetes := regexp_match(hospedeiro, '^\[([^\]]*)\](:[^:]*)?$');
-    IF colchetes IS NULL THEN
-      RETURN false;
-    END IF;
-    nome := translate(colchetes[1], 'ABCDEF', 'abcdef');
+    partes := regexp_match(hospedeiro, '^\[([^\]]*)\](?::([0-9]*))?$');
+  ELSE
+    partes := regexp_match(hospedeiro, '^([^:]*)(?::([0-9]*))?$');
+  END IF;
+  IF partes IS NULL THEN
+    RETURN false;
+  END IF;
+  -- Sem os zeros a esquerda, mais de cinco digitos ja e demais: a conta so roda no que cabe no integer.
+  porta := ltrim(coalesce(partes[2], ''), '0');
+  IF length(porta) > 5 OR (porta <> '' AND porta::integer > 65535) THEN
+    RETURN false;
+  END IF;
+  IF strpos(hospedeiro, '[') > 0 THEN
+    nome := translate(partes[1], 'ABCDEF', 'abcdef');
     RETURN nome ~ '^[0-9a-f:.]+$' AND pg_input_is_valid(nome, 'inet')
        AND family(nome::inet) = 6 AND host(nome::inet) = nome
-       AND NOT (host(nome::inet) ~ '^::[0-9]+\.' ) AND NOT (nome::inet <<= '::ffff:0.0.0.0/96'::inet);
+       AND NOT (host(nome::inet) ~ '^::[0-9]+\.' ) AND NOT (nome::inet <<= '::ffff:0.0.0.0/96'::inet)
+       AND NOT (nome::inet <<= '64:ff9b::/96'::inet);
   END IF;
-  nome := translate(split_part(hospedeiro, ':', 1), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
+  nome := translate(partes[1], 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
   IF nome !~ '^[a-z0-9_-]+(\.[a-z0-9_-]+)*\.?$' THEN
     RETURN false;
   END IF;
@@ -764,10 +799,13 @@ CREATE TABLE declaracoes_selo (
 -- qualquer situacao. Duas comparacoes, como a tela (declaracao.alvo_na_producao): a forma normalizada
 -- (selo_endereco_normalizado) e a forma de conexao (selo_endereco_conexao), que pega a producao escrita de outro
 -- jeito, como 127.0.0.1 e localhost, [::1] ou 127.0.0.2, localhost e x.localhost, 127.1, ou 10.0.0.5 e
--- [::ffff:10.0.0.5] na producao. Fica so com a tela a producao com o nome fora de ASCII e o alvo na forma xn--
--- (selo_endereco_conexao). Conferido ao salvar a declaracao, ao pedir o teste, na passagem para 'rodando' (antes das
--- escritas da bateria) e ao gravar o teste, porque a producao pode mudar (ou outro sistema ser cadastrado) depois de
--- a declaracao ser salva. Cada forma do alvo e calculada uma vez (subconsulta), e cada producao uma vez por forma.
+-- [::ffff:10.0.0.5] ou [64:ff9b::a00:5] (NAT64) na producao. O alvo escrito de outro jeito (o nome, o IP ou a porta)
+-- ja saiu antes, por selo_alvo_bem_escrito. Ficam so com a tela a producao com o nome fora de ASCII e o alvo na forma
+-- xn--, e a producao com a porta escrita como int() a le (+443), que o cadastro recusa (selo_endereco_conexao). O
+-- 6to4 e o Teredo nao valem pelo IPv4 de dentro em nenhum dos dois lados (selo_endereco_conexao).
+-- Conferido ao salvar a declaracao, ao pedir o teste, na passagem para 'rodando' (antes das escritas da bateria) e ao
+-- gravar o teste, porque a producao pode mudar (ou outro sistema ser cadastrado) depois de a declaracao ser salva.
+-- Cada forma do alvo e calculada uma vez (subconsulta), e cada producao uma vez por forma.
 -- Roda como quem chama: a entrada e o despachante leem sistemas.
 CREATE FUNCTION selo_alvo_na_producao(p_alvo text) RETURNS boolean LANGUAGE sql STABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
