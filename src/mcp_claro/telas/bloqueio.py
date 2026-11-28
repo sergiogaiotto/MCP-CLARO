@@ -6,14 +6,26 @@
   aplicativos dela (``pessoa``). A linha do extrato sai da propria regra (``bloquear`` e ``encerrar``).
 - Tocar de novo no mesmo botao nao abre outro igual: mostra o comprovante do que ja vale.
 - O comprovante mostra tambem as tres partes da porta de saida (Fase 2), como na proposta: o que paramos a
-  tempo, o que ja tinha seguido (nos sistemas de nivel 1 e 2, seguido quer dizer entregue ao sistema, nao
-  concluido por ele) e o que ainda esta em conferencia.
+  tempo, o que ja tinha seguido e o que ainda esta em conferencia.
+
+Fase 4 (desenho 6.3 e 7.1): o comprovante ganha a quarta parte, "O que o sistema informou (nivel 3)"
+(``quatro_partes``), da leitura de agora (``Comprovante.informado`` e ``Comprovante.avisos``), nunca da linha de
+``comprovantes``, que nao muda. So as categorias do contrato e a hora do gateway, marcadas como informadas pelo sistema
+(ou pelo servidor de terceiros, critica M9); nunca texto, identificador ou hora do sistema. O andamento de cada aviso
+nao culpa o sistema pelo que e do MCP-CLARO: ``pendente`` e "o aviso ainda nao saiu" (a chave da pessoa nao abriu, ou a
+porta esta fechada), ``sistema_fora`` e "o MCP-CLARO nao avisou o sistema", ``sem_resposta`` so quando o sistema foi
+chamado em todas as tentativas, e ``bloqueio_encerrado`` e "o bloqueio acabou antes de o aviso sair". A dica fixa de
+"ja tinha seguido" vira uma dica por linha, pelo nivel do selo com que cada acao saiu (``envios_selo.nivel``; sem
+envio com numero, nivel 1). A leitura traz tambem a ultima resposta a consulta de uma acao de nivel 2 em conferencia:
+com ela, a quarta parte nao diz "nivel 3" no titulo, e cada linha diz o nivel com que a acao saiu
+(``QuatroPartes.so_nivel_3``).
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 from zoneinfo import ZoneInfo
@@ -30,6 +42,7 @@ from mcp_claro.saida import fila
 from mcp_claro.saida.protocolo import FUSO
 from mcp_claro.telas import consultas
 from mcp_claro.telas.nucleo import Telas, tela, uuid_ou_none, ver_depois
+from mcp_claro.telas.paginas import estado_legivel
 
 log = logger("mcp_claro.telas.bloqueio")
 
@@ -132,13 +145,67 @@ ESTADOS_EM_CONFERENCIA: Final = frozenset(EM_CONFERENCIA)
 
 
 @dataclass(frozen=True, slots=True)
-class TresPartes:
-    """Comprovante do bloqueio em tres partes (``fila.comprovante_do_bloqueio``), como a tela mostra:
-    o que paramos a tempo, o que ja tinha seguido e o que ainda esta em conferencia."""
+class Informou:
+    """Uma linha da quarta parte do comprovante: o que um sistema informou sobre uma acao (``Comprovante.informado``),
+    so com o vocabulario do contrato e a hora do gateway."""
+
+    protocolo: str
+    sistema: str
+    de_terceiro: bool
+    estado: str
+    """O estado em palavras (``paginas.ESTADOS_LEGIVEIS``)."""
+    origem: str
+    """De que pergunta veio: o aviso do bloqueio, a consulta ou a resposta da propria acao (``ORIGENS``)."""
+    hora: str
+    """A hora em que o MCP-CLARO gravou a resposta (``gravado_em``, horario de Brasilia), nunca uma hora do sistema."""
+
+
+@dataclass(frozen=True, slots=True)
+class AvisoDoBloqueio:
+    """O andamento do aviso do bloqueio a um sistema (``Comprovante.avisos``): ``estado`` e um de
+    ``contrato.ESTADOS_DO_AVISO`` (a tela tem uma frase para cada um)."""
+
+    sistema: str
+    de_terceiro: bool
+    estado: str
+
+
+ORIGENS: Final[dict[str, str]] = {
+    "aviso": "em resposta ao aviso do bloqueio",
+    "consulta": "em resposta à consulta do MCP-CLARO",
+    "recibo": "na resposta da própria ação",
+}
+"""De onde veio cada linha de ``informacoes_sistema`` (``contrato.ORIGENS``), como o comprovante diz."""
+
+
+@dataclass(frozen=True, slots=True)
+class QuatroPartes:
+    """Comprovante do bloqueio (``fila.comprovante_do_bloqueio``), como a tela mostra: o que paramos a tempo, o que
+    ja tinha seguido, o que ainda esta em conferencia e, na Fase 4, o que os sistemas informaram (``informado``) com o
+    andamento dos avisos (``avisos``). ``niveis`` e o nivel do selo com que cada acao saiu (pelo protocolo; fora dele,
+    nivel 1): a dica por linha de ``ja_saidas`` e o nivel da quarta parte (``so_nivel_3``)."""
 
     paradas: list[tuple[str, str]]
     ja_saidas: list[tuple[str, str, str]]
     em_conferencia: list[tuple[str, str, str]]
+    informado: list[Informou] = field(default_factory=list)
+    avisos: list[AvisoDoBloqueio] = field(default_factory=list)
+    niveis: Mapping[str, int] = field(default_factory=dict)
+
+    def nivel(self, protocolo: str) -> int:
+        """O nivel do selo com que a acao saiu (``envios_selo.nivel``); sem envio com numero, 1."""
+        return self.niveis.get(protocolo, 1)
+
+    @property
+    def tem_quarta_parte(self) -> bool:
+        return bool(self.informado or self.avisos)
+
+    @property
+    def so_nivel_3(self) -> bool:
+        """Toda linha da quarta parte e de uma acao que saiu no nivel 3 (o caso do desenho 6.3): o titulo diz "nivel 3".
+        A leitura (``fila.comprovante_do_bloqueio``) traz tambem a ultima resposta a consulta de uma acao de nivel 2 em
+        conferencia; com ela, o titulo nao diz "nivel 3" e cada linha diz o nivel com que a acao saiu."""
+        return all(self.nivel(i.protocolo) == 3 for i in self.informado)
 
 
 def _momento(valor: Any) -> datetime | None:
@@ -155,7 +222,42 @@ def _quando(valor: Any) -> str:
     return momento.astimezone(ZoneInfo(FUSO)).strftime("%d/%m/%Y %H:%M") if momento else ""
 
 
-def tres_partes(c: fila.Comprovante | None) -> TresPartes | None:
+def _hora(valor: Any) -> str:
+    momento = _momento(valor)
+    return momento.astimezone(ZoneInfo(FUSO)).strftime("%H:%M de %d/%m/%Y") if momento else ""
+
+
+def _informado(c: fila.Comprovante) -> list[Informou]:
+    linhas: list[Informou] = []
+    for i in getattr(c, "informado", None) or []:
+        if not isinstance(i, Mapping) or i.get("estado") is None:
+            continue
+        linhas.append(
+            Informou(
+                protocolo=str(i.get("protocolo", "")),
+                sistema=str(i.get("sistema", "")),
+                de_terceiro=i.get("de_terceiro") is True,
+                estado=estado_legivel(i.get("estado")),
+                origem=ORIGENS.get(str(i.get("origem")), ""),
+                hora=_hora(i.get("gravado_em")),
+            )
+        )
+    return linhas
+
+
+def _avisos(c: fila.Comprovante) -> list[AvisoDoBloqueio]:
+    """Um por sistema e andamento (um bloqueio pode ter varias partes de ate 100 numeros por sistema)."""
+    vistos: list[AvisoDoBloqueio] = []
+    for a in getattr(c, "avisos", None) or []:
+        if not isinstance(a, Mapping):
+            continue
+        aviso = AvisoDoBloqueio(str(a.get("sistema", "")), a.get("de_terceiro") is True, str(a.get("estado", "")))
+        if aviso not in vistos:
+            vistos.append(aviso)
+    return vistos
+
+
+def quatro_partes(c: fila.Comprovante | None, niveis: Mapping[str, int] | None = None) -> QuatroPartes | None:
     if c is None:
         return None
     paradas = [(str(p.get("protocolo", "")), ESTAVA.get(str(p.get("estava")), str(p.get("estava")))) for p in c.paradas]
@@ -181,7 +283,7 @@ def tres_partes(c: fila.Comprovante | None) -> TresPartes | None:
         )
         for s in conferindo
     ]
-    return TresPartes(paradas, ja_saidas, em_conferencia)
+    return QuatroPartes(paradas, ja_saidas, em_conferencia, _informado(c), _avisos(c), dict(niveis or {}))
 
 
 class TelasDeBloqueio:
@@ -273,13 +375,25 @@ class TelasDeBloqueio:
     @tela
     async def comprovante(self, pedido: Request) -> Response:
         sessao = await self.t.exigir_sessao(pedido)
+        niveis: dict[str, int] = {}
         async with self.t.engine.connect() as c:
             linha = await consultas.bloqueio_com_nomes(c, pedido.path_params["bloqueio_id"])
-            partes = await fila.comprovante_do_bloqueio(c, linha.id) if linha is not None else None
-        if linha is None or linha.pessoa_id != sessao.pessoa.id or linha.alcance not in ("pessoa", "pessoa_aplicativo"):
+            da_pessoa = (
+                linha is not None
+                and linha.pessoa_id == sessao.pessoa.id
+                and linha.alcance in ("pessoa", "pessoa_aplicativo")
+            )
+            partes = await fila.comprovante_do_bloqueio(c, linha.id) if linha is not None and da_pessoa else None
+            if partes is not None:
+                # O nivel com que cada acao saiu: a dica por linha de "ja tinha seguido" e o nivel da quarta parte
+                # (o que o sistema informou pode ser de uma acao em conferencia, de nivel 2).
+                linhas = [*partes.ja_saidas, *(partes.em_conferencia or []), *(partes.informado or [])]
+                protocolos = sorted({str(s.get("protocolo", "")) for s in linhas if isinstance(s, Mapping)})
+                niveis = await consultas.niveis_do_envio(c, sessao.pessoa.id, protocolos)
+        if linha is None or not da_pessoa:
             return self.t.erro(pedido, 404, "Comprovante não encontrado", "Este comprovante não é seu ou não existe.")
         return self.t.pagina(
-            pedido, "comprovante.html", {"p": parada(linha, sessao.pessoa.id), "partes": tres_partes(partes)}
+            pedido, "comprovante.html", {"p": parada(linha, sessao.pessoa.id), "partes": quatro_partes(partes, niveis)}
         )
 
     @tela

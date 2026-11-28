@@ -279,7 +279,7 @@ def test_aviso_de_encerrar_diz_quantas_foram_canceladas() -> None:
     assert "3 ações liberadas por ele ainda esperavam para sair e foram canceladas" in limites.aviso_de_encerrado(3)
 
 
-# --- Comprovante em tres partes (achado 24) ---
+# --- Comprovante em tres partes (achado 24); na Fase 4, quatro_partes com a dica por linha ---
 
 
 def _comprovante(**mudar: Any) -> fila.Comprovante:
@@ -295,7 +295,7 @@ def _comprovante(**mudar: Any) -> fila.Comprovante:
 
 
 def test_tres_partes_como_na_proposta() -> None:
-    partes = bloqueio.tres_partes(_comprovante())
+    partes = bloqueio.quatro_partes(_comprovante())
     assert partes is not None
     assert partes.paradas == [("CLR-2026-00000001", "esperava a sua ficha")]
     assert partes.ja_saidas == [("CLR-2026-00000002", "entregue ao sistema", "19/11/2026 12:00")]
@@ -330,7 +330,8 @@ def test_tres_partes_como_na_proposta() -> None:
     )
     assert um < html.index("CLR-2026-00000001") < dois < html.index("CLR-2026-00000002") < tres
     assert tres < html.index("CLR-2026-00000003")
-    assert 'Nos sistemas de nível 1 e 2, "seguiu" quer dizer que o pedido foi entregue ao sistema' in html
+    # Fase 4: a dica fixa virou uma dica por linha, pelo nivel do selo com que a acao saiu (sem envio, nivel 1).
+    assert "Neste sistema (nível 1), “seguiu” quer dizer entregue ao sistema, não concluído por ele." in html
     assert "O que o sistema informou" not in html
 
 
@@ -343,7 +344,7 @@ def test_comprovante_sem_a_parte_em_conferencia_separa_pelo_estado() -> None:
             {"protocolo": "C", "estado": "enviando", "enviada_em": None},
         ],
     )
-    partes = bloqueio.tres_partes(cast(fila.Comprovante, antigo))
+    partes = bloqueio.quatro_partes(cast(fila.Comprovante, antigo))
     assert partes is not None
     assert [p[0] for p in partes.ja_saidas] == ["A"]
     assert [p[0] for p in partes.em_conferencia] == ["B", "C"]

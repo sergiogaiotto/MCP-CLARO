@@ -4,8 +4,10 @@ Sobe a imagem fixada por digest com ``grafana/grafana.ini`` e ``grafana/provisio
 Compose (sistema de arquivos so de leitura, sem capacidades), contra o PostgreSQL do teste: banco proprio
 do Grafana (usuario ``grafana``) e um banco de medicoes migrado so para este modulo, lido pelo
 ``grafana_leitor``. O Grafana roda na rede do hospedeiro para alcancar a porta do banco de teste; no
-Compose ele fica so na rede interna. O webhook dos alertas chega a um receptor HTTPS falso que exige
-certificado de cliente e usa as mesmas regras das rotinas (``mcp_claro.avisos.grafana``).
+Compose ele fica so na rede interna. Fase 4: os paineis dos selos ("Sistemas por selo", de ``medicoes.v_selos``, e
+"Respostas dos sistemas", de ``medicoes.v_consultas_sistema``) rodam tambem como ``grafana_leitor``, com um sistema de
+selo de nivel 2 gravado pelas ajudas da Fase 4 (``tests.apoio_selos``). O webhook dos alertas chega a um receptor
+HTTPS falso que exige certificado de cliente e usa as mesmas regras das rotinas (``mcp_claro.avisos.grafana``).
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ from starlette.routing import Route
 
 from mcp_claro.avisos.grafana import ler_alertas, senha_confere
 from mcp_claro.config.settings import Parametros
+from mcp_claro.db.engine import criar_engine
+from tests import apoio_selos
 from tests.apoio import porta_livre, servidor, soltar
 from tests.conftest import RAIZ
 from tests.integracao.test_continuidade import dsn, executar, migrar, parametros_do_banco
@@ -165,7 +169,13 @@ INSERT INTO medicoes.minuto (minuto, nome, rotulos, valor) VALUES
   (date_trunc('minute', now()) - interval '5 minutes', 'chamadas_recusadas', '{"motivo": "fora_da_ordem"}', 4),
   (date_trunc('minute', now()) - interval '5 minutes', 'leituras_recusadas_despachante', '{"motivo": "bloqueado"}', 1),
   (date_trunc('minute', now()) - interval '5 minutes', 'pedidos_recusados', '{"motivo": "entrada_fechada"}', 2),
-  (date_trunc('minute', now()) - interval '5 minutes', 'recusas_versao', '{"lado": "aplicativo"}', 25);
+  (date_trunc('minute', now()) - interval '5 minutes', 'recusas_versao', '{"lado": "aplicativo"}', 25),
+  (date_trunc('minute', now()) - interval '5 minutes', 'selo_informacoes',
+   '{"origem": "consulta", "desfecho": "respondeu"}', 2),
+  (date_trunc('minute', now()) - interval '5 minutes', 'selo_informacoes',
+   '{"origem": "consulta", "desfecho": "sem_resposta"}', 1),
+  (date_trunc('minute', now()) - interval '4 minutes', 'selo_informacoes',
+   '{"origem": "recibo", "desfecho": "respondeu"}', 3);
 INSERT INTO medicoes.dia (dia, nome, rotulos, valor) VALUES
   (current_date - 1, 'recusas_versao', '{"lado": "aplicativo"}', 40);
 """
@@ -189,6 +199,14 @@ async def popular(p: Parametros) -> None:
         await conexao.execute(DADOS)
     finally:
         await conexao.close()
+    # Fase 4: um sistema proprio com selo de nivel 2 vigente (teste aprovado pelo caminho do banco).
+    engine = criar_engine(p, pool_size=1, max_overflow=0)
+    try:
+        async with engine.begin() as c:
+            sistema = await apoio_selos.proprio_com_acoes(c, nivel_do_contrato=2)
+            await apoio_selos.gravar_teste(c, sistema.id, nivel=2)
+    finally:
+        await engine.dispose()
 
 
 # --- Grafana ---------------------------------------------------------------------------------------------
@@ -389,6 +407,13 @@ async def test_painel_provisionado_aparece_na_busca(grafana: Grafana) -> None:
     # Recusas por versao em destaque: logo depois do texto de leitura, antes de tudo o resto (decisao 8).
     assert titulos[1] == "Recusas por versao (decisao 8)"
     assert titulos[2:4] == ["Aplicativos recusados por versao", "Sistemas recusados por versao"]
+    # Fase 4: o bloco dos selos, no fim.
+    assert titulos[-4:] == [
+        "Selos (Fase 4)",
+        "Sistemas com selo de nivel 2 ou 3 agora",
+        "Sistemas por selo",
+        "Respostas dos sistemas",
+    ]
     # Sem pasta repetida: alertas e paineis em pastas com nomes diferentes.
     nomes = [p["title"] for p in pastas]
     assert len(nomes) == len(set(nomes))
@@ -420,6 +445,12 @@ async def test_consultas_do_painel_rodam_como_grafana_leitor(grafana: Grafana) -
     assert totais["Servidores de terceiros em quarentena agora"] == [[[1]]]
     ((situacoes, revisados, quantos),) = totais["Servidores de terceiros por situacao"]
     assert sorted(zip(situacoes, revisados, quantos, strict=True)) == [("pendente", "nao", 1), ("quarentena", "nao", 1)]
+    # Fase 4: os selos, lidos como grafana_leitor (v_selos passa pela funcao de contagem, critica M10).
+    assert totais["Sistemas com selo de nivel 2 ou 3 agora"] == [[[1]]]
+    ((niveis, motivos, sistemas),) = totais["Sistemas por selo"]
+    assert list(zip(niveis, motivos, sistemas, strict=True)) == [(2, "vigente", 1), (1, "nunca_testado", 3)]
+    respostas = totais["Respostas dos sistemas"]
+    assert sum(v for quadro in respostas for campo in quadro[1:] for v in campo if v) == 6
 
 
 async def test_grafana_leitor_nao_le_tabelas_nem_escreve(grafana: Grafana) -> None:

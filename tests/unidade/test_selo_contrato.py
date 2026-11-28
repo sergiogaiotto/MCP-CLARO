@@ -977,3 +977,36 @@ def test_aviso_do_selo_na_politica() -> None:
     assert dias_de_aviso_do_selo(90, 14) == 14
     assert dias_de_aviso_do_selo(10, 14) == 9
     assert dias_de_aviso_do_selo(1, 14) == 0
+
+
+def test_uma_conta_so_dos_casos_que_nao_aprovam() -> None:
+    """A conta do ``{falhas}`` (decisao do coordenador da etapa 4): os ``falhou`` de qualquer caso e os obrigatorios
+    do nivel do teste que nao aprovam. A bateria, as rotinas e a tela do ADMIN usam a mesma funcao: antes, a da
+    bateria e a da tela contavam tambem o obrigatorio de nivel 3 num teste de nivel 2."""
+    from mcp_claro.rotinas import selos
+    from mcp_claro.selo import bateria
+    from mcp_claro.telas import admin
+
+    f = str(uuid.uuid4())
+    caso_3 = next(c for c in contrato.CASOS if c.nivel == 3 and c.obrigatorio)
+    caso_2 = next(c for c in contrato.CASOS if c.nivel == 2 and c.obrigatorio and c.escopo == "ferramenta")
+    so_informa = next(c for c in contrato.CASOS if not c.obrigatorio)
+    item_3: dict[str, Any] = {"caso": caso_3.caso, "ferramenta": None, "resultado": "nao_testado"}
+    item_2: dict[str, Any] = {"caso": caso_2.caso, "ferramenta": f, "resultado": "nao_testado"}
+    informa: dict[str, Any] = {"caso": so_informa.caso, "ferramenta": f, "resultado": "nao_testado"}
+    casos: list[tuple[list[dict[str, Any]], int, int]] = [
+        ([item_3], 2, 0),
+        ([item_3], 3, 1),
+        ([item_2, item_3], 2, 1),
+        ([informa], 3, 0),
+        ([{**informa, "resultado": "falhou"}], 2, 1),
+        ([{**item_3, "resultado": "falhou"}], 2, 1),  # falhou conta em qualquer nivel, como em casos_aprovam
+        ([{**item_2, "resultado": caso_2.maximo}], 2, 0),
+    ]
+    for itens, nivel, esperado in casos:
+        assert contrato.casos_que_nao_aprovam(itens, nivel) == esperado, (itens, nivel)
+        assert bateria.casos_que_reprovam(itens, nivel) == esperado
+        assert selos.casos_que_nao_aprovam(itens, nivel) == esperado
+        assert admin.casos_que_nao_aprovam(itens, nivel) == esperado
+    assert contrato.casos_que_nao_aprovam("nao e lista", 2) == 0
+    assert contrato.casos_que_nao_aprovam([1, {"caso": "C-9.9", "resultado": "falhou"}], 2) == 0

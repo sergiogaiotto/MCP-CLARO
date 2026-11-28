@@ -26,6 +26,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.rotinas.agendador import Desfecho
 from mcp_claro.rotinas.app import criar_app_rotinas, montar_tarefas
 from mcp_claro.rotinas.config import ConfigRotinas
+from mcp_claro.rotinas.despachante import Conferida, DespachanteFora
 from mcp_claro.rotinas.mudou_parou import ConferenciaNaoFeita
 from tests.apoio import servidor
 from tests.integracao import test_rotinas_apoio as apoio
@@ -50,6 +51,10 @@ class SemSistemas:
         # sessao soma rodada sem resposta (nem vai a quarentena) por causa deste teste.
         raise ConferenciaNaoFeita("sem despachante neste teste")
 
+    async def conferir(self, operacao_id: uuid.UUID) -> Conferida:
+        # Fase 4: a consulta das acoes em duvida tambem nao acontece (a rodada para, como com o despachante fora).
+        raise DespachanteFora("sem despachante neste teste")
+
 
 def config_rapida() -> ConfigRotinas:
     return ConfigRotinas(
@@ -72,7 +77,12 @@ async def rotinas(
 ) -> AsyncIterator[tuple[str, Any]]:
     envio = EnvioEmail(host=mailpit.host, porta=mailpit.smtp, remetente="mcp-claro@exemplo.teste", starttls=False)
     app = criar_app_rotinas(
-        parametros_rotinas, engine_rotinas, config=config_rapida(), envios={"email": envio}, fonte=SemSistemas()
+        parametros_rotinas,
+        engine_rotinas,
+        config=config_rapida(),
+        envios={"email": envio},
+        fonte=SemSistemas(),
+        consulta=SemSistemas(),
     )
     async with servidor(app) as url:
         yield url, app
@@ -97,6 +107,9 @@ async def test_saude_e_tarefas_rodando(rotinas: tuple[str, Any]) -> None:
         "vencer_limites",
         "limpar_desafios_passkey",  # desafios de passkey vencidos ou usados (correcao da revisao)
         "limpar_sinais",  # Fase 3: sinais dos tres sinais mais velhos que a maior janela
+        # Fase 4: a consulta das acoes em duvida ao proprio sistema (pelo despachante) e os avisos dos selos
+        "conferir_pelo_sistema",
+        "avisar_selos",
     }
     fim = time.monotonic() + 15
     tarefas: dict[str, str] = {}

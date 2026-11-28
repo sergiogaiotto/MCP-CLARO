@@ -12,14 +12,18 @@
 <p class="cartao">{% if pagina > 1 %}Não há linhas mais antigas.{% else %}Ainda não há nada no extrato.{% endif %}</p>
 {% else %}
 <table>
-  <thead><tr><th>Quando</th><th>O que aconteceu</th><th>Aplicativo</th><th>Sistema</th></tr></thead>
+  {# A coluna "Selo" sai de dados.selo da propria linha (o retrato da hora do passo, D25), nunca do selo de agora
+     do sistema: um selo que mudou depois nao muda a linha. Nivel 2 ou 3 so com o teste aprovado (critica M3). #}
+  <thead><tr><th>Quando</th><th>O que aconteceu</th><th>Aplicativo</th><th>Sistema</th><th>Selo</th></tr></thead>
   <tbody>
   {% for l in linhas %}
+    {% set informado = l | informado_pela_linha %}
     <tr>
       <td>{{ l.criado_em | data_hora }}</td>
-      <td>{{ l.frase | escondidos }}{% if l.protocolo %} <span class="dica">Protocolo {{ l.protocolo }}.</span>{% endif %}</td>
+      <td>{{ l.frase | escondidos }}{% if l.protocolo %} <span class="dica">Protocolo {{ l.protocolo }}.</span>{% endif %}{% if informado %} <span class="etiqueta">{{ informado }}</span>{% endif %}</td>
       <td>{{ l.aplicativo or "" }}</td>
       <td>{% if l.sistema %}<bdi>{{ l.sistema | escondidos }}</bdi>{% endif %}{% if l.sistema_origem is defined and l.sistema_origem and l.sistema_origem != "proprio" %} <span class="etiqueta">de terceiros</span>{% endif %}</td>
+      <td>{{ l | selo_da_linha }}</td>
     </tr>
   {% endfor %}
   </tbody>

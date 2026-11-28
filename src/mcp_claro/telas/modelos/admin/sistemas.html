@@ -9,14 +9,15 @@
 {% endif %}
 {% if sistemas %}
 <table>
-  <thead><tr><th>Nome</th><th>De quem</th><th>Endereço</th><th>Chave</th><th>Situação</th></tr></thead>
+  <thead><tr><th>Nome</th><th>De quem</th><th>Endereço</th><th>Chave</th><th>Situação</th><th>Selo</th></tr></thead>
   <tbody>
   {% for s in sistemas %}
     <tr><td><a href="/telas/admin/sistemas/{{ s.id }}">{{ s.nome }}</a></td>
       <td>{{ s.origem | origem }}</td>
       <td><code>{{ s.endereco }}</code></td>
       <td>{{ s.tipo_chave | tipo_chave }}</td>
-      <td><span class="etiqueta {% if s.situacao == 'ativo' %}bom{% elif s.situacao in ('recusado', 'quarentena') %}ruim{% endif %}">{{ s.situacao | situacao }}</span></td></tr>
+      <td><span class="etiqueta {% if s.situacao == 'ativo' %}bom{% elif s.situacao in ('recusado', 'quarentena') %}ruim{% endif %}">{{ s.situacao | situacao }}</span></td>
+      <td>{% set selo = none if selos is none else selos.get(s.id | string) %}{% if selos is none %}não lido agora{% elif selo %}nível {{ selo.nivel }}{% if selo.vence_em is not none %} <span class="etiqueta ruim">vence em {{ dias_legiveis(selo.vence_em) }}</span>{% endif %}{% else %}nível 1{% endif %}</td></tr>
   {% endfor %}
   </tbody>
 </table>

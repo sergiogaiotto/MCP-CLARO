@@ -44,7 +44,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "So contagens, sem pessoa e sem conteudo. O MCP-CLARO fala **so a versao 2026-07-28** do MCP, dos dois lados: aplicativo ou sistema que pede outra versao e recusado e aparece logo abaixo. Servidores de terceiros tem um bloco proprio no fim do painel. Os numeros chegam a cada 30 segundos."
+        "content": "So contagens, sem pessoa e sem conteudo. O MCP-CLARO fala **so a versao 2026-07-28** do MCP, dos dois lados: aplicativo ou sistema que pede outra versao e recusado e aparece logo abaixo. Servidores de terceiros tem um bloco proprio perto do fim do painel, e os selos de nivel 2 e 3 (Fase 4) ficam no ultimo bloco. Os numeros chegam a cada 30 segundos."
       }
     },
     {
@@ -1226,6 +1226,179 @@
       },
       "options": {
         "showHeader": true
+      }
+    },
+    {
+      "type": "row",
+      "id": 26,
+      "title": "Selos (Fase 4)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 86
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "id": 27,
+      "title": "Sistemas com selo de nivel 2 ou 3 agora",
+      "description": "Quantos sistemas estao agora com selo de nivel 2 (o MCP-CLARO manda um numero por acao e pode perguntar ao sistema o que houve) ou 3 (o sistema tambem informa o que fez depois). O selo e calculado agora, a partir do ultimo teste: vence, cai se o sistema muda e pode ser retirado.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 87,
+        "w": 6,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(sum(sistemas), 0) AS \"Sistemas\"\nFROM medicoes.v_selos\nWHERE nivel >= 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "table",
+      "id": 28,
+      "title": "Sistemas por selo",
+      "description": "Quantos sistemas ha em cada nivel de selo agora, e por que. 'vigente' e o unico motivo de nivel 2 ou 3. No nivel 1: nunca_testado, reprovado (o ultimo teste nao passou), vencido, retirado, fora_de_ativo, endereco_mudou, tipo_chave_mudou, revisao_nova, ferramenta_nova (uma ferramenta de acao e nova ou mudou depois do teste) e contrato_sumiu (as ferramentas do contrato sairam da lista do sistema). So contagens, sem nome de sistema.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 87,
+        "w": 18,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT nivel AS \"Nivel\", motivo AS \"Motivo\", sistemas AS \"Sistemas\"\nFROM medicoes.v_selos\nORDER BY nivel DESC, motivo"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 29,
+      "title": "Respostas dos sistemas",
+      "description": "Cada pergunta do MCP-CLARO a um sistema de nivel 2 ou 3 e como terminou, por origem (recibo do nivel 3, consulta de uma acao em duvida, resposta ao aviso de bloqueio) e desfecho: respondeu, sem_resposta, resposta_invalida (fora do contrato, nada dela e mostrado), sem_chave, sala_fora e sistema_fora (o MCP-CLARO nao conseguiu perguntar; nao conta contra o sistema). desconhecido_no_fim: a escada de consultas acabou com o sistema dizendo que nao sabe. E o que o sistema disse, nao conferido do lado de la.",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "mcp-claro-medicoes"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 94,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "mcp-claro-medicoes"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT $__timeGroupAlias(minuto, $__interval, 0), origem || ': ' || desfecho AS metric, sum(contagem) AS \"Respostas\"\nFROM medicoes.v_consultas_sistema\nWHERE $__timeFilter(minuto)\nGROUP BY 1, 2\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "sum"
+          ],
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     }
   ]

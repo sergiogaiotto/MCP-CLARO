@@ -38,8 +38,9 @@
   <h3>2. O que já tinha seguido</h3>
   {% if partes.ja_saidas %}
   <p>Estas ações já tinham seguido para o sistema antes do bloqueio. O bloqueio não as desfaz.</p>
-  <ul>{% for protocolo, estado, quando in partes.ja_saidas %}<li><a href="/telas/acoes?protocolo={{ protocolo }}">{{ protocolo }}</a>: {{ estado }}{% if quando %}, em {{ quando }}{% endif %}.</li>{% endfor %}</ul>
-  <p class="dica">Nos sistemas de nível 1 e 2, "seguiu" quer dizer que o pedido foi entregue ao sistema, não que o sistema já concluiu a ação. Para saber se ela foi concluída, confira no próprio sistema.</p>
+  {# A dica e por linha, pelo nivel do selo com que a acao saiu (envios_selo.nivel; sem numero, nivel 1). #}
+  <ul>{% for protocolo, estado, quando in partes.ja_saidas %}{% set nivel = partes.nivel(protocolo) if partes.nivel is defined else 1 %}<li><a href="/telas/acoes?protocolo={{ protocolo }}">{{ protocolo }}</a>: {{ estado }}{% if quando %}, em {{ quando }}{% endif %}. <span class="dica">{% if nivel == 3 %}Neste sistema (nível 3), o que ele informar sobre esta ação aparece na parte 4.{% else %}Neste sistema (nível {{ nivel }}), “seguiu” quer dizer entregue ao sistema, não concluído por ele.{% endif %}</span></li>{% endfor %}</ul>
+  <p class="dica">Para saber se uma ação foi concluída, confira no próprio sistema.</p>
   {% else %}
   <p>Nenhuma ação tinha seguido nas últimas 24 horas.</p>
   {% endif %}
@@ -53,6 +54,24 @@
   <p>Nenhuma ação está em conferência.</p>
   {% endif %}
 </section>
+{% if partes.tem_quarta_parte is defined and partes.tem_quarta_parte %}
+{# Fase 4: o que os sistemas informaram, da leitura de agora (a linha do comprovante nao muda). So o vocabulario do
+   contrato e a hora do gateway, marcados como informados pelo sistema; nunca texto do sistema. #}
+{# O titulo diz "nivel 3" so quando toda linha e de um sistema de nivel 3: a leitura traz tambem a ultima resposta a
+   consulta de uma acao de nivel 2 em conferencia, e entao cada linha diz o nivel com que a acao saiu. #}
+<section class="cartao" id="o-que-o-sistema-informou" aria-labelledby="titulo-informou">
+  <h3 id="titulo-informou">4. O que o sistema informou{% if partes.so_nivel_3 %} (nível 3){% endif %}</h3>
+  <p class="dica">Esta parte é o que cada sistema de nível {% if partes.so_nivel_3 %}3{% else %}2 ou 3{% endif %} diz sobre o que já tinha recebido. O MCP-CLARO não confere do lado de lá.</p>
+  {% if partes.informado %}
+  <ul>{% for i in partes.informado %}<li>Protocolo <a href="/telas/acoes?protocolo={{ i.protocolo }}">{{ i.protocolo }}</a>, {% if i.de_terceiro %}servidor de terceiros{% else %}sistema{% endif %} <bdi>{{ i.sistema | escondidos }}</bdi>{% if not partes.so_nivel_3 %} (nível {{ partes.nivel(i.protocolo) }}){% endif %}: {{ i.estado }}{% if i.hora %}, às {{ i.hora }}{% endif %}{% if i.origem %} ({{ i.origem }}){% endif %}. <span class="etiqueta">{% if i.de_terceiro %}Informado pelo servidor de terceiros{% else %}Informado pelo sistema{% endif %}</span></li>{% endfor %}</ul>
+  {% else %}
+  <p>O que os sistemas de nível 3 responderem ao aviso do bloqueio aparece aqui.</p>
+  {% endif %}
+  {% if partes.avisos %}
+  <ul class="dica">{% for a in partes.avisos %}<li>{% if a.estado == "respondido" %}Avisamos {% if a.de_terceiro %}o servidor de terceiros{% else %}o sistema{% endif %} <bdi>{{ a.sistema | escondidos }}</bdi> do bloqueio, e ele respondeu.{% elif a.estado == "pendente" %}{% if a.de_terceiro %}Servidor de terceiros{% else %}Sistema{% endif %} <bdi>{{ a.sistema | escondidos }}</bdi>: o aviso ainda não saiu. O que ele responder aparece aqui.{% elif a.estado == "sem_resposta" %}{% if a.de_terceiro %}O servidor de terceiros{% else %}O sistema{% endif %} <bdi>{{ a.sistema | escondidos }}</bdi> não respondeu ao aviso do bloqueio.{% elif a.estado == "sistema_fora" %}O MCP-CLARO não avisou {% if a.de_terceiro %}o servidor de terceiros{% else %}o sistema{% endif %} <bdi>{{ a.sistema | escondidos }}</bdi> do bloqueio. Isto não quer dizer que o sistema falhou.{% elif a.estado == "bloqueio_encerrado" %}O bloqueio acabou antes de o aviso {% if a.de_terceiro %}ao servidor de terceiros{% else %}ao sistema{% endif %} <bdi>{{ a.sistema | escondidos }}</bdi> sair.{% else %}{% if a.de_terceiro %}Servidor de terceiros{% else %}Sistema{% endif %} <bdi>{{ a.sistema | escondidos }}</bdi>: o aviso do bloqueio está em andamento.{% endif %}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
+{% endif %}
 {% endif %}
 <p>Este passo também está no <a href="/telas/extrato">Meu extrato</a>.</p>
 <p><a href="/telas/bloqueio">Bloquear agora</a> · <a href="/telas/pausa">Pausar</a></p>

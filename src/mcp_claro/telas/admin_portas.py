@@ -6,8 +6,11 @@ saida, desativar uma pessoa, autorizacao por pessoa de um sistema e entrega de c
 - Desativar a pessoa muda o cadastro e encerra as sessoes dela; depois o despachante derruba as
   autorizacoes dela nos sistemas (``/interno/autorizacao/derrubar``).
 - Chave nenhuma passa pelas telas para ficar: o segredo do cliente OAuth (``/interno/autorizacao/segredo``)
-  e as chaves compartilhada, de programa e de leitura das declaracoes (``/interno/chaves``) vao direto
-  ao despachante, que cifra. O valor nunca volta a pagina, nem ao log, nem ao extrato.
+  e as chaves compartilhada, de programa, de leitura das declaracoes e de teste do selo (``/interno/chaves``) vao
+  direto ao despachante, que cifra. O valor nunca volta a pagina, nem ao log, nem ao extrato.
+- A chave de teste do selo (Fase 4, critica M11) tem o tipo proprio no cofre (``teste_selo``): o despachante a guarda
+  ao lado da de producao, sem nunca troca-la. O ADMIN a entrega no cartao "Selo" da ficha do sistema
+  (``admin.TelasDoAdmin``), e a volta, ou a recusa, e para la.
 """
 
 from __future__ import annotations
@@ -30,7 +33,8 @@ from mcp_claro.despachante.autorizacao import (
 from mcp_claro.logs import logger
 from mcp_claro.regras import bloqueios, estado
 from mcp_claro.regras.bloqueios import ALCANCES, CAMPOS_POR_ALCANCE, TIPOS, BloqueioInvalido, SemPermissao
-from mcp_claro.telas import consultas
+from mcp_claro.selo import contrato
+from mcp_claro.telas import admin, consultas
 from mcp_claro.telas.bloqueio import ALCANCES_LEGIVEIS, parada, quem_legivel
 from mcp_claro.telas.nucleo import Interrompe, Telas, tela, uuid_ou_none, ver_depois
 from mcp_claro.telas.seguranca import Formulario
@@ -52,6 +56,9 @@ CHAVES: Final[dict[str, tuple[str | None, str, str]]] = {
     "compartilhada": ("compartilhada", "acesso", "compartilhada"),
     "programa": ("programa", "acesso", "de programa"),
     "declaracoes": (None, "declaracoes", "de leitura das declaracoes"),
+    # Fase 4 (critica M11): a chave da bateria do selo, do sistema, com o tipo proprio no cofre. A rota do despachante
+    # aceita so a lista fechada (contrato.TIPOS_DE_CHAVE_DO_ADMIN): ela nunca vira a chave "acesso" de producao.
+    contrato.TIPO_CHAVE_TESTE: (None, contrato.TIPO_CHAVE_TESTE, "de teste do selo"),
 }
 
 
@@ -499,10 +506,15 @@ class TelasDoAdminPortas:
                     sessao, sistema, "admin_chave_entregue", {"dono": regra[2]}, tipo, aplicativo_id=aplicativo_id
                 )
                 log.info("telas_admin_chave_entregue", tipo=tipo)
+                if tipo == contrato.TIPO_CHAVE_TESTE:
+                    return ver_depois(f"/telas/admin/sistemas/{sistema.id}", "selo_chave_guardada")
                 return ver_depois(f"/telas/admin/sistemas/{sistema.id}/acesso", "chave_guardada")
             erros.append(
                 "O despachante não respondeu. Nada foi guardado. Tente de novo."
                 if resposta.status == 0
                 else "O despachante recusou esta chave. Nada foi guardado."
             )
+        if tipo == contrato.TIPO_CHAVE_TESTE:
+            # A chave de teste do selo e entregue no cartao "Selo" da ficha do sistema: a recusa volta para la.
+            return await admin.TelasDoAdmin(self.t).pagina_do_sistema(pedido, sistema, erros=erros)
         return await self._pagina_acesso(pedido, erros=erros)

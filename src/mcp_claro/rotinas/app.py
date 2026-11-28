@@ -8,6 +8,10 @@ Rotas (porta interna ``ROUTINES_INTERNAL_PORT``, so na rede interna, com mTLS):
 
 No ciclo de vida sobem: o agendador das tarefas (cada uma isolada, com trava
 consultiva), o laco de envio dos avisos e a descarga periodica dos contadores.
+
+Fase 4: as tarefas dos selos (``rotinas.selos.tarefas_dos_selos``): ``conferir_pelo_sistema``, que pede ao
+despachante a consulta das acoes em duvida (``ClienteDespachante.conferir``), e ``avisar_selos``, os avisos ao ADMIN
+sobre os selos. As rotinas nunca falam com os sistemas.
 """
 
 from __future__ import annotations
@@ -44,6 +48,8 @@ from mcp_claro.rotinas.mudou_parou import FonteDeclaracoes, conferir_sistemas
 from mcp_claro.rotinas.ordens import avisar_ordens_a_vencer, vencer_ordens
 from mcp_claro.rotinas.programas import tarefas_dos_programas
 from mcp_claro.rotinas.resumo_semanal import resumo_semanal
+from mcp_claro.rotinas.selos import tarefas_dos_selos
+from mcp_claro.selo import contrato
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
 
@@ -129,9 +135,12 @@ def criar_app_rotinas(
     config: ConfigRotinas | None = None,
     envios: Mapping[str, Envio] | None = None,
     fonte: FonteDeclaracoes | None = None,
+    consulta: contrato.ConfereNoDespachante | None = None,
     tarefas: list[Tarefa] | None = None,
 ) -> Starlette:
-    """Papel ``rotinas``. Os argumentos opcionais servem aos testes; na partida, tudo sai dos parametros."""
+    """Papel ``rotinas``. Os argumentos opcionais servem aos testes; na partida, tudo sai dos parametros. ``fonte``
+    (o que os sistemas declaram) e ``consulta`` (a consulta ao proprio sistema, Fase 4) sao o cliente do despachante
+    quando nao vem."""
     p.conferir()
     cfg = config or ConfigRotinas.de_parametros(p)
     canais: Mapping[str, Envio] = envios if envios is not None else montar_envios(p)
@@ -190,11 +199,12 @@ def criar_app_rotinas(
     @contextlib.asynccontextmanager
     async def ciclo(_: Starlette) -> AsyncIterator[None]:
         async with contextlib.AsyncExitStack() as pilha:
-            origem = fonte
-            if origem is None:
+            origem, pergunta = fonte, consulta
+            if origem is None or pergunta is None:
                 cliente = ClienteDespachante(p)
                 pilha.push_async_callback(cliente.fechar)
-                origem = cliente
+                origem = origem or cliente
+                pergunta = pergunta or cliente
             lista = (
                 tarefas
                 if tarefas is not None
@@ -202,6 +212,7 @@ def criar_app_rotinas(
                     *montar_tarefas(engine, cfg, origem),
                     *tarefas_de_acoes(engine, p, cfg),
                     *tarefas_dos_programas(engine, p, cfg),
+                    *tarefas_dos_selos(engine, p, cfg, pergunta),
                     *([ronda] if ronda else []),
                 ]
             )

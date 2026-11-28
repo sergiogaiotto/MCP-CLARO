@@ -1,5 +1,11 @@
 {% extends "base.html" %}
 {% block titulo %}Ficha {{ a.op.protocolo }}{% endblock %}
+{# A caixa do numero novo (critica M4.2): vai em cada formulario que confirma, so quando a ficha a oferece. #}
+{% macro caixa_numero_novo() %}
+{% if a.pedido_igual is not none and a.pedido_igual.oferece_numero_novo %}
+    <label class="opcao"><input type="checkbox" name="numero_novo" value="sim"> <span>{{ a.pedido_igual.caixa }}</span></label>
+{% endif %}
+{% endmacro %}
 {% block conteudo %}
 <h1>Ficha para você decidir</h1>
 
@@ -11,10 +17,27 @@
   <p><strong>Com estes dados:</strong></p>
   {% include "acoes/_argumentos.html" %}
   <p>É isto, e só isto, que vai para o sistema se você confirmar.</p>
+</section>
+{# O selo pelo retrato da hora em que a ficha nasceu (fichas.selo), nunca pelo selo de agora; a ficha que espera diz
+   quando o de agora e outro (critica M3). Num terceiro, o aviso de terceiro vai junto. #}
+<section class="cartao" id="selo-do-sistema" aria-labelledby="titulo-selo-do-sistema">
+  <h2 id="titulo-selo-do-sistema">Selo do sistema</h2>
+  <p>{{ a.selo.texto }}</p>
+  {% if a.selo_agora %}
+  <p class="atencao" id="selo-mudou">{{ a.selo_agora }}</p>
+  {% endif %}
   {% if a.op.de_terceiro %}
   <p class="atencao" id="aviso-terceiro">Este servidor é de terceiros. O MCP-CLARO não controla o que ele faz do lado de lá.</p>
   {% endif %}
 </section>
+{% if a.pedido_igual is not none %}
+{# O pedido igual: qual protocolo ele repete e com que numero vai (criticas B12, A3.3 e M4.2). Quem decide o numero e
+   o banco, no envio. #}
+<section class="cartao{% if a.pedido_igual.oferece_numero_novo %} atencao{% endif %}" id="pedido-igual">
+  <h2>Pedido igual</h2>
+  {% for texto in a.pedido_igual.textos %}<p>{{ texto }}</p>{% endfor %}
+</section>
+{% endif %}
 {% if a.alerta %}
 {# O retrato do alerta, gravado quando a ficha nasceu: so nomes do cadastro e horas, nunca dado do pedido. #}
 <section class="cartao atencao" aria-labelledby="alerta-tres-sinais" id="cartao-tres-sinais">
@@ -65,6 +88,7 @@
   <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar" data-passkey="entrar" data-desafio="/telas/fichas/{{ a.op.ficha_id }}/desafio" hx-boost="false">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <input type="hidden" name="credencial" value="">
+    {{ caixa_numero_novo() }}
     <p class="erros" data-passkey-aviso role="alert" hidden></p>
     <button type="submit" class="grande">Confirmar com a passkey</button>
   </form>
@@ -82,12 +106,14 @@
   <p class="dica">Você entrou de novo há pouco: já dá para confirmar.</p>
   <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    {{ caixa_numero_novo() }}
     <button type="submit" class="grande">Confirmar</button>
   </form>
   {% endif %}
   {% else %}
   <form method="post" action="/telas/fichas/{{ a.op.ficha_id }}/confirmar">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    {{ caixa_numero_novo() }}
     <button type="submit" class="grande">Confirmar</button>
   </form>
   {% endif %}

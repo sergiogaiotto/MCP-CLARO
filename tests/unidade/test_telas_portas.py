@@ -13,7 +13,7 @@ import pytest
 from structlog.testing import capture_logs
 
 from mcp_claro.extrato.frases import frase
-from mcp_claro.telas import autorizar
+from mcp_claro.telas import admin, autorizar
 from mcp_claro.telas.autorizar import ficha, mensagem_da_recusa
 from mcp_claro.telas.bloqueio import o_que_parou, quem_legivel
 from mcp_claro.telas.nucleo import RespostaInterna, Telas
@@ -119,7 +119,8 @@ def test_todo_aviso_usado_existe() -> None:
                 for a, b in re.findall(r"\"([a-z_]+)\" if [^\n]+? else \"([a-z_]+)\"", linha):
                     usados |= {a, b}
     usados.discard("motivo_exigido")  # este vem por urlencode no admin
-    faltam = {u for u in usados if u not in AVISOS}
+    # Os avisos das telas do ADMIN da Fase 4 ficam em ``admin.AVISOS_ADMIN`` (``paginas.AVISOS`` de reserva).
+    faltam = {u for u in usados if u not in AVISOS and u not in admin.AVISOS_ADMIN}
     assert not faltam
     assert {"bloqueado", "pausado", "ja_valia", "pausa_retomada", "pessoa_desativada"} <= usados
 

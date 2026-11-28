@@ -8,11 +8,17 @@ terceiro (``frase_do_esquema_recusado``). Nada daqui leva texto do servidor: so 
 cadastro. Onde uma frase precisa citar um nome de campo ou o caminho de uma recusa, que vem do fornecedor, a versao
 para a tela (``frase_do_esquema_recusado_na_tela`` e ``campo_do_fornecedor``) poe o nome dentro de
 ``<code class="estranho">``, escapado e com os escondidos marcados.
+
+Fase 4 (selos de nivel 2 e 3), textos das telas da pessoa, com acento: o vocabulario fechado do contrato do selo
+(``ESTADOS_LEGIVEIS``, desenho 2.6), os avisos novos da pessoa e a coluna "Selo" do extrato
+(``selo_da_linha_do_extrato`` e o filtro ``selo_da_linha``: so de ``dados.selo`` da propria linha, com nivel 2 ou 3
+so pelo teste aprovado, critica M3) com a etiqueta "Informado pelo sistema" (``etiqueta_da_linha_do_extrato``). Nada
+daqui leva texto do sistema.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -105,6 +111,14 @@ AVISOS: Final[dict[str, str]] = {
     "despachante_demorou_sondagem": (
         "O despachante não respondeu a tempo. Confira a situação abaixo e peça a conferência de novo daqui a pouco."
     ),
+    # Fase 4: selos de nivel 2 e 3 (pessoa). Os avisos do ADMIN ficam em ``admin.AVISOS_ADMIN``.
+    "informado_registrado": (
+        "Pronto. Sua decisão foi registrada de acordo com o que o sistema informou. Nada será reenviado."
+    ),
+    "confirmada_numero_novo": (
+        "Pronto. A ficha foi confirmada com número novo: para o sistema, é um pedido novo. A ação espera a hora de"
+        " sair; ainda dá para cancelar."
+    ),
 }
 
 SITUACOES: Final[dict[str, str]] = {
@@ -136,6 +150,65 @@ TIPOS_CHAVE: Final[dict[str, str]] = {
     "compartilhada": "Uma chave para todos",
     "programa": "Chave do programa",
 }
+
+# --- Fase 4: selos de nivel 2 e 3 (telas da pessoa) ---
+
+ESTADOS_LEGIVEIS: Final[dict[str, str]] = {
+    "concluida": "o pedido foi feito",
+    "recusada": "o sistema recusou o pedido; nada ficou feito",
+    "em_andamento": "o pedido ainda está em andamento",
+    "nao_recebida": "o sistema não recebeu o pedido e não vai aceitá-lo depois",
+    "parcial": "o pedido foi feito só em parte",
+    "desfeita": "o pedido foi feito e depois desfeito",
+    "parada": "o pedido foi parado antes de terminar, pelo bloqueio",
+    "desconhecido": "o sistema não sabe se o pedido foi feito",
+}
+"""O vocabulario fechado do contrato do selo (``contrato.ESTADOS``, desenho 2.6) como a tela mostra, com acento. So
+estas categorias chegam a pessoa: nunca texto, identificador ou hora escritos pelo sistema (D21)."""
+ESTADO_FORA_DO_VOCABULARIO: Final = "uma resposta fora do vocabulário do contrato"
+"""Reserva para um estado que nao e do vocabulario (o banco os recusa; a tela nunca repete o que veio)."""
+
+
+def estado_legivel(estado: Any) -> str:
+    """O estado do contrato do selo em palavras (``ESTADOS_LEGIVEIS``); fora do vocabulario, a reserva (nunca o
+    valor que veio)."""
+    return ESTADOS_LEGIVEIS.get(str(estado), ESTADO_FORA_DO_VOCABULARIO) if estado is not None else ""
+
+
+TIPOS_INFORMADO_PELO_SISTEMA: Final = frozenset({"sistema_informou", "sistema_informou_no_bloqueio"})
+"""As linhas do extrato com o que o sistema informou (desenho 7.2): levam a etiqueta "Informado pelo sistema"."""
+INFORMADO_PELO_SISTEMA: Final = "Informado pelo sistema"
+INFORMADO_PELO_TERCEIRO: Final = "Informado pelo servidor de terceiros"
+"""Num terceiro, a etiqueta diz que foi o servidor de terceiros quem informou (critica M9, desenho 8)."""
+
+SELO_NIVEL_1: Final = "nível 1"
+
+
+def selo_da_linha_do_extrato(
+    nivel: Any, nivel_do_teste: Any, testado_em: Any, *, data: Callable[[datetime], str] | None = None
+) -> str:
+    """A coluna "Selo" do extrato, so de ``dados.selo`` da propria linha (o retrato da hora do passo, D25), nunca do
+    selo de agora do sistema. ``nivel`` e o nivel do retrato (numero 1, 2 ou 3; outro valor, sem selo: ""). Nivel 2
+    ou 3 so aparece com o teste do retrato aprovado em ``testes_selo`` (critica M3): ``nivel_do_teste`` e o
+    ``nivel_obtido`` desse teste (aprovado e do mesmo sistema da linha; None sem ele) e ``testado_em`` a data dele,
+    do banco. Sem o teste que o confirme, "nível 1": nada e prometido."""
+    if type(nivel) is not int or nivel not in (1, 2, 3):
+        return ""
+    if nivel == 1:
+        return SELO_NIVEL_1
+    if type(nivel_do_teste) is not int or nivel_do_teste < nivel or not isinstance(testado_em, datetime):
+        return SELO_NIVEL_1
+    dia = data(testado_em) if data is not None else testado_em.strftime("%d/%m/%Y")
+    return f"nível {nivel} (teste de {dia})"
+
+
+def etiqueta_da_linha_do_extrato(tipo: Any, origem: Any) -> str:
+    """ "Informado pelo sistema" (ou "pelo servidor de terceiros") nas linhas com o que o sistema informou; "" nas
+    outras."""
+    if str(tipo) not in TIPOS_INFORMADO_PELO_SISTEMA:
+        return ""
+    return INFORMADO_PELO_TERCEIRO if origem and str(origem) != "proprio" else INFORMADO_PELO_SISTEMA
+
 
 # --- Fase 3: servidores de terceiros (telas do ADMIN) ---
 
@@ -466,6 +539,18 @@ def criar_ambiente(fuso: str) -> Environment:
     ambiente.filters["pedido"] = pedido_legivel
     ambiente.filters["pedidos"] = pedidos_legiveis
     ambiente.filters["onde_pedido"] = lambda v: ONDE_O_PEDIDO.get(str(v), "Numa chamada")
+    # Fase 4: o selo da linha do extrato (de ``dados.selo`` da propria linha, ``consultas.linhas_extrato``) e a
+    # etiqueta das linhas com o que o sistema informou. Uma linha sem as colunas novas fica sem selo e sem etiqueta.
+    ambiente.filters["selo_da_linha"] = lambda linha: selo_da_linha_do_extrato(
+        getattr(linha, "selo_nivel", None),
+        getattr(linha, "selo_teste_nivel", None),
+        getattr(linha, "selo_testado_em", None),
+        data=so_data,
+    )
+    ambiente.filters["informado_pela_linha"] = lambda linha: etiqueta_da_linha_do_extrato(
+        getattr(linha, "tipo", None), getattr(linha, "sistema_origem", None)
+    )
+    ambiente.filters["estado_legivel"] = estado_legivel
     # Nome de campo e texto vindo do sistema (ou do aplicativo), no texto visivel: os caracteres escondidos viram
     # uma marca como [U+200B], como na ficha. O ``value=`` dos formularios fica cru.
     ambiente.filters["escondidos"] = lambda v: marcar_escondidos(str(v))

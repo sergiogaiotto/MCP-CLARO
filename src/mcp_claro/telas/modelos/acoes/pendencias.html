@@ -36,7 +36,7 @@
 <p>O pedido pode ter chegado ao sistema, mas a resposta não chegou inteira. Nada será reenviado. Conte para nós o que aconteceu.</p>
 <ul>
   {% for a in caixa.confirmando %}
-  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>{% if a.op.de_terceiro %} (de terceiros){% endif %}.{% if a.nao_chegou %} Esta ação foi dada como não confirmada antes de o envio terminar. Pelo que o MCP-CLARO viu depois, o pedido não chegou ao sistema.{% endif %} Falta a sua decisão.</li>
+  <li><a href="/telas/acoes/{{ a.op.id }}">{{ a.op.protocolo }}</a>: {{ a.op.nome_vitrine }} no sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>{% if a.op.de_terceiro %} (de terceiros){% endif %}.{% if a.nao_chegou %} Esta ação foi dada como não confirmada antes de o envio terminar. Pelo que o MCP-CLARO viu depois, o pedido não chegou ao sistema.{% endif %} Falta a sua decisão.{% if a.etiqueta_informado is defined and a.etiqueta_informado %} <span class="etiqueta">{{ a.etiqueta_informado }}</span>{% endif %}</li>
   {% endfor %}
 </ul>
 {% endif %}

@@ -28,6 +28,24 @@ Servidores de terceiros (Fase 3):
 - a conclusao da revisao do servidor tem teto de formulario proprio (``TETO_FORMULARIO_CONCLUSAO``): cabem as
   ``TETO_PUBLICAR`` caixas do despachante, e as outras rotas ficam com o teto de sempre. Caixas demais voltam com
   ``CAIXAS_DEMAIS``, e o formulario grande demais com ``seguranca.GRANDE_DEMAIS``, em portugues.
+
+Selos de nivel 2 e 3 (Fase 4, desenho 7.1):
+
+- a ficha do sistema tem o cartao "Selo" (``cartao_do_selo``): o selo de agora com o motivo legivel, lido so de
+  ``selo_vigente`` (``vigente.ler``, nunca ``sistemas.selo``), a declaracao de teste, a chave de teste, o pedido do
+  teste (com o numero estimado de chamadas e de escritas reais no alvo, pela conta da bateria: critica B5), o historico
+  e a retirada. Se a leitura do selo falhar, a ficha abre sem o cartao: o selo nunca para a tela;
+- salvar a declaracao, pedir o teste e retirar o selo pedem CSRF e login refeito na hora (``Telas.login_recente``;
+  sem ele, 403 e o botao "Entrar de novo agora"). A tela confere antes (``selo.declaracao``) e o banco confere de novo
+  (os gatilhos da 0007); a recusa do banco vira frase da tela (``RECUSAS_DO_BANCO``). Com outro teste esperando ou
+  rodando, o pedido volta com 409. Num servidor de terceiros, a declaracao e o pedido ficam recusados ate o G7 (409);
+- o relatorio de cada teste (``relatorio_do_teste``) mostra, por ferramenta, os casos, o resultado e por que, o que
+  nao testamos (sem IDs do rascunho independente: critica B6), a declaracao usada, o JSON para baixar e o rodape do
+  desenho 3.4. Nada do que o sistema respondeu aparece: so o vocabulario do contrato, contagens e horas;
+- a lista de sistemas tem a coluna "Selo" (``selos_da_lista``), com "vence em {d} dias" no prazo do aviso das rotinas,
+  contado pelo relogio do banco;
+- os avisos novos ficam em ``AVISOS_ADMIN`` (``paginas.AVISOS`` de reserva). Toda tela do selo diz que ele nao e
+  promessa (``SELO_NAO_GARANTE``).
 """
 
 from __future__ import annotations
@@ -38,13 +56,14 @@ import json
 import re
 import socket
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final
 from urllib.parse import urlencode, urlsplit
 
 import httpx2
 from markupsafe import Markup, escape
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -52,12 +71,16 @@ from starlette.routing import BaseRoute, Route
 
 from mcp_claro.cadastro import esquema, repositorio
 from mcp_claro.cadastro.quarentena import MOTIVO_QUARENTENA, MOTIVO_QUARENTENA_VERSAO
+from mcp_claro.config.politica import dias_de_aviso_do_selo, valor_inicial
 from mcp_claro.config.settings import Ambiente
 from mcp_claro.entrada.argumentos import ESQUEMA_FUNDO_DEMAIS, EsquemaInvalido
 from mcp_claro.logs import logger
+from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.regras.escondidos import marcar_escondidos
 from mcp_claro.saida.quarentena import MOTIVO_SEM_RESPOSTA
-from mcp_claro.telas import consultas, consultas_terceiros, limites, paginas
+from mcp_claro.selo import contrato, vigente
+from mcp_claro.selo import declaracao as declaracao_do_selo
+from mcp_claro.telas import consultas, consultas_terceiros, limites, paginas, seguranca
 from mcp_claro.telas.consultas_terceiros import PedidosRecusados
 from mcp_claro.telas.nucleo import Interrompe, Telas, numero_pagina, tela, uuid_ou_none, ver_depois
 from mcp_claro.telas.seguranca import Formulario, TetoFormulario, rota_com_teto
@@ -508,6 +531,563 @@ def _texto(f: Formulario, nome: str, rotulo: str, erros: list[str], *, minimo: i
     return valor
 
 
+# --- Fase 4: o selo de nivel 2 e 3 (cartao "Selo", pedido de teste, relatorio, retirada) ---
+
+AVISOS_ADMIN: Final[dict[str, str]] = {
+    "selo_declaracao_salva": (
+        "Pronto. A declaração de teste foi salva (versão {versao}). O teste usa sempre a mais nova."
+    ),
+    "selo_teste_pedido": "Pronto. O teste foi pedido; o resultado aparece aqui quando terminar.",
+    "selo_retirado": "Pronto. O selo foi retirado; o sistema volta ao nível 1.",
+    "selo_chave_guardada": (
+        "Pronto. A chave de teste do selo foi entregue ao cofre. Ela não aparece mais nas telas e fica separada da"
+        " chave de produção do sistema."
+    ),
+}
+"""Os avisos das telas do ADMIN da Fase 4 (com acento). A URL leva so o codigo; a pagina procura aqui e depois em
+``paginas.AVISOS``. ``selo_declaracao_salva`` ganha a versao da declaracao mais nova na hora de mostrar."""
+SELO_DECLARACAO_SALVA_SEM_VERSAO: Final = "Pronto. A declaração de teste foi salva. O teste usa sempre a mais nova."
+
+SELO_NAO_GARANTE: Final = "O selo diz como o sistema respondeu no teste; não garante o que ele fará depois."
+"""A frase que toda tela do selo leva (desenho 13.2, "Leitura como certificacao")."""
+SELO_RODAPE: Final = (
+    "Este relatório é do MCP-CLARO. Alguns casos adaptam requisitos de um rascunho independente de escrita segura;"
+    " veja o contrato. Ele não é uma declaração de conformidade desse rascunho."
+)
+"""O rodape do relatorio do teste (desenho 3.4), na pagina e no JSON."""
+SELO_CONFIRMO: Final = "Confirmo que o alvo declarado é de teste: a bateria vai fazer escritas reais nele."
+SELO_NOTA_DO_ALVO: Final = (
+    "O MCP-CLARO só escreve no alvo que você declarou e que se declara de teste, e só com os argumentos declarados."
+)
+"""A nota da declaracao (critica A4.6): a escrita so no alvo, com as condicoes ditas."""
+SELO_ATENCAO_DO_ALVO: Final = (
+    "A bateria faz escritas reais no alvo de teste. O MCP-CLARO recusa um alvo que seja a produção de algum sistema do"
+    " cadastro e para se o alvo não se declarar de teste, mas não sabe, sozinho, se o alvo é mesmo de teste. Confira"
+    " o endereço com a equipe do sistema antes de salvar."
+)
+"""O destaque do risco "A bateria faz escritas reais" (desenho 13.2): depende de gente declarar certo."""
+SELO_PEDE_LOGIN: Final = (
+    "Salvar a declaração de teste, pedir o teste e retirar o selo pedem um login refeito na hora, como cuidado a mais."
+)
+SELO_LOGIN_REFEITO: Final = "Para isto, entre de novo agora, no botão “Entrar de novo agora”. Nada foi feito."
+SELO_SEM_CONFIRMO: Final = "Marque a caixa que confirma que o alvo declarado é de teste. Nada foi salvo."
+SELO_SEM_DECLARACAO: Final = "Salve a declaração de teste e a chave de teste antes de pedir o teste."
+SELO_TESTE_JA_RODANDO: Final = "Já há um teste deste sistema rodando. Espere o resultado."
+SELO_NIVEL_FORA: Final = "Escolha o teste de nível 2 ou o de nível 3."
+SELO_NADA_A_RETIRAR: Final = "Este sistema não tem selo de nível 2 ou 3 agora. Nada foi retirado."
+SELO_MOTIVO_DA_RETIRADA: Final = "Escreva por que retirar o selo (de 1 a 500 letras). Nada foi retirado."
+SELO_SO_POR_PESSOA: Final = (
+    "O selo de nível 2 ou 3 é só para sistema com chave por pessoa: a consulta e o aviso usam a chave de quem pediu"
+    " a ação."
+)
+SELO_NAO_LIDO: Final = "Não deu para ler o selo deste sistema agora. Tente de novo daqui a pouco."
+SELO_RECUSA_DO_BANCO: Final = "O banco de dados recusou o pedido. Nada foi gravado."
+MOTIVO_MAXIMO_DA_RETIRADA: Final = 500
+"""O texto do ADMIN na retirada (``selos_retirados.detalhe``: de 1 a 500 letras)."""
+TRAVA_DAS_INFORMACOES: Final = "mcp_claro.selo.informacoes"
+"""A trava consultiva das respostas do sistema, por sistema (0007, ``informacoes_sistema_nasce``:
+``pg_advisory_xact_lock(hashtext('mcp_claro.selo.informacoes'), hashtext(NEW.sistema_id::text))``). A retirada pelo
+ADMIN a toma antes de ler o selo: duas retiradas ao mesmo tempo, ou a do ADMIN e a automatica do despachante (pela
+contradicao ou pelas consultas sem resposta, que gravam ``informacoes_sistema`` na mesma transacao), entram uma depois
+da outra, e a segunda ve o selo ja retirado. Sem ela, as duas liam o nivel 2 e gravavam duas retiradas do mesmo
+teste (duas linhas ``selo_retirado`` e o contador ``selo_retiradas`` duas vezes)."""
+TETO_FORMULARIO_DECLARACAO: Final = TetoFormulario(
+    tamanho=3 * contrato.TETO_DECLARACAO_BYTES + _FOLGA_CSRF, campos=8, campos_demais=seguranca.CAMPOS_DEMAIS
+)
+"""O formulario da declaracao de teste: o JSON de ate ``contrato.TETO_DECLARACAO_BYTES`` (cada byte vira ate tres no
+formulario, ``%XX``), a caixa e o CSRF. A conta de bytes do JSON e de ``declaracao.ler_texto``, com a frase da tela."""
+
+RECUSAS_DO_BANCO: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "a bateria nao escreve na producao",
+        "O alvo de teste é o endereço de produção de um sistema do cadastro. A bateria faz escritas reais no alvo: ele"
+        " nunca pode ser a produção. Nada foi gravado.",
+    ),
+    ("escrito de um jeito so", "O nome do alvo de teste não está escrito de um jeito só. Nada foi gravado."),
+    ("So um ADMIN ativo", "Só um ADMIN ativo salva a declaração, pede o teste ou retira o selo. Nada foi gravado."),
+    (
+        "declaracao de teste mais recente",
+        "Outra declaração de teste foi salva enquanto esta página estava aberta. Confira a versão mais nova e peça de"
+        " novo. Nada foi gravado.",
+    ),
+    (
+        "sistema ativo na versao 2026-07-28",
+        "O teste do selo só vale para sistema ativo, que fala a versão 2026-07-28 do MCP. Nada foi gravado.",
+    ),
+    ("chave por pessoa", SELO_SO_POR_PESSOA + " Nada foi gravado."),
+    ("pedidos_teste_selo_um_por_vez", SELO_TESTE_JA_RODANDO),
+    (
+        "So se retira o selo vigente",
+        "O selo deste sistema mudou enquanto esta página estava aberta e já não é de nível 2 ou 3. Nada foi retirado.",
+    ),
+    ("Diga por que retirar o selo", SELO_MOTIVO_DA_RETIRADA),
+)
+"""As recusas dos gatilhos da 0007 (sem acento, no banco), pelo trecho da mensagem, com o texto da tela. O banco
+confere de novo o que a tela ja conferiu; a frase so aparece quando algo mudou no meio."""
+
+RESULTADOS_LEGIVEIS: Final[dict[str, str]] = {
+    "cumpriu": "Cumpriu",
+    "falhou": "Falhou",
+    "nao_se_aplica": "Não se aplica",
+    "nao_testado": "Não testado",
+    "nao_observado": "Não observado",
+}
+"""Os veredictos do MCP-CLARO (``contrato.RESULTADOS``) na coluna "Resultado" do relatorio."""
+
+RAZOES_LEGIVEIS: Final[dict[str, str]] = {
+    "sem_condicao_declarada": "a declaração não traz o que este caso precisa",
+    "condicao_nao_forcada": "a bateria não conseguiu provocar a situação deste caso",
+    "sem_resposta": "o sistema não respondeu",
+    "tentativas_excluidas": "todas as tentativas passaram do prazo",
+    "interposicao": "depende da equipe do sistema",
+    "fora_do_alvo": "fica fora do alvo de teste",
+    "teto": "o teste chegou ao teto de chamadas",
+    "sem_segundo_efeito": "nesta ferramenta, repetir não muda nada",
+    "poucos_pares": "poucos pares ao mesmo tempo para observar",
+    "declarado": "declarado pelo sistema, sem teste",
+}
+"""As razoes de ``contrato.RAZOES`` na coluna "Por quê" do relatorio."""
+
+INTERRUPCOES_LEGIVEIS: Final[dict[str, str]] = {
+    "despachante_caiu": "o despachante parou no meio do teste",
+    "sistema_mudou": "o sistema ou a declaração mudou, ou o pedido já não valia quando chegou a vez dele",
+    "prazo": "o teste passou do tempo máximo",
+    "porta_fechada": "a porta de saída estava fechada",
+    "cofre_trancado": "o cofre estava trancado",
+    "sem_chave_de_teste": "falta a chave de teste do selo",
+    "teto_de_chamadas": "a declaração pede mais chamadas que o teto",
+    "erro_interno": "houve um erro do MCP-CLARO",
+}
+"""Por que um pedido de teste ficou ``interrompido`` (``contrato.MOTIVOS_DE_INTERRUPCAO``)."""
+
+MODOS_LEGIVEIS: Final[dict[str, str]] = {
+    "ambiente_de_teste": "no ambiente de teste do sistema",
+    "ferramentas_de_teste": "pelas ferramentas de teste que o sistema declarou",
+}
+"""Onde o teste roda (``contrato.MODOS``), como a ficha da pessoa diz (desenho 7.1)."""
+
+ESTADOS_DO_PEDIDO_LEGIVEIS: Final[dict[str, str]] = {
+    "pedido": "esperando a vez",
+    "rodando": "rodando",
+    "terminado": "terminado",
+    "interrompido": "interrompido",
+}
+
+ESCOPO_SISTEMA: Final = "O sistema inteiro"
+
+
+def recusa_do_banco(erro: BaseException) -> str:
+    """O texto da tela para uma recusa do banco (``RECUSAS_DO_BANCO``), ou a frase geral."""
+    mensagem = str(getattr(erro, "orig", erro))
+    for trecho, texto_da_tela in RECUSAS_DO_BANCO:
+        if trecho in mensagem:
+            return texto_da_tela
+    return SELO_RECUSA_DO_BANCO
+
+
+def aviso_da_pagina(codigo: str, *, versao: int | None = None) -> str | None:
+    """O aviso de um codigo da URL: os da Fase 4 (``AVISOS_ADMIN``) e, de reserva, ``paginas.AVISOS``."""
+    if codigo == "selo_declaracao_salva":
+        if versao is None:
+            return SELO_DECLARACAO_SALVA_SEM_VERSAO
+        return AVISOS_ADMIN[codigo].format(versao=versao)
+    return AVISOS_ADMIN.get(codigo) or paginas.AVISOS.get(codigo)
+
+
+def casos_que_nao_aprovam(itens: Any, nivel: int) -> int:
+    """Quantos itens falharam ou, num caso obrigatorio do nivel, ficaram sem aprovar (o mesmo ``{falhas}`` do
+    extrato): a conta unica de ``contrato.casos_que_nao_aprovam``."""
+    return contrato.casos_que_nao_aprovam(itens, nivel)
+
+
+def dias_legiveis(dias: int) -> str:
+    return "1 dia" if dias == 1 else f"{dias} dias"
+
+
+def reprovado_legivel(casos: int) -> str:
+    """O motivo ``reprovado`` do cartao "Selo", com a conta e as palavras do relatorio e do extrato
+    (``casos_que_nao_aprovam``: os que falharam e os obrigatorios que ficaram sem aprovar, como ``nao_testado`` com
+    ``sem_resposta``). Sem caso nenhum na conta, so "O último teste não foi aprovado." (nunca "0 casos")."""
+    if casos <= 0:
+        return vigente.MOTIVOS_LEGIVEIS["reprovado"]
+    quantos = "1 caso falhou ou ficou sem teste" if casos == 1 else f"{casos} casos falharam ou ficaram sem teste"
+    return f"O último teste não foi aprovado: {quantos}."
+
+
+_MARCA_DO_NOME: Final = "\x00{}\x00"
+"""O lugar de cada nome de ferramenta na frase de ``vigente`` (o banco nunca guarda NUL num texto)."""
+
+
+def selo_agora_na_tela(
+    selo: contrato.SeloLido, detalhes: vigente.Detalhes, *, fuso: str, reprovados: int | None = None
+) -> Markup:
+    """A linha "Selo agora: nível {n}." do cartao, em HTML pronto, de selo lido (``vigente.selo_agora_legivel``), com
+    duas trocas:
+
+    - no motivo ``reprovado``, a conta de ``casos_que_nao_aprovam`` (``reprovados``), a mesma do relatorio e do extrato
+      (``vigente.detalhes`` conta so os ``falhou`` e diria "0 casos falharam" num teste reprovado por um obrigatorio
+      sem resposta);
+    - no ``ferramenta_nova``, cada nome de ferramenta (texto do sistema) vai num ``<code class="estranho">`` com os
+      escondidos marcados (``[U+202E]``), como na tabela das ferramentas da mesma ficha, e nunca cru na frase."""
+    if selo.motivo == "reprovado" and reprovados is not None:
+        return escape(f"Selo agora: nível {selo.nivel}. {reprovado_legivel(reprovados)}")
+    nomes = detalhes.ferramentas if selo.motivo == "ferramenta_nova" else ()
+    marcas = tuple(_MARCA_DO_NOME.format(n) for n in range(len(nomes)))
+    html = escape(vigente.selo_agora_legivel(selo, replace(detalhes, ferramentas=marcas), fuso=fuso))
+    for marca, nome in zip(marcas, nomes, strict=True):
+        html = html.replace(marca, Markup('<code class="estranho">{}</code>').format(marcar_escondidos(nome)))
+    return html
+
+
+def com_a_guarda(item: contrato.NaoTestado, guarda: Any) -> str:
+    """O texto do que nao testamos; na guarda dos numeros, com os dias que a declaracao diz (desenho 7.1)."""
+    if item.item != "guarda_dos_numeros" or not isinstance(guarda, int) or isinstance(guarda, bool):
+        return item.texto
+    if item.texto.endswith(")."):
+        return f"{item.texto[:-2]}: {dias_legiveis(guarda)})."
+    return f"{item.texto} Declarado: {dias_legiveis(guarda)}."
+
+
+@dataclass(frozen=True, slots=True)
+class PlanoNaTela:
+    """O plano do teste de um nivel pela declaracao (critica B5): ate quantas chamadas e escritas reais no alvo."""
+
+    nivel: int
+    chamadas: int
+    escritas: int
+    passa_do_teto: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CartaoDoSelo:
+    """O que o cartao "Selo" da ficha do sistema mostra (desenho 7.1), tudo lido do banco agora.
+
+    ``agora``: "Selo agora: nivel {n}." com o motivo legivel, em HTML pronto (``selo_agora_na_tela``, de selo lido:
+    a conta do reprovado e os nomes de ferramenta marcados). ``detalhe``: o texto do ADMIN na retirada.
+    ``pode_testar``: sistema proprio com chave por pessoa; num terceiro (ate o G7) ou noutro tipo de chave, o cartao so
+    diz por que nao. Se a leitura falhar, a ficha recebe ``None`` no lugar do cartao e abre do mesmo jeito (o selo
+    nunca para a tela)."""
+
+    agora: Markup
+    nivel: int
+    teste_id: uuid.UUID | None
+    detalhe: str | None
+    terceiro: bool
+    por_pessoa: bool
+    fase_ligada: bool
+    declaracao: declaracao_do_selo.DeclaracaoSalva | None
+    modo: str | None
+    alvo: str | None
+    responsavel: str | None
+    ferramentas: tuple[str, ...]
+    guarda_dias: int | None
+    planos: tuple[PlanoNaTela, ...]
+    teto: int
+    chave_entregue_em: Any
+    aberto: Any
+    """O pedido ``pedido`` ou ``rodando`` do sistema, se houver (um por vez)."""
+    interrompido: Any
+    """O pedido mais recente, se ele ficou ``interrompido``."""
+    historico: list[Any]
+
+    @property
+    def pode_testar(self) -> bool:
+        return not self.terceiro and self.por_pessoa
+
+    @property
+    def nao_testado(self) -> list[str]:
+        """O que a bateria nunca testa (``contrato.NAO_TESTADOS``, sem IDs do rascunho), com a guarda declarada."""
+        return [com_a_guarda(n, self.guarda_dias) for n in sorted(contrato.NAO_TESTADOS, key=lambda n: n.item)]
+
+
+TEXTOS_DO_CARTAO: Final[dict[str, str]] = {
+    "nao_garante": SELO_NAO_GARANTE,
+    "confirmo": SELO_CONFIRMO,
+    "nota": SELO_NOTA_DO_ALVO,
+    "atencao": SELO_ATENCAO_DO_ALVO,
+    "terceiro": declaracao_do_selo.TERCEIRO_AINDA_NAO,
+    "so_por_pessoa": SELO_SO_POR_PESSOA,
+    "sem_declaracao": SELO_SEM_DECLARACAO,
+    "nao_lido": SELO_NAO_LIDO,
+    "fase_desligada": (
+        "Os selos de nível 2 e 3 ainda não estão ligados para as pessoas reais: só pessoas de teste usam o selo deste"
+        " sistema. Você pode declarar, guardar a chave de teste e pedir o teste."
+    ),
+}
+"""Os textos fixos do cartao "Selo" (com acento), que a pagina recebe prontos."""
+
+
+async def _chave_de_teste_entregue_em(c: AsyncConnection, sistema_id: uuid.UUID) -> Any:
+    """Quando o ADMIN entregou a chave de teste pela tela, pela ultima vez (a linha ``admin_chave_entregue``). A
+    entrada nao le ``chaves_cifradas``: quem confere de verdade e a bateria (``sem_chave_de_teste``)."""
+    return (
+        await c.execute(
+            text(
+                "SELECT max(criado_em) FROM extrato WHERE sistema_id = :s AND tipo = 'admin_chave_entregue'"
+                " AND dados ->> 'entrega' = :t"
+            ),
+            {"s": sistema_id, "t": contrato.TIPO_CHAVE_TESTE},
+        )
+    ).scalar_one_or_none()
+
+
+async def _casos_do_teste_que_nao_aprovam(c: AsyncConnection, teste_id: uuid.UUID) -> int:
+    """A conta do relatorio (``casos_que_nao_aprovam``) para o teste ``teste_id``, pelo nivel pedido."""
+    t = (await c.execute(text("SELECT casos, nivel_pedido FROM testes_selo WHERE id = :t"), {"t": teste_id})).first()
+    return 0 if t is None else casos_que_nao_aprovam(t.casos, int(t.nivel_pedido))
+
+
+_SQL_PEDIDOS: Final = (
+    "SELECT p.id, p.nivel, p.estado, p.motivo, p.pedido_em, p.mudou_em,"
+    " coalesce(nullif(btrim(pe.nome), ''), pe.sujeito) AS quem, t.id AS teste_id, t.resultado, t.nivel_obtido,"
+    " t.testado_em, t.vale_ate"
+    " FROM pedidos_teste_selo p JOIN pessoas pe ON pe.id = p.pedido_por"
+    " LEFT JOIN testes_selo t ON t.pedido_id = p.id"
+    " WHERE p.sistema_id = :s ORDER BY p.pedido_em DESC, p.id DESC LIMIT :n"
+)
+HISTORICO_MAXIMO: Final = 20
+
+
+def planos_da_declaracao(modelo: declaracao_do_selo.Declaracao, *, pares: int, teto: int) -> tuple[PlanoNaTela, ...]:
+    """O plano de cada nivel pela declaracao, pela conta da bateria (``selo.bateria.plano``, sem a lista do alvo: o
+    maximo, com o C-2.7 e o C-2.2b em toda acao)."""
+    from mcp_claro.selo import bateria  # so a conta do plano; o resto da bateria e do despachante
+
+    saida: list[PlanoNaTela] = []
+    for nivel in contrato.NIVEIS:
+        p = bateria.plano(modelo, nivel, pares=pares)
+        saida.append(PlanoNaTela(nivel, p.chamadas, p.escritas, p.chamadas > teto))
+    return tuple(saida)
+
+
+async def cartao_do_selo(
+    c: AsyncConnection, linha: Any, *, fuso: str, fase_ligada: bool, pares: int, teto: int
+) -> CartaoDoSelo:
+    """Le o cartao "Selo" do sistema ``linha`` (``consultas.sistema``). O selo sai so de ``selo_vigente`` (vigente.ler),
+    nunca de ``sistemas.selo``."""
+    selo = await vigente.ler(c, linha.id)
+    reprovados: int | None = None
+    if selo.motivo == "reprovado" and selo.teste_id is not None:
+        detalhes = vigente.Detalhes()
+        reprovados = await _casos_do_teste_que_nao_aprovam(c, selo.teste_id)
+    else:
+        detalhes = await vigente.detalhes(c, linha.id, selo)
+    agora = selo_agora_na_tela(selo, detalhes, fuso=fuso, reprovados=reprovados)
+    salva = await declaracao_do_selo.ultima(c, linha.id)
+    modelo: declaracao_do_selo.Declaracao | None = None
+    if salva is not None:
+        with contextlib.suppress(declaracao_do_selo.DeclaracaoRecusada):
+            modelo = salva.modelo()
+    pedidos = list((await c.execute(text(_SQL_PEDIDOS), {"s": linha.id, "n": HISTORICO_MAXIMO})).all())
+    aberto = next((p for p in pedidos if p.estado in ("pedido", "rodando")), None)
+    interrompido = pedidos[0] if pedidos and pedidos[0].estado == "interrompido" else None
+    return CartaoDoSelo(
+        agora=agora,
+        nivel=selo.nivel,
+        teste_id=selo.teste_id,
+        detalhe=detalhes.detalhe if detalhes.retirada == "admin" else None,
+        terceiro=str(linha.origem) != "proprio",
+        por_pessoa=str(linha.tipo_chave) == "por_pessoa",
+        fase_ligada=fase_ligada,
+        declaracao=salva,
+        modo=None if modelo is None else MODOS_LEGIVEIS.get(modelo.modo, modelo.modo),
+        alvo=None if modelo is None else modelo.endereco_teste,
+        responsavel=None if modelo is None else modelo.responsavel,
+        ferramentas=() if modelo is None else tuple(sorted(modelo.ferramentas)),
+        guarda_dias=None if modelo is None else modelo.guarda_dias,
+        planos=() if modelo is None else planos_da_declaracao(modelo, pares=pares, teto=teto),
+        teto=teto,
+        chave_entregue_em=await _chave_de_teste_entregue_em(c, linha.id),
+        aberto=aberto,
+        interrompido=interrompido,
+        historico=pedidos,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LinhaDoCaso:
+    """Uma linha do relatorio: o caso, o que testamos, o resultado e por que (tudo do vocabulario do contrato)."""
+
+    caso: str
+    requisito: str
+    o_que_testamos: str
+    resultado: str
+    codigo: str
+    por_que: str
+    excluidas: int
+
+
+@dataclass(frozen=True, slots=True)
+class GrupoDoRelatorio:
+    """Os casos de uma ferramenta (``nome``, a revisada que o teste cobriu) ou do sistema inteiro (``nome`` nulo)."""
+
+    nome: str | None
+    versao: int | None
+    linhas: list[LinhaDoCaso]
+
+
+@dataclass(frozen=True, slots=True)
+class Relatorio:
+    """O relatorio de um teste do selo (``testes_selo``), com a declaracao usada e o que nao testamos."""
+
+    teste: Any
+    grupos: list[GrupoDoRelatorio]
+    nao_testado: list[str]
+    falhas: int
+    declaracao: dict[str, Any]
+    ferramentas: list[dict[str, Any]]
+
+    def como_json(self, sistema: Any) -> dict[str, Any]:
+        """O JSON que o ADMIN baixa: so o que o banco guardou (casos, contagens, horas e razoes do vocabulario, sem
+        texto do sistema), a declaracao usada e o rodape."""
+        t = self.teste
+        return {
+            "relatorio": "Teste do selo do MCP-CLARO",
+            "contrato": t.contrato,
+            "bateria": t.bateria,
+            "sistema": {"id": str(sistema.id), "nome": sistema.nome},
+            "teste": {
+                "id": str(t.id),
+                "nivel_pedido": int(t.nivel_pedido),
+                "resultado": t.resultado,
+                "nivel_obtido": int(t.nivel_obtido),
+                "iniciado_em": t.iniciado_em.isoformat(),
+                "testado_em": t.testado_em.isoformat(),
+                "vale_ate": t.vale_ate.isoformat(),
+                "chamadas": int(t.chamadas),
+                "pedido_por": t.quem,
+            },
+            "retrato": {
+                "endereco": t.sistema_endereco,
+                "tipo_chave": t.sistema_tipo_chave,
+                "revisao_servidor_id": None if t.revisao_servidor_id is None else str(t.revisao_servidor_id),
+            },
+            "ferramentas": self.ferramentas,
+            "casos": list(t.casos),
+            "nao_testado": [
+                {"item": n.item, "razao": n.razao, "texto": n.texto}
+                for n in sorted(contrato.NAO_TESTADOS, key=lambda n: n.item)
+            ],
+            "declaracao": self.declaracao,
+            "rodape": SELO_RODAPE,
+        }
+
+
+_SQL_RELATORIO: Final = (
+    "SELECT t.id, t.contrato, t.bateria, t.nivel_pedido, t.resultado, t.nivel_obtido, t.sistema_endereco,"
+    " t.sistema_tipo_chave, t.revisao_servidor_id, t.ferramentas, t.casos, t.nao_testado, t.chamadas, t.iniciado_em,"
+    " t.testado_em, t.vale_ate, p.pedido_em, coalesce(nullif(btrim(pe.nome), ''), pe.sujeito) AS quem,"
+    " d.versao AS declaracao_versao, d.declaracao AS declaracao_dados, d.salva_por AS declaracao_salva_por,"
+    " d.salva_em AS declaracao_salva_em"
+    " FROM testes_selo t JOIN pedidos_teste_selo p ON p.id = t.pedido_id JOIN pessoas pe ON pe.id = p.pedido_por"
+    " JOIN declaracoes_selo d ON d.id = t.declaracao_id WHERE t.id = :t AND t.sistema_id = :s"
+)
+
+
+def _linha_do_caso(item: dict[str, Any]) -> LinhaDoCaso:
+    codigo = str(item.get("caso"))
+    caso = contrato.CASOS_POR_NOME.get(codigo)
+    resultado = str(item.get("resultado"))
+    razao = item.get("razao")
+    excluidas = item.get("excluidas")
+    return LinhaDoCaso(
+        caso=codigo,
+        requisito="" if caso is None else caso.requisito,
+        o_que_testamos="" if caso is None else caso.o_que_testamos,
+        resultado=RESULTADOS_LEGIVEIS.get(resultado, resultado),
+        codigo=resultado,
+        por_que=RAZOES_LEGIVEIS.get(str(razao), "") if razao is not None else "",
+        excluidas=excluidas if isinstance(excluidas, int) and not isinstance(excluidas, bool) else 0,
+    )
+
+
+async def relatorio_do_teste(c: AsyncConnection, sistema_id: uuid.UUID, teste_id: uuid.UUID) -> Relatorio | None:
+    """O relatorio do teste ``teste_id`` do sistema ``sistema_id``; ``None`` se o teste nao e deste sistema."""
+    t = (await c.execute(text(_SQL_RELATORIO), {"t": teste_id, "s": sistema_id})).first()
+    if t is None:
+        return None
+    ids = [uuid.UUID(str(f)) for f in t.ferramentas]
+    revisadas = {
+        uuid.UUID(str(r.id)): r
+        for r in (
+            await c.execute(
+                text("SELECT id, nome_original, versao FROM ferramentas_revisadas WHERE id = ANY (:i)"), {"i": ids}
+            )
+        ).all()
+    }
+    ordem = {caso.caso: n for n, caso in enumerate(contrato.CASOS)}
+    itens = [i for i in t.casos if isinstance(i, dict)]
+    itens.sort(key=lambda i: ordem.get(str(i.get("caso")), len(ordem)))
+    grupos = [GrupoDoRelatorio(None, None, [_linha_do_caso(i) for i in itens if i.get("ferramenta") is None])]
+    ferramentas: list[dict[str, Any]] = []
+    for f in ids:
+        r = revisadas.get(f)
+        nome = None if r is None else str(r.nome_original)
+        versao = None if r is None else int(r.versao)
+        ferramentas.append({"id": str(f), "nome": nome, "versao": versao})
+        linhas = [_linha_do_caso(i) for i in itens if str(i.get("ferramenta")) == str(f)]
+        grupos.append(GrupoDoRelatorio(nome or str(f), versao, linhas))
+    guarda = t.declaracao_dados.get("guarda_dias") if isinstance(t.declaracao_dados, dict) else None
+    nao_testado: list[str] = []
+    for n in sorted(contrato.NAO_TESTADOS, key=lambda n: n.item):
+        nao_testado.append(com_a_guarda(n, guarda))
+    return Relatorio(
+        teste=t,
+        grupos=[g for g in grupos if g.linhas or g.nome is not None],
+        nao_testado=nao_testado,
+        falhas=casos_que_nao_aprovam(list(t.casos), int(t.nivel_pedido)),
+        declaracao={
+            "versao": int(t.declaracao_versao),
+            "salva_por": t.declaracao_salva_por,
+            "salva_em": t.declaracao_salva_em.isoformat(),
+            "dados": t.declaracao_dados,
+        },
+        ferramentas=ferramentas,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SeloNaLista:
+    """A coluna "Selo" da lista de sistemas (pelo id do sistema em texto): o nivel e, se vence em ate o aviso das
+    rotinas, quantos dias faltam."""
+
+    nivel: int
+    vence_em: int | None
+
+
+async def selos_da_lista(c: AsyncConnection) -> dict[str, SeloNaLista]:
+    """O selo de agora de cada sistema (``selos_vigentes``) e, num selo de nivel 2 ou 3 perto de vencer, os dias que
+    faltam, contados pelo relogio do banco. O aviso e o mesmo das rotinas (``BADGE_WARN_DAYS``, menor que a
+    validade: ``config.politica.dias_de_aviso_do_selo``)."""
+    validade = await _politica(c, "BADGE_TTL_DAYS")
+    aviso = dias_de_aviso_do_selo(validade, await _politica(c, "BADGE_WARN_DAYS"))
+    linhas = (
+        await c.execute(
+            text(
+                "SELECT sistema_id, nivel, CASE WHEN nivel >= 2 THEN"
+                " CAST(ceil(extract(epoch FROM vale_ate - now()) / 86400) AS integer) END AS dias FROM selos_vigentes"
+            )
+        )
+    ).all()
+    return {
+        str(x.sistema_id): SeloNaLista(
+            int(x.nivel), int(x.dias) if x.dias is not None and 0 < int(x.dias) <= aviso else None
+        )
+        for x in linhas
+    }
+
+
+async def _politica(c: AsyncConnection, chave: str) -> int:
+    try:
+        return await consultas.valor_politica(c, chave)
+    except ValueError:
+        return valor_inicial(chave)
+
+
+def _motivo_da_retirada(f: Formulario) -> str:
+    return _limpo(f.texto("motivo"))
+
+
 class TelasDoAdmin:
     def __init__(self, t: Telas) -> None:
         self.t = t
@@ -531,6 +1111,13 @@ class TelasDoAdmin:
             ),
             r("/admin/sistemas/{sistema_id:uuid}/ferramenta", self.ferramenta),
             r("/admin/sistemas/{sistema_id:uuid}/ferramenta", self.revisar, "POST"),
+            rota_com_teto(
+                "/admin/sistemas/{sistema_id:uuid}/selo/declaracao", self.salvar_declaracao, TETO_FORMULARIO_DECLARACAO
+            ),
+            r("/admin/sistemas/{sistema_id:uuid}/selo/testar", self.pedir_teste, "POST"),
+            r("/admin/sistemas/{sistema_id:uuid}/selo/retirar", self.retirar_selo, "POST"),
+            r("/admin/sistemas/{sistema_id:uuid}/selo/testes/{teste_id:uuid}.json", self.relatorio_json),
+            r("/admin/sistemas/{sistema_id:uuid}/selo/testes/{teste_id:uuid}", self.relatorio),
             r("/admin/modelos", self.modelos),
             r("/admin/modelos", self.criar_modelo, "POST"),
             r("/admin/webhooks", self.webhooks),
@@ -648,11 +1235,19 @@ class TelasDoAdmin:
     ) -> Response:
         async with self.t.engine.connect() as c:
             sistemas = await consultas.todos_sistemas(c)
+        selos: dict[str, SeloNaLista] | None = None
+        try:
+            async with self.t.engine.connect() as c:
+                selos = await selos_da_lista(c)
+        except SQLAlchemyError as erro:  # o selo nunca para a tela: a coluna diz que nao leu
+            log.warning("telas_admin_selos_nao_lidos", erro=type(erro).__name__)
         return self.t.pagina(
             pedido,
             "admin/sistemas.html",
             {
                 "sistemas": sistemas,
+                "selos": selos,
+                "dias_legiveis": dias_legiveis,
                 "origens": paginas.ORIGENS,
                 "terceiros_ligados": bool(self.t.p.FEATURE_PHASE3_THIRD_PARTY),
                 "erros": erros or [],
@@ -767,10 +1362,24 @@ class TelasDoAdmin:
         )
         if valores is None:
             valores = valores_da_conclusao(terceiro)
+        selo = await self._cartao_do_selo(linha)
+        sessao = await self.t.sessao(pedido)
+        versao = selo.declaracao.versao if selo is not None and selo.declaracao is not None else None
         return self.t.pagina(
             pedido,
             "admin/sistema.html",
             {
+                "aviso": aviso_da_pagina(pedido.query_params.get("aviso", ""), versao=versao),
+                "selo": selo,
+                "selo_textos": TEXTOS_DO_CARTAO,
+                # O login refeito volta sempre para a ficha (GET), mesmo quando a pagina e a resposta de um POST.
+                "refazer": None
+                if sessao is None
+                else self.t.login_refeito(pedido, sessao, f"/telas/admin/sistemas/{linha.id}"),
+                "pede": SELO_PEDE_LOGIN,
+                "dias_legiveis": dias_legiveis,
+                "interrupcoes": INTERRUPCOES_LEGIVEIS,
+                "estados_do_pedido": ESTADOS_DO_PEDIDO_LEGIVEIS,
                 "sistema": linha,
                 "vistas": vistas,
                 "detalhe": detalhe,
@@ -791,6 +1400,221 @@ class TelasDoAdmin:
         await self.t.exigir_admin(pedido)
         linha = await self._sistema_ou_404(pedido)
         return await self._pagina_sistema(pedido, linha)
+
+    async def pagina_do_sistema(
+        self, pedido: Request, linha: Any, *, erros: list[str], status: int | None = None
+    ) -> Response:
+        """A ficha do sistema com ``erros`` (as telas de chaves, ``admin_portas``, voltam por aqui na chave de
+        teste do selo)."""
+        return await self._pagina_sistema(pedido, linha, erros=erros, status=status)
+
+    # --- Selo de nivel 2 e 3 (Fase 4) ---
+
+    async def _cartao_do_selo(self, linha: Any) -> CartaoDoSelo | None:
+        """O cartao "Selo", numa conexao propria: se a leitura falhar, a ficha abre sem ele (o selo nunca para a
+        tela) e diz que nao leu."""
+        try:
+            async with self.t.engine.connect() as c:
+                return await cartao_do_selo(
+                    c,
+                    linha,
+                    fuso=self.t.cfg.fuso,
+                    fase_ligada=self.t.p.FEATURE_PHASE4_BADGES is True,
+                    pares=self.t.p.BADGE_TEST_PAIRS,
+                    teto=self.t.p.BADGE_TEST_MAX_CALLS,
+                )
+        except (SQLAlchemyError, ValueError) as erro:
+            log.warning("telas_admin_selo_nao_lido", erro=type(erro).__name__)
+            return None
+
+    async def _recusa_do_selo(
+        self, pedido: Request, linha: Any, erro: str, status: int, valores: dict[str, Any] | None = None
+    ) -> Response:
+        log.info("telas_admin_selo_recusado", status=status)
+        return await self._pagina_sistema(pedido, linha, erros=[erro], valores=valores, status=status)
+
+    @tela
+    async def salvar_declaracao(self, pedido: Request) -> Response:
+        """Salva a declaracao de teste (desenho 2.5): com CSRF, login refeito e a caixa marcada. Nesta ordem:
+        ``declaracao.ler_texto``, ``cadastro_do_sistema``, ``conferir`` e ``salvar``, com a linha do extrato na mesma
+        transacao. A recusa volta com a frase (``DeclaracaoRecusada.mensagem``; a declaracao incompleta diz a
+        ferramenta que falta) e 400; o terceiro, 409 (ate o G7)."""
+        sessao = await self.t.exigir_admin(pedido)
+        f = await self.t.formulario(pedido, sessao)
+        linha = await self._sistema_ou_404(pedido)
+        texto = f.texto("declaracao")
+        valores: dict[str, Any] = {"declaracao": texto}
+        if not self.t.login_recente(sessao):
+            return await self._recusa_do_selo(pedido, linha, SELO_LOGIN_REFEITO, 403, valores)
+        if f.texto("confirmo") != "sim":
+            return await self._recusa_do_selo(pedido, linha, SELO_SEM_CONFIRMO, 400, valores)
+        try:
+            modelo = declaracao_do_selo.ler_texto(texto)
+            async with self.t.engine.begin() as c:
+                cadastro = await declaracao_do_selo.cadastro_do_sistema(c, linha.id)
+                declaracao_do_selo.conferir(modelo, cadastro, ambiente=self.t.p.APP_ENV)
+                salva = await declaracao_do_selo.salvar(
+                    c, sistema_id=linha.id, pessoa_id=sessao.pessoa.id, salva_por=sessao.quem[:200], declaracao=modelo
+                )
+                await self.t.extrato(
+                    c,
+                    "admin_selo_declaracao_salva",
+                    {"sistema": linha.nome, "quem": sessao.quem, "versao": salva.versao},
+                    pessoa_id=sessao.pessoa.id,
+                    sistema_id=linha.id,
+                    dados={"declaracao_id": str(salva.id), "versao": salva.versao, "modo": modelo.modo},
+                )
+        except declaracao_do_selo.DeclaracaoRecusada as erro:
+            status = 409 if erro.motivo == "selo_terceiro_ainda_nao" else 400
+            return await self._recusa_do_selo(pedido, linha, erro.mensagem, status, valores)
+        except DBAPIError as erro:
+            return await self._recusa_do_selo(pedido, linha, recusa_do_banco(erro), 409, valores)
+        log.info("telas_admin_selo_declaracao_salva", versao=salva.versao)
+        return ver_depois(f"/telas/admin/sistemas/{linha.id}", "selo_declaracao_salva")
+
+    @tela
+    async def pedir_teste(self, pedido: Request) -> Response:
+        """Pede o teste de nivel 2 ou 3 (desenho 3.1): com CSRF e login refeito, a declaracao mais recente conferida
+        de novo contra o cadastro de agora e a chave de teste entregue. Um pedido por vez por sistema: com outro
+        esperando ou rodando, 409. Quem roda e o despachante; a tela so grava o pedido e a linha do extrato."""
+        sessao = await self.t.exigir_admin(pedido)
+        f = await self.t.formulario(pedido, sessao)
+        linha = await self._sistema_ou_404(pedido)
+        if not self.t.login_recente(sessao):
+            return await self._recusa_do_selo(pedido, linha, SELO_LOGIN_REFEITO, 403)
+        escolhido = f.texto("nivel")
+        if escolhido not in ("2", "3"):
+            return await self._recusa_do_selo(pedido, linha, SELO_NIVEL_FORA, 400)
+        nivel = int(escolhido)
+        recusa: tuple[str, int] | None = None
+        try:
+            declaracao_do_selo.recusar_terceiro(str(linha.origem) != "proprio")
+            async with self.t.engine.begin() as c:
+                salva = await declaracao_do_selo.ultima(c, linha.id)
+                if salva is None or await _chave_de_teste_entregue_em(c, linha.id) is None:
+                    recusa = (SELO_SEM_DECLARACAO, 409)
+                else:
+                    cadastro = await declaracao_do_selo.cadastro_do_sistema(c, linha.id)
+                    declaracao_do_selo.conferir(salva.modelo(), cadastro, ambiente=self.t.p.APP_ENV)
+                    # Um pedido por vez: o indice unico do banco (pedidos_teste_selo_um_por_vez) recusa o segundo,
+                    # tambem com dois cliques ao mesmo tempo, e a recusa vira SELO_TESTE_JA_RODANDO.
+                    pedido_id = (
+                        await c.execute(
+                            text(
+                                "INSERT INTO pedidos_teste_selo (sistema_id, nivel, declaracao_id, pedido_por)"
+                                " VALUES (:s, :n, :d, :p) RETURNING id"
+                            ),
+                            {"s": linha.id, "n": nivel, "d": salva.id, "p": sessao.pessoa.id},
+                        )
+                    ).scalar_one()
+                    await self.t.extrato(
+                        c,
+                        "admin_selo_teste_pedido",
+                        {"nivel": nivel, "sistema": linha.nome, "quem": sessao.quem},
+                        pessoa_id=sessao.pessoa.id,
+                        sistema_id=linha.id,
+                        dados={"pedido_id": str(pedido_id), "nivel": nivel, "declaracao_versao": salva.versao},
+                    )
+        except declaracao_do_selo.DeclaracaoRecusada as erro:
+            recusa = (erro.mensagem, 409 if erro.motivo == "selo_terceiro_ainda_nao" else 400)
+        except DBAPIError as erro:
+            recusa = (recusa_do_banco(erro), 409)
+        if recusa is not None:
+            return await self._recusa_do_selo(pedido, linha, *recusa)
+        log.info("telas_admin_selo_teste_pedido", nivel=nivel)
+        return ver_depois(f"/telas/admin/sistemas/{linha.id}", "selo_teste_pedido")
+
+    @tela
+    async def retirar_selo(self, pedido: Request) -> Response:
+        """Retira o selo vigente (D29): com CSRF, login refeito e o motivo do ADMIN (de 1 a 500 letras). O banco grava
+        quem retirou pelo cadastro (``selos_retirados_nasce``) e so aceita o selo vigente; o aviso ao ADMIN e das
+        rotinas (``rotinas.selos``), uma vez por teste retirado. A transacao toma antes a trava das respostas do
+        sistema (``TRAVA_DAS_INFORMACOES``): duas retiradas ao mesmo tempo gravam uma so, e a outra volta com 409."""
+        sessao = await self.t.exigir_admin(pedido)
+        f = await self.t.formulario(pedido, sessao)
+        linha = await self._sistema_ou_404(pedido)
+        motivo = _motivo_da_retirada(f)
+        valores: dict[str, Any] = {"motivo": motivo}
+        if not self.t.login_recente(sessao):
+            return await self._recusa_do_selo(pedido, linha, SELO_LOGIN_REFEITO, 403, valores)
+        if not 1 <= len(motivo) <= MOTIVO_MAXIMO_DA_RETIRADA:
+            return await self._recusa_do_selo(pedido, linha, SELO_MOTIVO_DA_RETIRADA, 400, valores)
+        retirado: uuid.UUID | None = None
+        try:
+            async with self.t.engine.begin() as c:
+                # A trava das respostas do sistema antes de ler o selo (TRAVA_DAS_INFORMACOES): uma retirada por vez.
+                await c.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:t), hashtext(CAST(:s AS text)))"),
+                    {"t": TRAVA_DAS_INFORMACOES, "s": str(linha.id)},
+                )
+                selo = await vigente.ler(c, linha.id)
+                if selo.nivel >= 2 and selo.teste_id is not None:
+                    await c.execute(
+                        text(
+                            "INSERT INTO selos_retirados (sistema_id, teste_id, motivo, detalhe, retirado_por,"
+                            " pessoa_id) VALUES (:s, :t, 'admin', :d, :q, :p)"
+                        ),
+                        {"s": linha.id, "t": selo.teste_id, "d": motivo, "q": sessao.quem[:200], "p": sessao.pessoa.id},
+                    )
+                    await self.t.extrato(
+                        c,
+                        "selo_retirado",
+                        {"sistema": linha.nome, "motivo": f"o ADMIN {sessao.quem} retirou o selo"},
+                        pessoa_id=sessao.pessoa.id,
+                        sistema_id=linha.id,
+                        dados={"motivo": "admin", "teste_id": str(selo.teste_id), "nivel": selo.nivel},
+                    )
+                    retirado = selo.teste_id
+        except DBAPIError as erro:
+            return await self._recusa_do_selo(pedido, linha, recusa_do_banco(erro), 409, valores)
+        if retirado is None:
+            return await self._recusa_do_selo(pedido, linha, SELO_NADA_A_RETIRAR, 409, valores)
+        CONTADORES.somar("selo_retiradas", motivo="admin")
+        log.info("telas_admin_selo_retirado")
+        return ver_depois(f"/telas/admin/sistemas/{linha.id}", "selo_retirado")
+
+    async def _relatorio_ou_404(self, pedido: Request, linha: Any) -> Relatorio:
+        async with self.t.engine.connect() as c:
+            achado = await relatorio_do_teste(c, linha.id, pedido.path_params["teste_id"])
+        if achado is None:
+            raise Interrompe(
+                self.t.erro(pedido, 404, "Teste não encontrado", "Este teste do selo não é deste sistema.")
+            )
+        return achado
+
+    @tela
+    async def relatorio(self, pedido: Request) -> Response:
+        """O relatorio de um teste do selo (desenho 7.1): por ferramenta, os casos, o resultado e por que; o que nao
+        testamos; a declaracao usada; o JSON para baixar e o rodape da secao 3.4."""
+        await self.t.exigir_admin(pedido)
+        linha = await self._sistema_ou_404(pedido)
+        achado = await self._relatorio_ou_404(pedido, linha)
+        return self.t.pagina(
+            pedido,
+            "admin/selo_teste.html",
+            {
+                "sistema": linha,
+                "r": achado,
+                "t": achado.teste,
+                "declaracao_legivel": _json_legivel(achado.declaracao["dados"]),
+                "modos": MODOS_LEGIVEIS,
+                "textos": {"nao_garante": SELO_NAO_GARANTE, "rodape": SELO_RODAPE, "sistema": ESCOPO_SISTEMA},
+            },
+        )
+
+    @tela
+    async def relatorio_json(self, pedido: Request) -> Response:
+        """O mesmo relatorio em JSON, para baixar (sem texto do sistema: so o que ``testes_selo`` guarda e a
+        declaracao usada)."""
+        await self.t.exigir_admin(pedido)
+        linha = await self._sistema_ou_404(pedido)
+        achado = await self._relatorio_ou_404(pedido, linha)
+        corpo = json.dumps(achado.como_json(linha), ensure_ascii=False, indent=2, sort_keys=False)
+        return Response(
+            corpo.encode("utf-8"),
+            media_type="application/json",
+            headers={"content-disposition": f'attachment; filename="teste-do-selo-{achado.teste.id}.json"'},
+        )
 
     @tela
     async def sondar(self, pedido: Request) -> Response:

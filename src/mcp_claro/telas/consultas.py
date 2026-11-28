@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from mcp_claro.cadastro.modelos import Pessoa
 from mcp_claro.config.politica import POLITICA, valor_inicial
+from mcp_claro.selo import contrato
 
 TAMANHO_PAGINA = 25
 
@@ -172,17 +173,31 @@ async def linhas_extrato(
 ) -> tuple[Sequence[Row[Any]], bool]:
     """Linhas do extrato da pessoa, mais novas primeiro. Devolve (linhas, ha_mais_antigas).
 
-    Com a origem do sistema de cada linha (``sistema_origem``): a tela marca "de terceiros" e da a dica fixa."""
+    Com a origem do sistema de cada linha (``sistema_origem``): a tela marca "de terceiros" e da a dica fixa.
+
+    Fase 4 (desenho 7.1 e D25): a coluna "Selo" sai de ``dados.selo`` da PROPRIA linha (o retrato da hora do passo),
+    nunca do selo de agora do sistema nem de ``sistemas.selo``: ``selo_nivel`` e o nivel do retrato (so quando e um
+    numero no JSON). Critica M3: nivel 2 ou 3 so vale com o teste do retrato aprovado em ``testes_selo``, do mesmo
+    sistema da linha (``selo_teste_nivel``, o ``nivel_obtido`` dele, e ``selo_testado_em``, a data do banco); um
+    ``teste_id`` fora da forma de uuid nao acha teste (nada e convertido sem conferir a forma). Os filtros
+    ``selo_da_linha`` e ``informado_pela_linha`` de ``paginas.criar_ambiente`` montam o texto."""
     linhas = (
         await c.execute(
             text(
                 "SELECT e.id, e.criado_em, e.tipo, e.frase, e.protocolo, e.ferramenta, a.nome AS aplicativo,"
-                " s.nome AS sistema, s.origem AS sistema_origem FROM extrato e"
+                " s.nome AS sistema, s.origem AS sistema_origem,"
+                " CASE e.dados #> '{selo,nivel}' WHEN '1'::jsonb THEN 1 WHEN '2'::jsonb THEN 2"
+                " WHEN '3'::jsonb THEN 3 END AS selo_nivel,"
+                " t.nivel_obtido AS selo_teste_nivel, t.testado_em AS selo_testado_em FROM extrato e"
                 " LEFT JOIN aplicativos a ON a.id = e.aplicativo_id"
-                " LEFT JOIN sistemas s ON s.id = e.sistema_id WHERE e.pessoa_id = :p"
+                " LEFT JOIN sistemas s ON s.id = e.sistema_id"
+                " LEFT JOIN testes_selo t ON t.id = CASE WHEN (e.dados #>> '{selo,teste_id}') ~ :forma"
+                " THEN CAST(e.dados #>> '{selo,teste_id}' AS uuid) END"
+                " AND t.sistema_id = e.sistema_id AND t.resultado = 'aprovado'"
+                " WHERE e.pessoa_id = :p"
                 " ORDER BY e.criado_em DESC, e.id DESC LIMIT :n OFFSET :o"
             ),
-            {"p": pessoa_id, "n": tamanho + 1, "o": (pagina - 1) * tamanho},
+            {"p": pessoa_id, "n": tamanho + 1, "o": (pagina - 1) * tamanho, "forma": contrato.PADRAO_UUID},
         )
     ).all()
     return linhas[:tamanho], len(linhas) > tamanho
@@ -620,6 +635,25 @@ async def operacao_da_ficha(c: AsyncConnection, ficha_id: uuid.UUID) -> uuid.UUI
         await c.execute(text("SELECT operacao_id FROM fichas WHERE id = :f"), {"f": ficha_id})
     ).scalar_one_or_none()
     return uuid.UUID(str(valor)) if valor is not None else None
+
+
+async def niveis_do_envio(c: AsyncConnection, pessoa_id: uuid.UUID, protocolos: Sequence[str]) -> dict[str, int]:
+    """O nivel do selo com que cada acao da pessoa saiu ao sistema (``envios_selo.nivel``, 2 ou 3), pelo protocolo
+    (Fase 4, a dica por linha do comprovante). Uma acao que saiu sem numero (nivel 1) nao tem envio e fica de fora:
+    quem chama a conta como nivel 1. So as colunas que a entrada le de ``envios_selo`` (critica M10), nunca o
+    numero."""
+    if not protocolos:
+        return {}
+    linhas = (
+        await c.execute(
+            text(
+                "SELECT o.protocolo, e.nivel FROM operacoes o JOIN envios_selo e ON e.operacao_id = o.id"
+                " WHERE o.pessoa_id = :pe AND o.protocolo = ANY (CAST(:ps AS text[]))"
+            ),
+            {"pe": pessoa_id, "ps": list(protocolos)},
+        )
+    ).all()
+    return {str(linha.protocolo): int(linha.nivel) for linha in linhas}
 
 
 async def operacao_do_protocolo(c: AsyncConnection, pessoa_id: uuid.UUID, protocolo: str) -> uuid.UUID | None:

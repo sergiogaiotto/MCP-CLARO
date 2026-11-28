@@ -2,7 +2,8 @@
 esquema tem frase com acento, nada repete texto do servidor e nenhuma frase promete garantia. Os modelos novos do
 ADMIN tambem passam pela conferencia de acento e de promessa. Do retoque (G6ar): as recusas do leitor de
 formularios, a frase do 403 ``terceiros_desligados`` na autorizacao e o motivo da quarentena pela versao num lugar so
-(``cadastro.quarentena``)."""
+(``cadastro.quarentena``). Fase 4 (G6b): o vocabulario do contrato do selo e os avisos novos da pessoa tambem tem
+acento e nao prometem nada; o resto das telas da pessoa da Fase 4 esta em ``test_telas_fase4_pessoa_textos``."""
 
 from __future__ import annotations
 
@@ -401,6 +402,36 @@ def test_textos_novos_do_retoque() -> None:
         " guardado."
     )
     assert admin.CAIXAS_DEMAIS == "Marque até 500 ferramentas para a vitrine. Nada mudou."
+
+
+# --- Fase 4: textos da pessoa (G6b) -------------------------------------------------------------------------------
+
+
+def _textos_da_fase4_da_pessoa() -> list[str]:
+    return [
+        *paginas.ESTADOS_LEGIVEIS.values(),
+        paginas.ESTADO_FORA_DO_VOCABULARIO,
+        paginas.AVISOS["informado_registrado"],
+        paginas.AVISOS["confirmada_numero_novo"],
+        paginas.INFORMADO_PELO_SISTEMA,
+        paginas.INFORMADO_PELO_TERCEIRO,
+        paginas.SELO_NIVEL_1,
+    ]
+
+
+@pytest.mark.parametrize("texto", _textos_da_fase4_da_pessoa())
+def test_texto_da_fase4_da_pessoa_tem_acento_e_nao_promete(texto: str) -> None:
+    assert not SEM_ACENTO.search(texto), texto
+    assert not PROMESSA.search(texto), texto
+    assert texto == texto.strip()
+    assert texto
+
+
+def test_todo_estado_do_contrato_do_selo_tem_frase() -> None:
+    from mcp_claro.selo import contrato
+
+    assert set(paginas.ESTADOS_LEGIVEIS) == set(contrato.ESTADOS)
+    assert all(paginas.estado_legivel(e) != paginas.ESTADO_FORA_DO_VOCABULARIO for e in contrato.ESTADOS)
 
 
 def test_onde_o_pedido_cobre_toda_linha_de_pedido_barrado() -> None:

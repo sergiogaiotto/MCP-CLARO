@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block titulo %}Teste do selo de {{ sistema.nome }}{% endblock %}
+{% block conteudo %}
+<p><a href="/telas/admin/sistemas/{{ sistema.id }}#selo">Sistema {{ sistema.nome }}</a></p>
+<h1>Teste do selo de {{ sistema.nome }}</h1>
+<div class="cartao">
+  <dl class="comprovante">
+    <dt>Nível pedido</dt><dd>{{ t.nivel_pedido }}</dd>
+    <dt>Resultado</dt><dd>{% if t.resultado == "aprovado" %}Aprovado: o sistema ficou com o nível {{ t.nivel_obtido }}, até {{ t.vale_ate | data }}{% else %}Não aprovado: {{ r.falhas }} {% if r.falhas == 1 %}caso falhou ou ficou{% else %}casos falharam ou ficaram{% endif %} sem teste; o sistema ficou no nível 1{% endif %}</dd>
+    <dt>Começou</dt><dd>{{ t.iniciado_em | data_hora }}</dd>
+    <dt>Terminou</dt><dd>{{ t.testado_em | data_hora }}</dd>
+    <dt>Vale até</dt><dd>{{ t.vale_ate | data }}{% if t.resultado != "aprovado" %} (não vale: o teste não foi aprovado){% endif %}</dd>
+    <dt>Chamadas</dt><dd>{{ t.chamadas }}</dd>
+    <dt>Quem pediu</dt><dd>{{ t.quem }}, às {{ t.pedido_em | data_hora }}</dd>
+    <dt>Contrato e bateria</dt><dd>{{ t.contrato }}, bateria {{ t.bateria }}</dd>
+  </dl>
+  <p class="dica">{{ textos.nao_garante }}</p>
+  <p><a href="/telas/admin/sistemas/{{ sistema.id }}/selo/testes/{{ t.id }}.json" hx-boost="false" download>Baixar este relatório em JSON</a></p>
+</div>
+
+{% for g in r.grupos %}
+<section class="cartao">
+  <h2>{% if g.nome is none %}{{ textos.sistema }}{% else %}Ferramenta <code class="estranho">{{ g.nome | escondidos }}</code>{% if g.versao %} (versão {{ g.versao }} da revisão){% endif %}{% endif %}</h2>
+  {% if g.linhas %}
+  <table>
+    <thead><tr><th>Caso</th><th>O que testamos</th><th>Resultado</th><th>Por quê</th></tr></thead>
+    <tbody>
+    {% for l in g.linhas %}
+      <tr>
+        <td>{{ l.caso }}</td>
+        <td>{{ l.o_que_testamos }}</td>
+        <td>{% if l.codigo == "cumpriu" %}<span class="etiqueta bom">{{ l.resultado }}</span>{% elif l.codigo == "falhou" %}<span class="etiqueta ruim">{{ l.resultado }}</span>{% else %}<span class="etiqueta">{{ l.resultado }}</span>{% endif %}</td>
+        <td>{{ l.por_que }}{% if l.excluidas %}{% if l.por_que %}; {% endif %}{{ l.excluidas }} {% if l.excluidas == 1 %}tentativa passou{% else %}tentativas passaram{% endif %} do prazo e ficou de fora{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>Nenhum caso gravado para esta ferramenta.</p>
+  {% endif %}
+</section>
+{% endfor %}
+
+<section class="cartao" aria-labelledby="titulo-nao-testamos">
+  <h2 id="titulo-nao-testamos">O que não testamos</h2>
+  <ul>
+    {% for n in r.nao_testado %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+  <p class="dica">Estes pontos não pesam no resultado. Eles dependem da equipe do sistema ou são só declarados por ela.</p>
+</section>
+
+<section class="cartao" aria-labelledby="titulo-declaracao-usada">
+  <h2 id="titulo-declaracao-usada">A declaração usada</h2>
+  <p>Versão {{ r.declaracao.versao }}, salva por {{ r.declaracao.salva_por }}. Texto da equipe do sistema:</p>
+  <pre class="estranho dado">{{ declaracao_legivel | escondidos }}</pre>
+</section>
+
+<p class="dica">{{ textos.rodape }}</p>
+{% endblock %}

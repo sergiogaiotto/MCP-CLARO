@@ -789,8 +789,12 @@ def test_cadastro_pela_rota_fora_de_teste_recusa_endereco_de_terceiro(
     async def nenhum(_c: Any) -> list[Any]:
         return []
 
+    async def sem_selos(_c: Any) -> dict[str, Any]:
+        return {}
+
     monkeypatch.setattr(repositorio, "cadastrar_sistema", cadastrar)
     monkeypatch.setattr(consultas, "todos_sistemas", nenhum)
+    monkeypatch.setattr(admin, "selos_da_lista", sem_selos)  # a coluna "Selo" da lista (Fase 4) le o banco
     base = [("nome", "fornecedor-x"), ("tipo_chave", "compartilhada")]
     casos = [
         ("terceiro", "http://terceiro.exemplo/mcp", admin.ENDERECO_TERCEIRO_HTTPS),
@@ -1247,18 +1251,25 @@ def test_teto_do_nome_de_ferramenta_e_o_do_mcp_e_o_da_sala() -> None:
 
 
 def test_so_a_rota_da_conclusao_tem_o_teto_proprio() -> None:
+    """A conclusao da revisao do servidor e, desde a Fase 4, a declaracao de teste do selo (o JSON de ate 64 KiB,
+    ``admin.TETO_FORMULARIO_DECLARACAO``) tem teto proprio, cada uma com o seu; as outras ficam com o de sempre."""
     telas = admin.TelasDoAdmin(cast(Any, SimpleNamespace(p=None)))
-    com_teto = [r for r in telas.rotas() if isinstance(r, Route) and r.path.endswith("/revisao_servidor")]
-    assert len(com_teto) == 1
-    assert com_teto[0].methods == {"POST"}
-    outras = [r for r in telas.rotas() if isinstance(r, Route) and not r.path.endswith("/revisao_servidor")]
-    assert outras
-    # So a da conclusao leva o filtro que poe o teto no pedido (e o max_body_size do Starlette).
-    assert _cadeia(com_teto[0].app)[:2] == ["RequestBodyLimitMiddleware", "ComTeto"]
-    # O do Starlette tem folga sobre o tamanho do teto: ate ali, quem recusa e o leitor, em portugues.
+    tetos = {
+        "/revisao_servidor": admin.TETO_FORMULARIO_CONCLUSAO,
+        "/selo/declaracao": admin.TETO_FORMULARIO_DECLARACAO,
+    }
+    for fim, teto in tetos.items():
+        com_teto = [r for r in telas.rotas() if isinstance(r, Route) and r.path.endswith(fim)]
+        assert len(com_teto) == 1
+        assert com_teto[0].methods == {"POST"}
+        # So elas levam o filtro que poe o teto no pedido (e o max_body_size do Starlette).
+        assert _cadeia(com_teto[0].app)[:2] == ["RequestBodyLimitMiddleware", "ComTeto"]
+        # O do Starlette tem folga sobre o tamanho do teto: ate ali, quem recusa e o leitor, em portugues.
+        assert com_teto[0].app.max_body_size == 2 * teto.tamanho
+        assert com_teto[0].app.app.teto == teto
     assert seguranca.FOLGA_DA_ROTA == 2
-    assert com_teto[0].app.max_body_size == 2 * admin.TETO_FORMULARIO_CONCLUSAO.tamanho
-    assert com_teto[0].app.app.teto == admin.TETO_FORMULARIO_CONCLUSAO
+    outras = [r for r in telas.rotas() if isinstance(r, Route) and not r.path.endswith(tuple(tetos))]
+    assert outras
     assert all("ComTeto" not in repr(_cadeia(r.app)) for r in outras)
 
 

@@ -803,7 +803,8 @@ async def test_comprovante_do_bloqueio_em_tres_partes(amb: Ambiente, http: httpx
     )
     assert f">{esperando}</a>: esperava a sua ficha." in html[um:dois]
     assert re.search(rf">{saiu}</a>: entregue ao sistema, em \d\d/\d\d/\d{{4}} \d\d:\d\d\.", html[dois:tres])
-    assert 'Nos sistemas de nível 1 e 2, "seguiu" quer dizer que o pedido foi entregue ao sistema' in html[dois:tres]
+    # Fase 4: a dica e por linha, pelo nivel do selo com que a acao saiu (aqui sem numero: nivel 1).
+    assert "Neste sistema (nível 1), “seguiu” quer dizer entregue ao sistema, não concluído por ele." in html[dois:tres]
     assert f">{duvida}</a>: pode ter saído, mas a resposta do sistema não chegou inteira" in html[tres:]
     assert duvida not in html[:tres]
     assert "O que o sistema informou" not in html

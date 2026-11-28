@@ -2,6 +2,9 @@
    perder numa troca. Quando o estado muda, a pagina inteira recarrega (HX-Refresh). #}
 <section id="estado-acao" class="cartao">
   {% include "acoes/_relogio.html" %}
+  {# O numero que a acao levou ao sistema (critica B12): o mesmo de outro protocolo, ou novo. Uma ou duas frases, num
+     bloco so (o id e um so por pagina). #}
+  {% if a.numero is defined and a.numero %}<div id="numero-do-envio">{% for texto in a.numero %}<p class="dica">{{ texto }}</p>{% endfor %}</div>{% endif %}
   {% if a.op.estado == "aguardando_ficha" %}
   <p><a class="botao" href="/telas/fichas/{{ a.op.ficha_id }}" hx-boost="false">Abrir a ficha</a></p>
   {% elif a.op.estado == "liberada" %}
@@ -17,6 +20,11 @@
   <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>
   {% elif a.op.estado == "enviando" %}
   <p class="dica">Esta parte se atualiza sozinha. Se não atualizar, <a href="/telas/acoes/{{ a.op.id }}">recarregue a página</a>.</p>
+  {% elif a.op.estado == "enviada" and a.informou is defined and a.informou %}
+  <div class="estranho" id="o-que-o-sistema-informou" data-situacao="{{ a.informou.situacao }}">
+    <h3>O que o sistema informou</h3>
+    {% for frase in a.informou.frases %}<p>{{ frase }}</p>{% endfor %}
+  </div>
   {% elif a.op.estado == "nao_confirmada" %}
   {# A retomada deu a acao como nao confirmada antes de o envio terminar, e o fim que chegou depois diz que o
      pedido nem saiu (``acoes.nao_chegou_depois_da_retomada``): a tela nao diz que ele saiu uma vez. #}
@@ -26,6 +34,23 @@
   <p>O pedido saiu uma vez para o sistema <bdi>{{ a.op.sistema_nome | escondidos }}</bdi>, mas a resposta não chegou inteira. Ele pode ter chegado ao sistema.</p>
   {% endif %}
   <p><strong>Nada será reenviado.</strong> Confira no sistema se a ação aconteceu e conte para nós.</p>
+  {# Fase 4: o que o sistema informou, pelo numero que o MCP-CLARO mandou junto (niveis 2 e 3). So o vocabulario do
+     contrato e a hora do gateway, marcados como ditos pelo sistema; a decisao continua sendo da pessoa. #}
+  {% if a.informou is defined and a.informou %}
+  <div class="estranho" id="o-que-o-sistema-informou" data-situacao="{{ a.informou.situacao }}">
+    <h3>O que o sistema informou</h3>
+    {% for frase in a.informou.frases %}<p>{{ frase }}</p>{% endfor %}
+    {% if a.informou.dica %}<p class="dica">{{ a.informou.dica }}</p>{% endif %}
+  </div>
+  {% if a.informou.botao %}
+  <form method="post" action="/telas/acoes/{{ a.op.id }}/registrar_informado" id="registrar-o-que-o-sistema-informou">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="estado_visto" value="{{ a.informou.estado_visto }}">
+    <button type="submit">Registrar o que o sistema informou</button>
+  </form>
+  <p class="dica">Fica registrado como a sua decisão: <strong>{{ a.informou.registra }}</strong>. Se você viu outra coisa, use o formulário abaixo.</p>
+  {% endif %}
+  {% endif %}
   {% if a.op.decisao_pessoa %}
   <p>Você registrou: <strong>{{ a.decisao }}</strong>.</p>
   {% if a.op.decisao_pessoa == "nao_aconteceu" %}

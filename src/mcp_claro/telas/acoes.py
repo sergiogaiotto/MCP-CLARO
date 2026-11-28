@@ -33,6 +33,27 @@ Fase 3 (servidores de terceiros):
   confirmada antes de o envio terminar e que, pelo que o MCP-CLARO viu depois, o pedido nao chegou ao sistema
   (``nao_chegou_depois_da_retomada``). A caixa de pendencias diz o mesmo dessa acao, no grupo "Estamos confirmando".
 
+Fase 4 (selos de nivel 2 e 3, desenho 7.1, com as correcoes da critica):
+
+- A ficha mostra o cartao "Selo do sistema" pelo retrato da hora (``fichas.selo``, ``Operacao.selo``), com o aviso de
+  terceiro junto; a ficha que espera diz quando o selo de agora (lido do banco, efetivo para a pessoa) e outro (M3).
+  Nenhuma tela do selo promete o que o sistema fara: "o selo diz como o sistema respondeu no teste; nao garante o que
+  ele fara depois".
+- A ficha do pedido igual diz qual protocolo ele repete e se vai com o mesmo numero (B12); com o numero queimado, que
+  e um pedido novo para o sistema (A3.3); com ``desconhecido`` no fim da escada da original, o aviso e a caixa do
+  numero novo (M4.2, ``Operacao.original_ficou_em_desconhecido``).
+- A acao "nao confirmada" que saiu com numero mostra "O que o sistema informou" (``o_que_o_sistema_informou``): so o
+  vocabulario do contrato (``paginas.ESTADOS_LEGIVEIS``) e a hora do gateway (``gravado_em``, nunca ``depois[].em``),
+  marcado como dito pelo sistema (ou pelo servidor de terceiros, M9). O botao "Registrar o que o sistema informou"
+  so aparece com estado final (``informado.estado_final``) que cabe num toque (``fila.DECISAO_PELO_SISTEMA``), sem
+  outro protocolo com o mesmo numero, sem contradicao do sistema, nunca para ``nao_recebida`` de um terceiro e so
+  antes da decisao (que e uma so). A resposta ao aviso de bloqueio aparece como o que o sistema disse, nunca como
+  final. A escada acabada (``Operacao.consulta_acabou``) troca "continuamos perguntando" por "o sistema nao
+  confirmou; a decisao e sua". Depois da decisao, nenhuma frase convida a decidir ou a registrar de novo: o bloco diz
+  "vale a decisao que voce registrou".
+- A ficha do pedido igual e as listas dizem quem informou: o sistema ou, num terceiro, o servidor de terceiros (M9).
+- As listas ("Minhas acoes" e a caixa de pendencias) levam a etiqueta "O sistema informou: {estado}".
+
 As mudancas de estado sao todas de ``saida/fila.py``; aqui so se mostra e se pede.
 """
 
@@ -40,14 +61,17 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import unicodedata
 import uuid
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final
 from zoneinfo import ZoneInfo
 
+from markupsafe import Markup, escape
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 from starlette.responses import Response
 from starlette.routing import BaseRoute, Route
@@ -65,9 +89,10 @@ from mcp_claro.saida import fila
 from mcp_claro.saida.estados import FRASE, Estado
 from mcp_claro.saida.fila import DecisaoRecusada, Operacao
 from mcp_claro.saida.protocolo import FUSO, protocolo_valido
+from mcp_claro.selo import contrato, vigente
 from mcp_claro.telas import consultas, passkeys
 from mcp_claro.telas.nucleo import Telas, tela, ver_depois
-from mcp_claro.telas.paginas import AVISOS
+from mcp_claro.telas.paginas import AVISOS, estado_legivel
 
 log = logger("mcp_claro.telas.acoes")
 
@@ -131,6 +156,39 @@ RECUSAS: Final[dict[str, tuple[int, str]]] = {
     "decisao_invalida": (400, "Escolha uma das respostas: aconteceu, não aconteceu ou ainda não sei."),
     "nao_e_nao_confirmada": (409, "Só um resultado não confirmado pede esta decisão. Nada mudou."),
     "ja_decidida": (409, "Esta decisão já tinha sido registrada. Nada mudou."),
+    # Fase 4: o botao "Registrar o que o sistema informou" e a escolha do numero novo na ficha.
+    "sem_resposta_final": (
+        409,
+        "O sistema ainda não deu uma resposta final sobre este pedido. Nada foi registrado; decida pelo formulário.",
+    ),
+    "resultado_em_outro_protocolo": (
+        409,
+        "Outro protocolo saiu depois com o mesmo número; o que o sistema informar aparece nele. Nada foi registrado.",
+    ),
+    "terceiro_nao_recebida": (
+        409,
+        "Um servidor de terceiros disse que não recebeu o pedido. Confira no próprio servidor antes de decidir. Nada"
+        " foi registrado.",
+    ),
+    "decida_pelo_formulario": (
+        409,
+        "O que o sistema informou não cabe num toque (feito só em parte, ou feito e depois desfeito). Nada foi"
+        " registrado; decida pelo formulário.",
+    ),
+    "informado_mudou": (
+        409,
+        "O que o sistema informou mudou depois que a tela foi aberta. Nada foi registrado; veja a tela de novo.",
+    ),
+    "sistema_se_contradisse": (
+        409,
+        "O sistema deu respostas que não combinam sobre este pedido. Nada foi registrado; confira no sistema e decida"
+        " pelo formulário.",
+    ),
+    "numero_novo_nao_cabe": (
+        409,
+        "O número novo só vale quando o sistema não confirmou o primeiro pedido e a consulta terminou sem saber."
+        " Nada seguiu; veja a ficha de novo.",
+    ),
 }
 
 DECISOES: Final[dict[str, str]] = {
@@ -140,6 +198,8 @@ DECISOES: Final[dict[str, str]] = {
 }
 RISCOS: Final[dict[str, str]] = {"baixo": "Risco baixo", "medio": "Risco médio", "alto": "Risco alto"}
 MAXIMO_OBSERVACAO: Final = 500
+NUMERO_NOVO_MARCADO: Final = "sim"
+"""O valor da caixa "mandar com numero novo" da ficha do pedido igual (critica M4.2)."""
 SEGUNDOS_ENTRE_ATUALIZACOES: Final = 2
 VER_RESPOSTA: Final = "resposta"
 """``/telas/acoes/{id}?ver=resposta``: a pessoa pediu para ver o texto de estranhos (critica A4)."""
@@ -504,6 +564,381 @@ def _segundos_ate(momento: datetime | None, agora: datetime) -> int | None:
     return max(0, int((momento - agora).total_seconds() + 0.999))
 
 
+# --- Fase 4: o selo do sistema, o pedido igual e o que o sistema informou -------------------------------------
+
+NAO_GARANTE: Final = "O selo diz como o sistema respondeu no teste; não garante o que ele fará depois."
+ONDE_TESTADO: Final[dict[str, str]] = {
+    "ambiente_de_teste": "no ambiente de teste do sistema",
+    "ferramentas_de_teste": "pelas ferramentas de teste que o sistema declarou",
+}
+SELO_NIVEL_1: Final = (
+    "Selo do sistema: nível 1 (conectado). Este sistema não informa o que faz depois de receber a ação."
+)
+SELO_NIVEL_2: Final = (
+    "Selo do sistema: nível 2 (confere). Testado pela equipe do MCP-CLARO em {testado_em}, {onde}; vale até"
+    " {vale_ate}. Se a resposta do sistema se perder, o MCP-CLARO pergunta a ele o que houve, pelo número que manda"
+    " junto. " + NAO_GARANTE
+)
+SELO_NIVEL_3: Final = (
+    "Selo do sistema: nível 3 (presta contas). Testado pela equipe do MCP-CLARO em {testado_em}, {onde}; vale até"
+    " {vale_ate}. O sistema informa o que fez depois de receber a ação, e o MCP-CLARO mostra isso marcado como"
+    " informado por ele. " + NAO_GARANTE
+)
+SELO_NAO_GUARDADO: Final = "Selo do sistema: esta ficha não guardou o selo."
+SELO_MUDOU: Final = "O selo deste sistema mudou depois que a ficha foi montada: agora é nível {nivel}."
+SELO_CAIU: Final = (
+    " Se a resposta do sistema se perder, o MCP-CLARO não pergunta a ele: a decisão fica com você, como num sistema de"
+    " nível 1."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SeloDaFicha:
+    """O cartao "Selo do sistema" da ficha, do retrato da hora (``fichas.selo``, ``contrato.RETRATO_DO_SELO``).
+    ``nivel`` e None quando a ficha nao guardou o retrato (ficha de antes da 0007, ou o selo nao foi lido)."""
+
+    nivel: int | None
+    texto: str
+
+
+def _dia(momento: datetime | None) -> str:
+    return momento.astimezone(ZoneInfo(FUSO)).strftime("%d/%m/%Y") if momento is not None else "?"
+
+
+def selo_da_ficha(retrato: Mapping[str, Any] | None) -> SeloDaFicha:
+    """O texto do cartao pelo retrato gravado (desenho 7.1). O retrato fora da forma do contrato
+    (``SeloVigente.de_retrato`` recusa) conta como nao guardado: nada e prometido."""
+    if retrato is None:
+        return SeloDaFicha(None, SELO_NAO_GUARDADO)
+    try:
+        selo = vigente.SeloVigente.de_retrato(retrato)
+    except ValueError, TypeError:
+        return SeloDaFicha(None, SELO_NAO_GUARDADO)
+    if selo.nivel == 1:
+        return SeloDaFicha(1, SELO_NIVEL_1)
+    modelo = SELO_NIVEL_2 if selo.nivel == 2 else SELO_NIVEL_3
+    texto = modelo.format(
+        testado_em=_dia(selo.testado_em),
+        onde=ONDE_TESTADO.get(str(selo.modo), ONDE_TESTADO["ambiente_de_teste"]),
+        vale_ate=_dia(selo.vale_ate),
+    )
+    return SeloDaFicha(selo.nivel, texto)
+
+
+def selo_mudou(retrato: SeloDaFicha, agora: int | None) -> str:
+    """A nota da ficha que espera quando o selo efetivo de agora (``agora``, o nivel lido do banco) nao e o do
+    retrato (critica M3); "" quando sao iguais ou quando um dos dois nao se sabe."""
+    if agora is None or retrato.nivel is None or agora == retrato.nivel:
+        return ""
+    texto = SELO_MUDOU.format(nivel=agora)
+    return texto + SELO_CAIU if agora == 1 else texto
+
+
+REPETE: Final = "Este pedido repete o protocolo {original}, que ficou sem confirmação."
+MESMO_NUMERO_PREVISTO: Final = (
+    "O MCP-CLARO o manda ao sistema com o mesmo número do primeiro, quando pode: se o primeiro já tinha chegado, o"
+    " sistema não faz de novo."
+)
+# Nas frases do que o sistema informou, ``{quem}`` e "O sistema" ou, num terceiro, "O servidor de terceiros" (critica
+# M9, como em ``_quem``); ``quem_informa`` monta.
+NUMERO_NOVO_PELO_SISTEMA: Final = (
+    "{quem} informou sobre o protocolo {original}: {estado}. Por isso este pedido vai com número novo: para o"
+    " sistema, é um pedido novo."
+)
+SE_ESTIVER_ERRADO: Final = "Se {quem} estiver errado, este pedido faz de novo."
+NAO_CHEGOU_SE_ERRADO: Final = "{quem} disse que o primeiro não chegou; se ele estiver errado, este pedido faz de novo."
+FEITO_PELO_SISTEMA: Final = (
+    "{quem} informou sobre o protocolo {original}: {estado}. Este pedido vai com o mesmo número do primeiro: o"
+    " sistema não faz de novo o que já foi feito."
+)
+NAO_SABE: Final = "{quem} não sabe se o primeiro foi feito; com número novo, ele pode fazer duas vezes."
+NAO_SABE_SEM_CAIXA: Final = (
+    "Sem marcar a caixa, este pedido vai com o mesmo número do primeiro: se o primeiro já tinha chegado, o sistema não"
+    " faz de novo."
+)
+CAIXA_NUMERO_NOVO: Final = (
+    "Mandar com número novo. Entendo que, se o primeiro já tinha sido feito, o sistema pode fazer duas vezes."
+)
+ESCOLHEU_NUMERO_NOVO: Final = (
+    "Você escolheu mandar este pedido com número novo: para o sistema, é um pedido novo. Se o primeiro tinha sido"
+    " feito, este pode fazer de novo."
+)
+SAIU_COM_O_MESMO_NUMERO: Final = (
+    "Este pedido saiu com o mesmo número do protocolo {original}. Se o primeiro já tinha chegado, o sistema não faz de"
+    " novo."
+)
+SAIU_COM_NUMERO_NOVO: Final = (
+    "Este pedido repetia o protocolo {original}, mas saiu com número novo: para o sistema, é um pedido novo."
+)
+FOI_A_SUA_ESCOLHA: Final = "O número novo foi a sua escolha na ficha."
+
+
+@dataclass(frozen=True, slots=True)
+class PedidoIgual:
+    """O que a ficha do pedido igual diz (critica B12, A3.3 e M4.2): qual protocolo ele repete e com que numero vai.
+    ``oferece_numero_novo``: a ficha espera e a original terminou a escada em ``desconhecido``
+    (``Operacao.original_ficou_em_desconhecido``): a caixa "mandar com numero novo" aparece."""
+
+    textos: tuple[str, ...]
+    oferece_numero_novo: bool = False
+    caixa: str = CAIXA_NUMERO_NOVO
+    """O texto da caixa, quando oferecida."""
+
+
+def quem_informa(op: Operacao, *, maiuscula: bool = True) -> str:
+    """Quem informou, sem o nome (o texto da ficha do pedido igual e das listas): o sistema ou, num terceiro, o
+    servidor de terceiros (critica M9)."""
+    quem = "o servidor de terceiros" if op.de_terceiro else "o sistema"
+    return quem[0].upper() + quem[1:] if maiuscula else quem
+
+
+def pedido_igual(op: Operacao, maximo: int | None, *, pendente: bool) -> PedidoIgual | None:
+    """A previsao da ficha. Quem decide o numero e o banco, no envio (``envios_selo_nasce``): o mesmo da original,
+    salvo quando o sistema ja o queimou (``contrato.ESTADOS_QUE_QUEIMAM``, com ``nao_recebida`` so confirmada, A3.3) ou
+    a pessoa escolheu o numero novo. Por isso a ficha diz "quando pode". O que a original informou aparece dito pelo
+    sistema ou, num terceiro, pelo servidor de terceiros (critica M9)."""
+    if op.repete_protocolo is None:
+        return None
+    original = op.repete_protocolo
+    textos = [REPETE.format(original=original)]
+    final = op.original.estado_final_do_numero if op.original is not None else None
+    quem = quem_informa(op)
+    oferece = False
+    if op.ficha_numero_novo:
+        textos.append(ESCOLHEU_NUMERO_NOVO)
+    elif final in contrato.ESTADOS_QUE_QUEIMAM:
+        textos.append(NUMERO_NOVO_PELO_SISTEMA.format(quem=quem, original=original, estado=estado_legivel(final)))
+        if final == "nao_recebida":
+            textos.append(NAO_CHEGOU_SE_ERRADO.format(quem=quem))
+        else:
+            textos.append(SE_ESTIVER_ERRADO.format(quem=quem_informa(op, maiuscula=False)))
+    elif final is not None:
+        textos.append(FEITO_PELO_SISTEMA.format(quem=quem, original=original, estado=estado_legivel(final)))
+    elif op.original_ficou_em_desconhecido(_maximo(maximo)):
+        textos += [NAO_SABE.format(quem=quem), NAO_SABE_SEM_CAIXA]
+        oferece = pendente
+    else:
+        textos.append(MESMO_NUMERO_PREVISTO)
+    return PedidoIgual(tuple(textos), oferece)
+
+
+def numero_do_envio(op: Operacao) -> tuple[str, ...]:
+    """O que a acao que ja saiu diz do numero (critica B12): saiu com o mesmo numero de outro protocolo
+    (``mesmo_numero_de``, que o banco gravou no envio), ou repetia um e saiu com numero novo. Antes de sair, a
+    escolha do numero novo feita na ficha."""
+    if op.estado in fila.PASSOU_POR_ENVIANDO:
+        if op.mesmo_numero_de is not None:
+            return (SAIU_COM_O_MESMO_NUMERO.format(original=op.mesmo_numero_de),)
+        if op.repete_protocolo is not None and op.envio_nivel is not None:
+            novo = SAIU_COM_NUMERO_NOVO.format(original=op.repete_protocolo)
+            return (novo, FOI_A_SUA_ESCOLHA) if op.ficha_numero_novo else (novo,)
+        return ()
+    return (ESCOLHEU_NUMERO_NOVO,) if op.ficha_numero_novo else ()
+
+
+_SEM_MAXIMO: Final = sys.maxsize
+"""Sem o ``BADGE_LOOKUP_MAX_ATTEMPTS`` (quem monta so a lista), a escada nao acaba pelas tentativas: so pelas outras
+regras de ``Operacao.consulta_acabou`` (tempo, ``sistema_fora``, outro protocolo)."""
+
+
+def _maximo(maximo: int | None) -> int:
+    return _SEM_MAXIMO if maximo is None else maximo
+
+
+def _nome(op: Operacao) -> Markup:
+    """O nome do sistema numa frase da tela: do cadastro, escapado, com os escondidos marcados e dentro de ``<bdi>``."""
+    return Markup("<bdi>{}</bdi>").format(marcar_escondidos(op.sistema_nome))
+
+
+def _quem(op: Operacao, *, maiuscula: bool = True) -> Markup:
+    """Quem informou: o sistema ou, num terceiro, o servidor de terceiros (critica M9)."""
+    if op.de_terceiro:
+        return Markup("{} {}").format("O servidor de terceiros" if maiuscula else "o servidor de terceiros", _nome(op))
+    return Markup("{} {}").format("O sistema" if maiuscula else "o sistema", _nome(op))
+
+
+def _hora_do_gateway(momento: datetime, agora: datetime) -> str:
+    """A hora em que o MCP-CLARO gravou a resposta (``gravado_em``), nunca uma hora escrita pelo sistema (B12)."""
+    return f"{hora_curta(momento, agora)} (horário de Brasília)"
+
+
+PERGUNTANDO: Final = (
+    "Estamos confirmando com o sistema. O MCP-CLARO pergunta {quem} o que houve com este pedido, pelo número que"
+    " mandou junto. Nada será reenviado."
+)
+PERGUNTOU_SEM_RESPOSTA: Final = (
+    "Estamos confirmando com o sistema. O MCP-CLARO perguntou {quem} o que houve com este pedido, pelo número que"
+    " mandou junto, e ainda não teve resposta. Continuamos perguntando. Nada será reenviado."
+)
+NAO_CONSEGUIU_PERGUNTAR: Final = (
+    "O MCP-CLARO ainda não conseguiu perguntar {quem} o que houve: a falha é do MCP-CLARO, não do sistema. Continuamos"
+    " tentando. Nada será reenviado."
+)
+NAO_RESPONDEU: Final = "{quem} não respondeu à consulta. Decida você, como num sistema de nível 1."
+PAROU_SISTEMA_FORA: Final = "O MCP-CLARO parou de perguntar: {quem} não está ativo agora (por exemplo, em quarentena)."
+NAO_CONFIRMOU: Final = "O sistema não confirmou; a decisão é sua."
+# Depois da decisao (que e uma so), nenhuma frase convida a decidir ou a registrar de novo: as de cima ganham a forma
+# sem o convite, e o bloco diz que vale a decisao registrada.
+VALE_A_DECISAO: Final = "Vale a decisão que você registrou."
+NAO_RESPONDEU_DEPOIS: Final = "{quem} não respondeu à consulta. " + VALE_A_DECISAO
+NAO_CONFIRMOU_DEPOIS: Final = "O sistema não confirmou. " + VALE_A_DECISAO
+INFORMOU_AS: Final = "{quem} informou às {hora}: {estado}."
+INFORMOU: Final = "{quem} informou: {estado}."
+DEPOIS_DISSE: Final = "A última resposta dele, às {hora}, foi: {estado}."
+DO_AVISO: Final = "Foi a resposta ao aviso do bloqueio, que não é uma resposta final."
+NAO_CONFERE: Final = "Isto é o que o sistema diz; o MCP-CLARO não confere do lado de lá."
+NAO_CONFERE_TERCEIRO: Final = "Isto é o que o servidor de terceiros diz; o MCP-CLARO não confere do lado de lá."
+VALE_A_SUA: Final = "Se você viu outra coisa no sistema, registre o que viu: vale a sua decisão."
+CONTINUAMOS: Final = "Continuamos perguntando."
+UMA_SO_NAO_BASTA: Final = "Uma resposta só não basta: continuamos perguntando."
+CONTRADISSE: Final = (
+    "O sistema deu respostas que não combinam sobre este pedido. Confira no próprio sistema e decida pelo formulário."
+)
+CONTRADISSE_DEPOIS: Final = "O sistema deu respostas que não combinam sobre este pedido. " + VALE_A_DECISAO
+NAO_CABE_NUM_TOQUE: Final = "O que o sistema informou não cabe num toque: decida pelo formulário."
+TERCEIRO_CONFIRA: Final = (
+    "Num servidor de terceiros, a resposta “não recebeu” não vale um toque: confira no próprio servidor antes de"
+    " decidir."
+)
+OUTRO_PROTOCOLO: Final = (
+    "O resultado está no protocolo {protocolo}, que saiu depois com o mesmo número. O que o sistema informar aparece"
+    " nele."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class OQueOSistemaInformou:
+    """O bloco "O que o sistema informou" da acao que saiu com numero (desenho 7.1 e 5.3).
+
+    ``situacao``: ``perguntando``, ``sem_resposta_ainda``, ``nao_perguntou``, ``nao_respondeu``, ``sistema_fora``,
+    ``acabou``, ``respondeu`` (estado final), ``sem_final`` (o que o sistema disse ainda nao e final),
+    ``outro_protocolo`` ou ``enviada`` (o recibo ou a consulta de uma acao enviada). ``frases`` e texto da tela, ja
+    escapado (o nome do sistema vai marcado). ``botao``: o botao "Registrar o que o sistema informou", com o estado
+    final mostrado (``estado_visto``), que o formulario manda (decisao 6 do coordenador); ``registra`` e a decisao
+    que ele grava, em palavras. ``dica``: por que o toque nao vale, quando ha estado final sem botao."""
+
+    situacao: str
+    frases: tuple[Markup, ...]
+    botao: bool = False
+    estado_visto: str | None = None
+    registra: str = ""
+    dica: str = ""
+
+
+def _dito(op: Operacao) -> str | None:
+    """O que o sistema disse por ultimo, como o texto ao aplicativo (``pedidos._o_que_o_sistema_disse``): o estado
+    final ou, sem ele, a ultima resposta (de qualquer origem, a do aviso tambem)."""
+    inf = op.informado
+    if inf is None:
+        return None
+    return inf.estado_final or (inf.estado if inf.desfecho == "respondeu" else None)
+
+
+def o_que_o_sistema_informou(
+    op: Operacao, maximo: int | None, agora: datetime | None = None
+) -> OQueOSistemaInformou | None:
+    """O bloco da acao que saiu com numero (``envio_nivel``); None nas outras (nivel 1: a decisao e da pessoa, como
+    sempre). ``maximo`` e ``BADGE_LOOKUP_MAX_ATTEMPTS``. Depois da decisao da pessoa (que e uma so), nenhuma frase
+    convida a decidir ou a registrar de novo: o bloco diz que vale a decisao registrada (``VALE_A_DECISAO``)."""
+    if op.envio_nivel is None or op.estado not in (Estado.NAO_CONFIRMADA, Estado.ENVIADA):
+        return None
+    agora = agora or datetime.now(UTC)
+    inf = op.informado
+    dito = _dito(op)
+    quem = _quem(op)
+    nao_confere = NAO_CONFERE_TERCEIRO if op.de_terceiro else NAO_CONFERE
+    if op.estado == Estado.ENVIADA:
+        if inf is None or dito is None:
+            return None
+        frase = escape(INFORMOU_AS).format(
+            quem=quem, hora=_hora_do_gateway(inf.gravado_em, agora), estado=estado_legivel(dito)
+        )
+        return OQueOSistemaInformou("enviada", (frase, escape(nao_confere)))
+    if op.substituto is not None:
+        return OQueOSistemaInformou("outro_protocolo", (escape(OUTRO_PROTOCOLO).format(protocolo=op.substituto),))
+    acabou = op.consulta_acabou(_maximo(maximo))
+    parou = inf is not None and inf.ultimo_desfecho == "sistema_fora"
+    pergunta = _quem(op, maiuscula=False)
+    decidido = op.decisao_pessoa is not None
+    nao_confirmou = escape(NAO_CONFIRMOU_DEPOIS if decidido else NAO_CONFIRMOU)
+    if inf is None or dito is None:
+        if acabou and parou:
+            return OQueOSistemaInformou(
+                "sistema_fora", (escape(PAROU_SISTEMA_FORA).format(quem=pergunta), nao_confirmou)
+            )
+        if acabou and inf is not None and maximo is not None and inf.tentativas >= maximo:
+            nao_respondeu = NAO_RESPONDEU_DEPOIS if decidido else NAO_RESPONDEU
+            return OQueOSistemaInformou("nao_respondeu", (escape(nao_respondeu).format(quem=quem),))
+        if acabou:
+            return OQueOSistemaInformou("acabou", (nao_confirmou,))
+        if inf is not None and inf.desfecho in ("sem_chave", "sala_fora", "sistema_fora"):
+            return OQueOSistemaInformou("nao_perguntou", (escape(NAO_CONSEGUIU_PERGUNTAR).format(quem=_ao(pergunta)),))
+        if inf is not None:
+            return OQueOSistemaInformou(
+                "sem_resposta_ainda", (escape(PERGUNTOU_SEM_RESPOSTA).format(quem=_ao(pergunta)),)
+            )
+        return OQueOSistemaInformou("perguntando", (escape(PERGUNTANDO).format(quem=_ao(pergunta)),))
+    final = inf.estado_final
+    hora = _hora_do_gateway(inf.gravado_em, agora)
+    frases: list[Markup] = []
+    if final is not None and inf.estado != final:
+        frases.append(escape(INFORMOU).format(quem=quem, estado=estado_legivel(final)))
+        if inf.desfecho == "respondeu" and inf.estado is not None:
+            frases.append(escape(DEPOIS_DISSE).format(hora=hora, estado=estado_legivel(inf.estado)))
+    else:
+        frases.append(escape(INFORMOU_AS).format(quem=quem, hora=hora, estado=estado_legivel(dito)))
+    if inf.origem == "aviso" and inf.estado is not None and (final is None or inf.estado != final):
+        frases.append(escape(DO_AVISO))
+    frases.append(escape(nao_confere))
+    if final is None:
+        if acabou:
+            if parou:
+                frases.append(escape(PAROU_SISTEMA_FORA).format(quem=pergunta))
+            frases.append(nao_confirmou)
+        else:
+            frases.append(escape(UMA_SO_NAO_BASTA if dito == "nao_recebida" else CONTINUAMOS))
+        return OQueOSistemaInformou("sem_final", tuple(frases))
+    if inf.se_contradisse:
+        frases.append(escape(CONTRADISSE_DEPOIS if decidido else CONTRADISSE))
+    else:
+        frases.append(escape(VALE_A_DECISAO if decidido else VALE_A_SUA))
+    decisao = fila.DECISAO_PELO_SISTEMA.get(final)
+    terceiro_nao_recebida = op.de_terceiro and final == "nao_recebida"
+    botao = not decidido and decisao is not None and not inf.se_contradisse and not terceiro_nao_recebida
+    dica = ""
+    if not decidido and not inf.se_contradisse:
+        if terceiro_nao_recebida:
+            dica = TERCEIRO_CONFIRA
+        elif decisao is None:
+            dica = NAO_CABE_NUM_TOQUE
+    return OQueOSistemaInformou(
+        "respondeu",
+        tuple(frases),
+        botao=botao,
+        estado_visto=final if botao else None,
+        registra=DECISOES.get(decisao or "", "") if botao else "",
+        dica=dica,
+    )
+
+
+def _ao(quem: Markup) -> Markup:
+    """ "o sistema X" vira "ao sistema X" ("pergunta ao sistema")."""
+    return Markup("a{}").format(quem) if quem.startswith("o ") else quem
+
+
+def etiqueta_informado(op: Operacao) -> str:
+    """A etiqueta das listas ("Minhas ações" e a caixa de pendências): "O sistema informou: {estado}" na acao nao
+    confirmada que saiu com numero e tem resposta do sistema (desenho 7.1). Sem resposta, ""."""
+    if op.estado != Estado.NAO_CONFIRMADA or op.envio_nivel is None:
+        return ""
+    if op.substituto is not None:
+        return f"O resultado está no protocolo {op.substituto}"
+    dito = _dito(op)
+    if dito is None:
+        return ""
+    return f"{quem_informa(op)} informou: {estado_legivel(dito)}"
+
+
 @dataclass(frozen=True, slots=True)
 class Acao:
     """Uma operacao como as telas mostram."""
@@ -539,6 +974,18 @@ class Acao:
     """Nao confirmada pela retomada, e o fim que chegou depois diz que o pedido nao saiu do MCP-CLARO
     (``nao_chegou_depois_da_retomada``; a marca da retomada so vai no desfecho de uma acao nao confirmada): na acao
     nao confirmada, a tela nao diz que o pedido saiu uma vez, e a caixa de pendencias diz que ele nao chegou."""
+    selo: SeloDaFicha = SeloDaFicha(None, SELO_NAO_GUARDADO)
+    """O cartao "Selo do sistema" da ficha, do retrato da hora (``fichas.selo``)."""
+    selo_agora: str = ""
+    """Na ficha que espera: o selo de agora, lido do banco, quando difere do retrato (critica M3)."""
+    pedido_igual: PedidoIgual | None = None
+    """A ficha do pedido igual: qual protocolo ele repete e com que numero vai (B12, A3.3, M4.2)."""
+    numero: tuple[str, ...] = ()
+    """O que a acao diz do numero que levou ao sistema (o mesmo de outro protocolo, ou novo)."""
+    informou: OQueOSistemaInformou | None = None
+    """O bloco "O que o sistema informou" da acao que saiu com numero."""
+    etiqueta_informado: str = ""
+    """A etiqueta das listas: "O sistema informou: {estado}"."""
 
     @property
     def atualiza(self) -> bool:
@@ -573,13 +1020,21 @@ def como_passou(op: Operacao) -> str:
     return "Pela ficha"
 
 
-def montar(op: Operacao, agora: datetime | None = None, *, ver_estranhos: bool = False) -> Acao:
+def montar(
+    op: Operacao,
+    agora: datetime | None = None,
+    *,
+    ver_estranhos: bool = False,
+    maximo_consultas: int | None = None,
+) -> Acao:
     """A operacao como as telas mostram. Resultado de estranhos (servidor de terceiros ou ferramenta marcada "traz
     texto de fora"): ``textos`` fica vazio sempre; o texto so vem em ``estranhos``, com ``ver_estranhos`` (a
-    pessoa pediu para ver, atras do aviso)."""
+    pessoa pediu para ver, atras do aviso). ``maximo_consultas`` e o ``BADGE_LOOKUP_MAX_ATTEMPTS`` (Fase 4: quando a
+    escada da consulta acabou pelas tentativas); sem ele, so as outras regras do fim da escada valem."""
     agora = agora or datetime.now(UTC)
     falta = _segundos_ate(op.hora_saida, agora) or 0
     prazo = _segundos_ate(op.ficha_expira_em, agora) or 0
+    pendente = op.estado == Estado.AGUARDANDO_FICHA and op.ficha_decisao is None and prazo > 0
     de_estranhos = op.de_estranhos
     textos = textos_do_resultado(op.resultado)
     detalhe, explicacao = detalhe_do_desfecho(op.desfecho)
@@ -608,6 +1063,11 @@ def montar(op: Operacao, agora: datetime | None = None, *, ver_estranhos: bool =
         explicacao=explicacao,
         alerta=alerta_da_ficha(op.ficha_sinais),
         nao_chegou=nao_chegou_depois_da_retomada(op.desfecho),
+        selo=selo_da_ficha(op.selo),
+        pedido_igual=pedido_igual(op, maximo_consultas, pendente=pendente),
+        numero=numero_do_envio(op),
+        informou=o_que_o_sistema_informou(op, maximo_consultas, agora),
+        etiqueta_informado=etiqueta_informado(op),
     )
 
 
@@ -622,8 +1082,8 @@ class Pendencias:
         return len(self.fichas) + len(self.espera) + len(self.confirmando)
 
 
-def separar(ops: list[Operacao], agora: datetime | None = None) -> Pendencias:
-    acoes = [montar(op, agora) for op in ops]
+def separar(ops: list[Operacao], agora: datetime | None = None, *, maximo_consultas: int | None = None) -> Pendencias:
+    acoes = [montar(op, agora, maximo_consultas=maximo_consultas) for op in ops]
     return Pendencias(
         fichas=[a for a in acoes if a.op.estado == Estado.AGUARDANDO_FICHA],
         espera=[a for a in acoes if a.op.estado == Estado.LIBERADA],
@@ -649,7 +1109,16 @@ class TelasDeAcoes:
             Route("/acoes/{operacao_id:uuid}/cancelar", self.cancelar, methods=["POST"]),
             Route("/acoes/{operacao_id:uuid}/seguir", self.seguir, methods=["POST"]),
             Route("/acoes/{operacao_id:uuid}/decidir", self.decidir, methods=["POST"]),
+            Route("/acoes/{operacao_id:uuid}/registrar_informado", self.registrar_informado, methods=["POST"]),
         ]
+
+    @property
+    def _maximo(self) -> int:
+        """``BADGE_LOOKUP_MAX_ATTEMPTS``: ate onde vai a escada da consulta (Fase 4)."""
+        return int(self.t.p.BADGE_LOOKUP_MAX_ATTEMPTS)
+
+    def _montar(self, op: Operacao, agora: datetime | None = None, *, ver_estranhos: bool = False) -> Acao:
+        return montar(op, agora, ver_estranhos=ver_estranhos, maximo_consultas=self._maximo)
 
     def _aviso(self, pedido: Request) -> str | None:
         codigo = pedido.query_params.get("aviso", "")
@@ -665,7 +1134,7 @@ class TelasDeAcoes:
         programas = False
         if sessao is not None:
             async with self.t.engine.connect() as c:
-                contagem = separar(await fila.pendencias(c, sessao.pessoa.id))
+                contagem = separar(await fila.pendencias(c, sessao.pessoa.id), maximo_consultas=self._maximo)
                 programas = await consultas.cuida_de_programa(c, sessao.pessoa.id)
         return self.t.pagina(pedido, "inicio.html", {"pendencias": contagem, "cuida_de_programa": programas})
 
@@ -675,7 +1144,7 @@ class TelasDeAcoes:
     async def pendencias(self, pedido: Request) -> Response:
         sessao = await self.t.exigir_sessao(pedido)
         async with self.t.engine.connect() as c:
-            caixa = separar(await fila.pendencias(c, sessao.pessoa.id))
+            caixa = separar(await fila.pendencias(c, sessao.pessoa.id), maximo_consultas=self._maximo)
         return self.t.pagina(
             pedido, "acoes/pendencias.html", {"caixa": caixa, "passkey_ligada": self.t.p.FEATURE_PASSKEY}
         )
@@ -695,13 +1164,17 @@ class TelasDeAcoes:
         self, pedido: Request, ficha_id: uuid.UUID, *, erros: list[str] | None = None, status: int = 200
     ) -> Response:
         sessao = await self.t.exigir_sessao(pedido)
+        selo_agora: int | None = None
         async with self.t.engine.connect() as c:
             op = await self._ficha_da_pessoa(c, ficha_id, sessao.pessoa.id)
             detalhes = await consultas.detalhes_da_operacao(c, op.id) if op else None
             tem_passkey = await passkeys.tem_ativa(c, sessao.pessoa.id)
+            if op is not None and self._montar(op).pode_decidir_ficha:
+                selo_agora = await self._nivel_de_agora(c, op, pessoa_teste=sessao.pessoa.teste)
         if op is None or detalhes is None:
             return self.t.erro(pedido, 404, "Ficha não encontrada", "Esta ficha não é sua ou não existe.")
-        a = montar(op)
+        a = self._montar(op)
+        a = replace(a, selo_agora=selo_mudou(a.selo, selo_agora))
         return self.t.pagina(
             pedido,
             "acoes/ficha.html",
@@ -719,6 +1192,19 @@ class TelasDeAcoes:
             },
             status=status,
         )
+
+    async def _nivel_de_agora(self, c: Any, op: Operacao, *, pessoa_teste: bool) -> int | None:
+        """O nivel do selo efetivo de agora para a pessoa (critica M3: a ficha que espera diz quando ele mudou desde o
+        retrato). Lido do banco (``vigente.ler``) num ponto de salvamento: uma falha vira None e a ficha segue sem a
+        nota, nunca erro (A1). O efetivo segue ``FEATURE_PHASE4_BADGES`` e ``pessoas.teste``, como o retrato."""
+        try:
+            async with c.begin_nested():
+                lido = await vigente.ler(c, op.sistema_id)
+        except (SQLAlchemyError, ValueError) as erro:
+            log.warning("telas_selo_nao_lido", erro=type(erro).__name__)
+            return None
+        efetivo = vigente.efetivo(lido, ligada=self.t.p.FEATURE_PHASE4_BADGES is True, pessoa_teste=pessoa_teste)
+        return efetivo.nivel
 
     def _pede_login(self, op: Operacao) -> bool:
         """Ficha de risco alto que nao confirma pela passkey (passkey desligada nesta instalacao, ou ficha montada
@@ -761,6 +1247,7 @@ class TelasDeAcoes:
         recusa: tuple[int, str] | None = None
         com_passkey = False
         confirmada: Operacao | None = None
+        numero_novo = f.texto("numero_novo") == NUMERO_NOVO_MARCADO
         # Toda pagina de erro sai depois da transacao: cada pedido segura uma conexao do pool so (a pagina da
         # ficha abre a sua).
         async with self.t.engine.begin() as c:
@@ -783,6 +1270,9 @@ class TelasDeAcoes:
                     com_passkey = negada is None
             if op is not None and recusa is None:
                 valores = await politica.varios(c, "OUTBOX_HOLD_SECONDS", "CONFIRM_TOO_FAST_SECONDS")
+                # Fase 4, critica M4.2: a caixa "mandar com numero novo" da ficha do pedido igual. Sem ela, a chamada
+                # de sempre (vale o mesmo numero); com ela, a fila confere de novo se cabe (numero_novo_nao_cabe).
+                escolha: dict[str, Any] = {"numero_novo": True, "maximo_consultas": self._maximo} if numero_novo else {}
                 try:
                     async with c.begin_nested():
                         confirmada = await fila.confirmar_ficha(
@@ -794,6 +1284,7 @@ class TelasDeAcoes:
                             passkey_ligada=ligada,
                             espera_segundos=valores["OUTBOX_HOLD_SECONDS"],
                             rapida_segundos=valores["CONFIRM_TOO_FAST_SECONDS"],
+                            **escolha,
                         )
                 except DecisaoRecusada as erro:
                     recusa = recusa_legivel(erro)
@@ -803,8 +1294,8 @@ class TelasDeAcoes:
             if status == 404:
                 return self.t.erro(pedido, 404, "Ficha não encontrada", mensagem)
             return await self._pagina_ficha(pedido, ficha_id, erros=[mensagem], status=status)
-        log.info("telas_ficha_confirmada", passkey=com_passkey, login_refeito=login_refeito)
-        return ver_depois(f"/telas/acoes/{confirmada.id}", "confirmada")
+        log.info("telas_ficha_confirmada", passkey=com_passkey, login_refeito=login_refeito, numero_novo=numero_novo)
+        return ver_depois(f"/telas/acoes/{confirmada.id}", "confirmada_numero_novo" if numero_novo else "confirmada")
 
     @tela
     async def recusar(self, pedido: Request) -> Response:
@@ -848,7 +1339,9 @@ class TelasDeAcoes:
                 if busca:
                     ops = [op for op in ops if busca in op.protocolo]
         agora = datetime.now(UTC)
-        return self.t.pagina(pedido, "acoes/lista.html", {"acoes": [montar(op, agora) for op in ops], "busca": busca})
+        return self.t.pagina(
+            pedido, "acoes/lista.html", {"acoes": [self._montar(op, agora) for op in ops], "busca": busca}
+        )
 
     async def _da_pessoa(self, pedido: Request, operacao_id: uuid.UUID) -> Operacao | None:
         sessao = await self.t.exigir_sessao(pedido)
@@ -881,7 +1374,7 @@ class TelasDeAcoes:
             pedido,
             "acoes/acao.html",
             {
-                "a": montar(op, ver_estranhos=ver),
+                "a": self._montar(op, ver_estranhos=ver),
                 "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES,
                 "saida_aberta": await self._saida_aberta(op),
                 "aviso": self._aviso(pedido),
@@ -909,7 +1402,11 @@ class TelasDeAcoes:
         return self.t.pagina(
             pedido,
             "acoes/_relogio.html",
-            {"a": montar(op), "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES, "saida_aberta": await self._saida_aberta(op)},
+            {
+                "a": self._montar(op),
+                "intervalo": SEGUNDOS_ENTRE_ATUALIZACOES,
+                "saida_aberta": await self._saida_aberta(op),
+            },
         )
 
     async def _mudar(self, pedido: Request, mudanca: str) -> Response:
@@ -926,6 +1423,16 @@ class TelasDeAcoes:
                         await fila.cancelar(c, operacao_id, pessoa_id=sessao.pessoa.id)
                     elif mudanca == "seguir":
                         await fila.seguir_agora(c, operacao_id, pessoa_id=sessao.pessoa.id)
+                    elif mudanca == "registrar":
+                        # O botao "Registrar o que o sistema informou": o formulario manda o estado que a tela
+                        # mostrou, e a fila recusa se ele mudou (decisao 6 do coordenador).
+                        await fila.registrar_o_que_o_sistema_informou(
+                            c,
+                            operacao_id,
+                            pessoa_id=sessao.pessoa.id,
+                            estado_visto=f.texto("estado_visto"),
+                            emails_admin=tuple(self.t.p.NOTIFY_ADMIN_EMAILS),
+                        )
                     else:
                         await fila.decidir_nao_confirmada(
                             c,
@@ -933,6 +1440,7 @@ class TelasDeAcoes:
                             pessoa_id=sessao.pessoa.id,
                             decisao=f.texto("decisao"),
                             observacao=f.texto("observacao")[:MAXIMO_OBSERVACAO] or None,
+                            emails_admin=tuple(self.t.p.NOTIFY_ADMIN_EMAILS),
                         )
             except DecisaoRecusada as erro:
                 recusa = recusa_legivel(erro)
@@ -943,7 +1451,9 @@ class TelasDeAcoes:
                 return self._nao_achada(pedido)
             return await self._pagina_acao(pedido, operacao_id, erros=[mensagem], status=status)
         log.info("telas_acao_mudou", mudanca=mudanca)
-        aviso = {"cancelar": "cancelada", "seguir": "seguir_agora"}.get(mudanca, "decisao_registrada")
+        aviso = {"cancelar": "cancelada", "seguir": "seguir_agora", "registrar": "informado_registrado"}.get(
+            mudanca, "decisao_registrada"
+        )
         if aviso == "seguir_agora":
             async with self.t.engine.connect() as c:
                 if not (await estado.ler_saida(c)).aberta:
@@ -961,3 +1471,7 @@ class TelasDeAcoes:
     @tela
     async def decidir(self, pedido: Request) -> Response:
         return await self._mudar(pedido, "decidir")
+
+    @tela
+    async def registrar_informado(self, pedido: Request) -> Response:
+        return await self._mudar(pedido, "registrar")

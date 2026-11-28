@@ -119,6 +119,115 @@
 {% endif %}
 {% endif %}
 
+{# O cartao "Selo" (Fase 4): a ficha do ADMIN sempre manda "selo" (None quando a leitura falhou); quem desenha a
+   pagina sem ele (os testes de outras partes da ficha) fica sem o cartao. #}
+{% if selo is defined %}
+<section class="cartao" aria-labelledby="titulo-selo" id="selo">
+  <h2 id="titulo-selo">Selo</h2>
+  {% if selo is none %}
+  <p class="atencao">{{ selo_textos.nao_lido }}</p>
+  {% else %}
+  <p><strong>{{ selo.agora }}</strong></p>
+  {% if selo.detalhe %}<p>O que o ADMIN escreveu ao retirar: {{ selo.detalhe | escondidos }}</p>{% endif %}
+  <p class="dica">{{ selo_textos.nao_garante }}</p>
+  {% if selo.terceiro %}
+  <p class="atencao">{{ selo_textos.terceiro }}</p>
+  {% elif not selo.por_pessoa %}
+  <p class="atencao">{{ selo_textos.so_por_pessoa }}</p>
+  {% else %}
+  {% if not selo.fase_ligada %}<p class="dica">{{ selo_textos.fase_desligada }}</p>{% endif %}
+  {% if selo.aberto %}
+  <p class="aviso" role="status">Teste de nível {{ selo.aberto.nivel }} pedido às {{ selo.aberto.pedido_em | data_hora }}; {{ estados_do_pedido.get(selo.aberto.estado, selo.aberto.estado) }}.</p>
+  {% elif selo.interrompido %}
+  <p class="atencao">O último teste pedido, às {{ selo.interrompido.pedido_em | data_hora }}, foi interrompido: {{ interrupcoes.get(selo.interrompido.motivo or "", "o motivo não foi guardado") }}. Nada mudou no selo.</p>
+  {% endif %}
+  <p>O que o teste nunca cobre:</p>
+  <ul>
+    {% for n in selo.nao_testado %}<li>{{ n }}</li>{% endfor %}
+  </ul>
+
+  <h3>Declaração de teste</h3>
+  {% if selo.declaracao %}
+  <p>Versão {{ selo.declaracao.versao }}, salva por {{ selo.declaracao.salva_por }} em {{ selo.declaracao.salva_em | data_hora }}. O teste usa sempre a versão mais nova.</p>
+  {% if selo.modo %}
+  <p>O teste roda {{ selo.modo }}{% if selo.alvo %}, no alvo <code class="estranho">{{ selo.alvo | escondidos }}</code>{% endif %}. Responsável, como a declaração diz: <span class="estranho">{{ selo.responsavel | escondidos }}</span>.</p>
+  <p>Ferramentas de ação declaradas: {% for nome in selo.ferramentas %}<code class="estranho">{{ nome | escondidos }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.</p>
+  {% endif %}
+  {% else %}
+  <p>Nenhuma declaração de teste salva ainda.</p>
+  {% endif %}
+  {% include "_login_refeito.html" %}
+  <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/selo/declaracao">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="declaracao">Declaração de teste (o JSON que a equipe do sistema escreveu)</label>
+    <textarea id="declaracao" name="declaracao" rows="14" required>{{ valores.get('declaracao', '') }}</textarea>
+    <p class="atencao">{{ selo_textos.atencao }}</p>
+    <label class="opcao"><input type="checkbox" name="confirmo" value="sim" required> <span>{{ selo_textos.confirmo }}</span></label>
+    <p class="dica">{{ selo_textos.nota }}</p>
+    <button type="submit">Salvar a declaração de teste</button>
+  </form>
+
+  <h3>Chave de teste</h3>
+  <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/chave">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="tipo" value="teste_selo">
+    <p>{% if selo.chave_entregue_em %}Última chave de teste entregue ao cofre em {{ selo.chave_entregue_em | data_hora }}.{% else %}Nenhuma chave de teste entregue ainda.{% endif %}</p>
+    <p class="dica">A bateria usa só esta chave, no alvo de teste. Ela nunca usa a chave de uma pessoa nem a de produção, e entregar esta chave não troca nenhuma delas.</p>
+    <label for="chave_teste_selo">Chave de teste do selo</label>
+    <input type="password" id="chave_teste_selo" name="segredo" required autocomplete="off" maxlength="8192">
+    <button type="submit">Entregar ao cofre</button>
+  </form>
+
+  <h3>Pedir o teste</h3>
+  {% if selo.declaracao and selo.chave_entregue_em %}
+  {% for p in selo.planos %}
+  <p>Teste de nível {{ p.nivel }}: pela declaração, até {{ p.chamadas }} chamadas, {{ p.escritas }} delas escritas reais no alvo de teste.{% if p.passa_do_teto %} Passa do teto de {{ selo.teto }} chamadas: este teste não começa.{% endif %}</p>
+  {% endfor %}
+  <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/selo/testar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" name="nivel" value="2">Pedir o teste de nível 2</button>
+    <button type="submit" name="nivel" value="3">Pedir o teste de nível 3</button>
+  </form>
+  <p class="dica">Quem roda é o despachante, um teste por vez. Com a porta de saída fechada ou o cofre trancado, o teste espera.</p>
+  {% else %}
+  <p>{{ selo_textos.sem_declaracao }}</p>
+  {% endif %}
+
+  <h3>Histórico</h3>
+  {% if selo.historico %}
+  <table>
+    <thead><tr><th>Data</th><th>Nível pedido</th><th>Resultado</th><th>Quem pediu</th><th></th></tr></thead>
+    <tbody>
+    {% for h in selo.historico %}
+      <tr>
+        <td>{{ (h.testado_em or h.pedido_em) | data_hora }}</td>
+        <td>{{ h.nivel }}</td>
+        <td>{% if h.teste_id and h.resultado == "aprovado" %}Aprovado: nível {{ h.nivel_obtido }}, vale até {{ h.vale_ate | data }}{% elif h.teste_id %}Não aprovado: nível 1{% elif h.estado == "interrompido" %}Interrompido: {{ interrupcoes.get(h.motivo or "", "o motivo não foi guardado") }}{% else %}{{ estados_do_pedido.get(h.estado, h.estado) | capitalize }}{% endif %}</td>
+        <td>{{ h.quem }}</td>
+        <td>{% if h.teste_id %}<a href="/telas/admin/sistemas/{{ sistema.id }}/selo/testes/{{ h.teste_id }}">ver os casos</a>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>Nenhum teste pedido ainda.</p>
+  {% endif %}
+  {% endif %}
+
+  {% if selo.nivel >= 2 %}
+  <h3>Retirar o selo</h3>
+  <form method="post" action="/telas/admin/sistemas/{{ sistema.id }}/selo/retirar">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="motivo_retirada">Por que retirar o selo</label>
+    <textarea id="motivo_retirada" name="motivo" rows="3" required maxlength="500">{{ valores.get('motivo', '') }}</textarea>
+    <p class="dica">O sistema volta ao nível 1 na hora: o MCP-CLARO deixa de mandar o número da operação e de perguntar a ele o que houve. Para voltar a um nível maior, peça um teste novo.</p>
+    <button type="submit">Retirar o selo</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</section>
+{% endif %}
+
 {% if terceiro %}
 <section class="cartao" aria-labelledby="titulo-revisao-servidor">
   <h2 id="titulo-revisao-servidor">Revisão do servidor</h2>

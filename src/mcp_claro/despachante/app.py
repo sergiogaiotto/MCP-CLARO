@@ -27,7 +27,12 @@ Rotas internas (nunca expostas ao portao):
 
 Fase 4: duas tarefas do despachante cuidam do aviso de bloqueio (``selo.consulta.Perguntador``): uma deriva os avisos
 dos comprovantes novos e outra os manda, a cada ``OUTBOX_SWEEP_SECONDS``. Com varias copias do papel no ar, cada aviso
-sai uma vez por tentativa (a vez e reservada no banco antes de chamar).
+sai uma vez por tentativa (a vez e reservada no banco antes de chamar). A bateria do selo (``selo.bateria.Corredor``)
+e outra tarefa: um pedido de teste por vez, com um grupo de conexoes proprio (``cifra_origem.engine_sem_pool``: nunca
+espera pelas conexoes da porta ou da leitura) e sem segurar a porta de saida; com a porta fechada ou o cofre trancado,
+o teste nao comeca. Na partida, antes de a tarefa subir, todo pedido ``rodando`` cuja trava esta livre (a copia que o
+rodava caiu) fica ``interrompido``, com a linha do extrato (critica M8); com varias copias no ar, o pedido que outra
+copia esta rodando fica como esta.
 
 Nenhuma rota ``/interno/*`` recebe texto que o banco nao guarda (``_texto_valido``): um texto de primeiro nivel do
 corpo com caractere nulo (U+0000) ou com um pedaco de par UTF-16 sozinho (``\\ud800``, que o JSON aceita) e pedido
@@ -69,7 +74,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.despachante import chaves
 from mcp_claro.despachante.autorizacao import rotas_autorizacao
 from mcp_claro.despachante.chaves import Cifra
-from mcp_claro.despachante.cifra_origem import CifraPorOrigem, conferir_chave_de_terceiros
+from mcp_claro.despachante.cifra_origem import CifraPorOrigem, conferir_chave_de_terceiros, engine_sem_pool
 from mcp_claro.despachante.servico import (
     TETO_PUBLICADAS,
     DeclaracoesIndisponiveis,
@@ -85,6 +90,7 @@ from mcp_claro.ligacao.sala_cliente import ClienteSala
 from mcp_claro.logs import logger
 from mcp_claro.saida.despachante import PortaDeSaida
 from mcp_claro.selo import contrato
+from mcp_claro.selo.bateria import Corredor
 from mcp_claro.selo.consulta import NadaAPerguntar, Perguntador, PortaFechada, SemEnvio
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
@@ -232,6 +238,19 @@ async def rodar_avisos_de_bloqueio(perguntador: Perguntador, intervalo: float) -
         await asyncio.sleep(intervalo)
 
 
+async def partida_da_bateria(corredor: Corredor) -> None:
+    """Na partida: os pedidos de teste ``rodando`` sem dono (a copia que os rodava caiu) ficam ``interrompidos``, com
+    a linha do extrato, antes de a tarefa da bateria subir. Uma falha do banco aqui nao para a partida: a tarefa
+    confere de novo a cada volta."""
+    try:
+        marcados = await corredor.marcar_interrompidos()
+    except Exception as erro:  # noqa: BLE001 - a partida do despachante nunca para pela bateria do selo
+        log.warning("bateria_partida_falhou", erro=type(erro).__name__)
+        return
+    if marcados:
+        log.info("bateria_interrompidos_na_partida", pedidos=marcados)
+
+
 async def _parar_tarefa(tarefa: asyncio.Task[None]) -> None:
     tarefa.cancel()
     with contextlib.suppress(asyncio.CancelledError):
@@ -245,11 +264,14 @@ def criar_app_despachante(
     *,
     local_para_terceiro: Ligacao | None = None,
     liberar_locais: bool = False,
+    engine_bateria: AsyncEngine | None = None,
 ) -> Starlette:
     """Sem ``cifra`` dada, o papel entra no cofre (OpenBao, AppRole do despachante) na partida e cifra por origem.
 
     So para testes: ``local_para_terceiro`` fala com servidores de terceiros sem a sala, e ``liberar_locais``
     aceita endereco local na troca de chave OAuth de um terceiro. Os dois so valem em desenvolvimento e teste.
+    ``engine_bateria`` troca o grupo de conexoes proprio da bateria do selo (sem ele, um sem pool, com a mesma
+    conexao de ``engine``).
     """
     p.conferir()
     sala = montar_sala(p)
@@ -298,6 +320,20 @@ def criar_app_despachante(
         emails_admin=tuple(p.NOTIFY_ADMIN_EMAILS),
         ambiente=ambiente,
         liberar_locais=liberar_locais,
+    )
+    # O grupo de conexoes proprio da bateria sobe no ciclo de vida (``ciclo``); ate la, o do despachante.
+    corredor = Corredor(
+        engine,
+        cifra,
+        despachante.ligacao,
+        max_chamadas=int(p.BADGE_TEST_MAX_CALLS),
+        max_segundos=float(p.BADGE_TEST_MAX_SECONDS),
+        pares=int(p.BADGE_TEST_PAIRS),
+        prazo_da_escrita=float(p.RESPONSE_MAX_WAIT_SECONDS),
+        prazo_do_contrato=float(p.BADGE_LOOKUP_TIMEOUT_SECONDS),
+        ambiente=ambiente,
+        emails_admin=tuple(p.NOTIFY_ADMIN_EMAILS),
+        intervalo=float(p.OUTBOX_SWEEP_SECONDS),
     )
 
     async def ler(pedido: Request) -> JSONResponse:
@@ -472,6 +508,8 @@ def criar_app_despachante(
                 do_cofre.alvo = por_origem
                 # So com o cofre de verdade: a porta confere a saude dele e fecha a saida enquanto estiver trancado.
                 porta.cofre = cofre
+                # A bateria do selo nao comeca com o cofre trancado.
+                corredor.cofre = cofre
             await pilha.enter_async_context(descarregar_contadores_periodicamente(p, engine))
             await _conferir_continuidade_na_partida(p, engine)
             # Porta unica de saida (Fase 2): so depois da conferencia de continuidade, que para a fila se o
@@ -482,6 +520,16 @@ def criar_app_despachante(
                 rodar_avisos_de_bloqueio(perguntador, float(p.OUTBOX_SWEEP_SECONDS)), name="avisos-de-bloqueio"
             )
             pilha.push_async_callback(_parar_tarefa, avisos)
+            # A bateria do selo: um grupo de conexoes proprio, sem pool (nunca espera pelas conexoes da porta ou da
+            # leitura); primeiro os pedidos rodando sem dono ficam interrompidos (critica M8), depois a tarefa.
+            if engine_bateria is not None:
+                corredor.engine = engine_bateria
+            else:
+                corredor.engine = engine_sem_pool(engine)
+                pilha.push_async_callback(corredor.engine.dispose)
+            await partida_da_bateria(corredor)
+            bateria = asyncio.create_task(corredor.rodar(), name="bateria-do-selo")
+            pilha.push_async_callback(_parar_tarefa, bateria)
             log.info("partida", papel="despachante", versao=__version__, mcp=VERSAO_MCP)
             yield
 
@@ -504,4 +552,5 @@ def criar_app_despachante(
     app.state.despachante = despachante
     app.state.porta = porta
     app.state.perguntador = perguntador
+    app.state.corredor = corredor
     return app

@@ -1368,6 +1368,27 @@ def casos_aprovam(itens: Sequence[Mapping[str, Any]], ferramentas: Sequence[uuid
     return True
 
 
+def casos_que_nao_aprovam(itens: Any, nivel: int) -> int:
+    """Quantos itens de ``testes_selo.casos`` impedem a aprovacao num teste de nivel ``nivel``: o ``{falhas}`` das
+    frases "casos falharam ou ficaram sem teste" (extrato, aviso ao ADMIN, cartao e relatorio do selo).
+
+    Contam os ``falhou`` (de qualquer caso, como em ``casos_aprovam``) e os de caso obrigatorio de nivel ate ``nivel``
+    que nao aprovam (``resultado_aprova``: ``nao_testado``, ``nao_observado`` fora do maximo, ``nao_se_aplica`` onde nao
+    cabe). Uma conta so para a bateria, as rotinas, as telas e ``selo.vigente`` (decisao do coordenador da etapa 4).
+    Fora de uma lista, um item que nao e objeto ou de caso fora do contrato nao conta (o banco recusa os tres)."""
+    total = 0
+    for item in itens if isinstance(itens, list) else []:
+        caso = CASOS_POR_NOME.get(str(item.get("caso"))) if isinstance(item, dict) else None
+        if caso is None:
+            continue
+        resultado = str(item.get("resultado"))
+        if resultado == "falhou" or (
+            caso.obrigatorio and caso.nivel <= nivel and not resultado_aprova(caso, resultado, nivel)
+        ):
+            total += 1
+    return total
+
+
 def contagem_minima_de_chamadas(itens: Sequence[Mapping[str, Any]]) -> int:
     """O banco exige ``testes_selo.chamadas`` ao menos a soma das tentativas dos itens (critica B3)."""
     return sum(int(i.get("tentativas") or 0) for i in itens)
