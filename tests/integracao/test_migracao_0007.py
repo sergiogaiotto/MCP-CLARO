@@ -258,6 +258,7 @@ VOCABULARIOS: Final[dict[str, tuple[str, ...]]] = {
     "estados_do_recibo": contrato.ESTADOS_DO_RECIBO,
     "estados_em_aberto": contrato.ESTADOS_EM_ABERTO,
     "estados_que_queimam": contrato.ESTADOS_QUE_QUEIMAM,
+    "estados_que_impedem_numero_novo": contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO,
     "eventos": contrato.EVENTOS_DEPOIS,
     "origens": contrato.ORIGENS,
     "desfechos": contrato.DESFECHOS,

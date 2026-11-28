@@ -14,7 +14,8 @@ comprovante e os manda:
   (``sistema_fora``): o duble conta zero chamadas;
 - sem a chave da pessoa (falha do MCP-CLARO, M7), o aviso espera a chave sem gastar tentativa, e a dona ganha uma
   linha ``aviso_bloqueio_ainda_nao_saiu`` por bloqueio e sistema, uma vez so (mesmo com duas partes, duas copias ou
-  varias voltas); a chave recusada na ultima tentativa deixa o aviso ``sistema_fora``, nunca ``sem_resposta``;
+  varias voltas), e cada dona e cada sistema tem a sua; a chave recusada na ultima tentativa deixa o aviso
+  ``sistema_fora``, nunca ``sem_resposta``;
 - o envio em aberto do alcance fora do comprovante entra no aviso (B9); mais de 100 numeros vao em partes;
 - duas copias do despachante ao mesmo tempo: uma chamada por aviso, e um bloqueio derivado uma vez so (M8), mesmo
   com a chave lenta;
@@ -1014,3 +1015,107 @@ async def test_dois_bloqueios_sem_a_chave_dao_uma_linha_por_bloqueio(banco_migra
         linhas = [x for x in await a.extrato(cn, sistema=True) if x.tipo == "aviso_bloqueio_ainda_nao_saiu"]
         assert sorted(x.dados["bloqueio"] for x in linhas) == sorted([str(bloqueio_1), str(bloqueio_2)])
         assert {x.pessoa_id for x in linhas} == {cn.pessoa_id}
+
+
+# --- Conferencia final da etapa 3r: a linha sem a chave e de cada dona e de cada sistema -----------------------
+
+
+async def test_sem_as_chaves_cada_dona_ganha_a_sua_linha(banco_migrado: Parametros) -> None:
+    """Mutacao X7 do verificador do G3ar (o filtro ``pessoa_id`` da procura da linha). Um bloqueio do ADMIN, de
+    alcance ``sistema``, com acoes de duas pessoas e o cofre sem as duas chaves: cada dona ganha a sua linha
+    ``aviso_bloqueio_ainda_nao_saiu``, e a volta seguinte nao repete nenhuma."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        async with cn.dono.begin() as c:
+            outra = await s.nova_pessoa(c, teste=True)
+            await chaves.guardar(c, cn.cifra, sistema_id=cn.sistema.id, segredo="chave-bia", pessoa_id=outra)
+            ops = []
+            for pessoa in (cn.pessoa_id, outra):
+                op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=pessoa)
+                await s.enviar(c, op.id, fim="enviada")
+                ops.append(op)
+        ja = [{"protocolo": op.protocolo, "estado": "enviada"} for op in ops]
+        async with cn.dono.begin() as c:
+            bloqueio = (
+                await c.execute(
+                    text(
+                        "INSERT INTO bloqueios (tipo, alcance, sistema_id, quem, motivo)"
+                        " VALUES ('bloqueio', 'sistema', :s, 'admin:teste', 'teste do aviso') RETURNING id"
+                    ),
+                    {"s": cn.sistema.id},
+                )
+            ).scalar_one()
+            await c.execute(
+                text(
+                    "INSERT INTO comprovantes (bloqueio_id, ja_saidas, em_conferencia)"
+                    " VALUES (:b, CAST(:j AS jsonb), '[]')"
+                ),
+                {"b": bloqueio, "j": json.dumps(ja)},
+            )
+        perguntador = cn.perguntador()
+        await perguntador.derivar_avisos()
+        donas = sorted(str(x.pessoa_id) for x in await avisos(cn, uuid.UUID(str(bloqueio))))
+        assert donas == sorted([str(cn.pessoa_id), str(outra)])
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        for _ in range(2):
+            assert await perguntador.avisar_bloqueios() == 2
+            await de_novo_agora(cn, uuid.UUID(str(bloqueio)))
+        assert cn.chamadas(contrato.FERRAMENTA_BLOQUEIO) == 0
+        linhas = [x for x in await a.extrato(cn, sistema=True) if x.tipo == "aviso_bloqueio_ainda_nao_saiu"]
+        assert sorted(str(x.pessoa_id) for x in linhas) == donas
+
+
+async def test_sem_a_chave_em_dois_sistemas_a_dona_ganha_uma_linha_por_sistema(banco_migrado: Parametros) -> None:
+    """Mutacao X8 do verificador do G3ar (o filtro ``sistema_id`` da procura da linha). Um bloqueio da pessoa com
+    acoes de nivel 3 em dois sistemas e a chave dela apagada nos dois: a dona ganha uma linha
+    ``aviso_bloqueio_ainda_nao_saiu`` por sistema, e a volta seguinte nao repete nenhuma."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        async with cn.dono.begin() as c:
+            outro = await s.proprio_com_acoes(
+                c,
+                acoes=(a.ACAO,),
+                leituras=(a.LEITURA,),
+                endereco=s.endereco_de_duble(cn.base, s.caminho_unico("producao")),
+                nivel_do_contrato=3,
+            )
+            await c.execute(text("UPDATE sistemas SET sondagem = NULL WHERE id = :s"), {"s": outro.id})
+            await a.teste_de_ontem(c, await s.gravar_teste(c, outro.id, nivel=3))
+            await chaves.guardar(c, cn.cifra, sistema_id=outro.id, segredo="chave-ana-2", pessoa_id=cn.pessoa_id)
+            ops = []
+            for sistema in (cn.sistema, outro):
+                op = await s.criar_operacao(c, sistema.acoes[0], pessoa_id=cn.pessoa_id)
+                await s.enviar(c, op.id, fim="enviada")
+                ops.append(op)
+        bloqueio = await bloquear(cn, ops)
+        perguntador = cn.perguntador()
+        await perguntador.derivar_avisos()
+        async with cn.dono.connect() as c:
+            sistemas = sorted(
+                str(x)
+                for x in (
+                    await c.execute(
+                        text("SELECT sistema_id FROM avisos_bloqueio WHERE bloqueio_id = :b"), {"b": bloqueio}
+                    )
+                ).scalars()
+            )
+        assert sistemas == sorted([str(cn.sistema.id), str(outro.id)])
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE pessoa_id = :p"), {"p": cn.pessoa_id})
+        for _ in range(2):
+            assert await perguntador.avisar_bloqueios() == 2
+            await de_novo_agora(cn, bloqueio)
+        async with cn.dono.connect() as c:
+            linhas = (
+                (
+                    await c.execute(
+                        text(
+                            "SELECT sistema_id FROM extrato"
+                            " WHERE tipo = 'aviso_bloqueio_ainda_nao_saiu' AND pessoa_id = :p"
+                        ),
+                        {"p": cn.pessoa_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert sorted(str(x) for x in linhas) == sistemas

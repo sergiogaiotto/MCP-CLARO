@@ -124,8 +124,10 @@ class InformadoDoSistema:
       com "continuamos perguntando", sem o botao (critica A3.3);
     - ``de_terceiro``: o que um servidor de terceiros informou (critica M9);
     - ``tentativas``: as consultas que gastaram a vez (origem ``consulta``, ``contrato.DESFECHOS_QUE_GASTAM_TENTATIVA``)
-      e ``ultimo_desfecho``, o desfecho da ultima linha de qualquer origem. Com eles, ``Operacao.consulta_acabou`` diz
-      se a escada acabou sem resposta que encerra ("o sistema nao confirmou; a decisao e sua");
+      e ``ultimo_desfecho``, o desfecho da ultima linha de origem ``consulta`` (uma resposta ao aviso depois de um
+      ``sistema_fora`` nao reabre a escada, ``contrato.parou_por_sistema_fora``). Com eles,
+      ``Operacao.consulta_acabou`` diz se a escada acabou sem resposta que encerra ("o sistema nao confirmou; a
+      decisao e sua");
     - ``se_contradisse``: alguma resposta sobre o NUMERO desta acao (as dela e as de toda acao que saiu com o mesmo
       numero, original ou pedido igual) tem ``informacoes_sistema.contradiz``: o sistema deu respostas que nao combinam
       (e o banco retirou o selo). O botao de um toque nao registra o que ele disse (decisao 6 do coordenador).
@@ -152,27 +154,34 @@ class EscadaDaOriginal:
     """A escada da consulta da "nao confirmada" que este pedido igual repete (``operacoes.repete_operacao_id``), lida
     na mesma linha da operacao (critica M4.2): o envio dela, o estado final do NUMERO dela, o estado da ultima resposta
     de origem ``consulta`` (``respondeu``) dela, as tentativas que gastaram a vez e o desfecho da ultima linha de
-    qualquer origem. So as categorias do contrato, nunca o numero.
+    origem ``consulta`` (``contrato.parou_por_sistema_fora``). So as categorias do contrato, nunca o numero.
 
     ``estado_final_do_numero`` e um estado final do banco (``selo_estado_final``) de alguma acao que saiu com o numero
     da original: ela mesma, a primeira acao com esse numero ou outro pedido igual que o copiou (a cadeia de
     ``envios_selo.repete_operacao_id``, a mesma da contradicao, ``InformadoDoSistema.se_contradisse``). Para o sistema,
     todas sao a mesma escrita: um ``concluida`` sobre o numero em outra acao ja diz que ela foi feita, e o numero novo
     faria a escrita duas vezes (defeito 2 do verificador do G4r, etapa 3r). Com mais de um, vale o da acao mais perto
-    da primeira com o numero."""
+    da primeira com o numero.
+
+    ``dito_feito_no_numero``: alguma resposta sobre o numero, de qualquer origem (a resposta ao aviso de bloqueio
+    tambem), diz que a escrita foi feita, inteira ou em parte (``contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO``). A
+    resposta ao aviso nao e final, mas o numero novo nao vale contra ela (decisao do coordenador na conferencia final
+    da etapa 3r): a ficha diria "o sistema nao sabe se o primeiro foi feito", e ele disse que foi."""
 
     enviado_em: datetime
     estado_final_do_numero: str | None
     ultima_consulta: str | None
     tentativas: int
     ultimo_desfecho: str | None
+    dito_feito_no_numero: bool = False
 
 
 def _escada_acabou(
     *, tentativas: int, ultimo_desfecho: str | None, enviado_em: datetime, agora: datetime | None, maximo: int
 ) -> bool:
     """A escada da consulta acabou sem resposta que encerra, por uma das regras que nao dependem do estado final: as
-    tentativas chegaram a ``maximo`` (``BADGE_LOOKUP_MAX_ATTEMPTS``), a ultima linha e ``sistema_fora`` ou passou o
+    tentativas chegaram a ``maximo`` (``BADGE_LOOKUP_MAX_ATTEMPTS``), a ultima linha de consulta e ``sistema_fora``
+    (``ultimo_desfecho``, so de origem ``consulta``) ou passou o
     tempo (``contrato.escada_vencida``, com ``agora``, o ``now()`` do banco lido na mesma linha; decisao 3 do
     coordenador, retoque da etapa 3)."""
     if agora is not None and contrato.escada_vencida(enviado_em, agora):
@@ -275,7 +284,8 @@ class Operacao:
     def consulta_acabou(self, maximo: int) -> bool:
         """A escada da consulta acabou sem resposta que encerra (``contrato.ESCADA_DA_CONSULTA_MINUTOS``): a acao
         saiu com numero, o sistema nao deu estado final e ou as tentativas chegaram a ``maximo``
-        (``BADGE_LOOKUP_MAX_ATTEMPTS``), ou a ultima linha e ``sistema_fora``, ou outro protocolo saiu depois com o
+        (``BADGE_LOOKUP_MAX_ATTEMPTS``), ou a ultima linha de consulta e ``sistema_fora`` (uma resposta ao aviso
+        depois nao a reabre), ou outro protocolo saiu depois com o
         mesmo numero (``substituto``), ou passou o tempo da escada (``escada_vencida``, mesmo sem nenhuma linha: as
         linhas que nao gastam tentativa nao a fazem rodar sem fim, decisao 3 do coordenador). A tela e o texto ao
         aplicativo dizem "o sistema nao confirmou; a decisao e sua"."""
@@ -291,16 +301,19 @@ class Operacao:
         """Este pedido igual repete uma "nao confirmada" (``repete_protocolo``) que saiu com numero e terminou a escada
         da consulta sem resposta final, com a ultima resposta a consulta ``desconhecido`` (critica M4.2, decisao 4 do
         coordenador). A escada acabou pelas mesmas regras de ``consulta_acabou``: as tentativas (``maximo``,
-        ``BADGE_LOOKUP_MAX_ATTEMPTS``), ``sistema_fora`` na ultima linha ou o tempo (``contrato.escada_vencida``).
-        "Sem resposta final" vale pelo NUMERO da original, nao so por ela: nenhuma acao que saiu com esse numero tem
-        estado final (``EscadaDaOriginal.estado_final_do_numero``).
+        ``BADGE_LOOKUP_MAX_ATTEMPTS``), ``sistema_fora`` na ultima linha de consulta ou o tempo
+        (``contrato.escada_vencida``). "Sem resposta final" vale pelo NUMERO da original, nao so por ela: nenhuma acao
+        que saiu com esse numero tem estado final (``EscadaDaOriginal.estado_final_do_numero``), e nenhuma resposta
+        sobre ele, nem a do aviso de bloqueio, diz que a escrita foi feita (``dito_feito_no_numero``).
 
         So assim a ficha mostra o aviso e a escolha "mandar com numero novo" ("o sistema nao sabe se o primeiro foi
         feito; com numero novo, pode fazer duas vezes"), e ``confirmar_ficha(..., numero_novo=True)`` a aceita. O banco
         confere a parte que sabe (``fichas_guarda``: nenhum estado final sobre o numero e a ultima resposta a consulta
-        ``desconhecido``)."""
+        ``desconhecido``, e nenhuma resposta sobre o numero que diga que a escrita foi feita)."""
         o = self.original
         if self.repete_protocolo is None or o is None or o.estado_final_do_numero is not None:
+            return False
+        if o.dito_feito_no_numero:
             return False
         if o.ultima_consulta != "desconhecido":
             return False
@@ -365,7 +378,7 @@ SELECT o.id, o.protocolo, o.codigo_conferencia, o.pessoa_id, o.aplicativo_id, o.
        sub.protocolo AS substituto, ori.enviado_em AS ori_enviado_em,
        ori.estado_final_do_numero AS ori_estado_final_do_numero,
        ori.ultima_consulta AS ori_ultima_consulta, ori.tentativas AS ori_tentativas,
-       ori.ultimo_desfecho AS ori_ultimo_desfecho
+       ori.ultimo_desfecho AS ori_ultimo_desfecho, ori.dito_feito_no_numero AS ori_dito_feito_no_numero
 FROM operacoes o
 JOIN fila_saida f ON f.operacao_id = o.id
 JOIN ferramentas_revisadas r ON r.id = o.ferramenta_id
@@ -381,7 +394,7 @@ LEFT JOIN LATERAL (
   ORDER BY (i.desfecho = 'respondeu') DESC, i.gravado_em DESC, i.id DESC LIMIT 1
 ) inf ON true
 LEFT JOIN LATERAL (
-  SELECT (SELECT i.desfecho FROM informacoes_sistema i WHERE i.operacao_id = o.id
+  SELECT (SELECT i.desfecho FROM informacoes_sistema i WHERE i.operacao_id = o.id AND i.origem = 'consulta'
           ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS desfecho,
          (SELECT count(*) FROM informacoes_sistema i WHERE i.operacao_id = o.id AND i.origem = 'consulta'
             AND i.desfecho = ANY (selo_vocabulario('desfechos_que_gastam_tentativa'))) AS tentativas,
@@ -427,7 +440,10 @@ LEFT JOIN LATERAL (
          (SELECT count(*) FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id AND i.origem = 'consulta'
             AND i.desfecho = ANY (selo_vocabulario('desfechos_que_gastam_tentativa'))) AS tentativas,
          (SELECT i.desfecho FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id
-          ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS ultimo_desfecho
+            AND i.origem = 'consulta' ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS ultimo_desfecho,
+         EXISTS (SELECT 1 FROM numero n JOIN informacoes_sistema i ON i.operacao_id = n.operacao_id
+                 WHERE i.desfecho = 'respondeu'
+                   AND i.estado = ANY (selo_vocabulario('estados_que_impedem_numero_novo'))) AS dito_feito_no_numero
   FROM envios_selo eo WHERE eo.operacao_id = o.repete_operacao_id
 ) ori ON true
 """
@@ -501,6 +517,7 @@ def _original(linha: Row[Any]) -> EscadaDaOriginal | None:
         ultima_consulta=linha.ori_ultima_consulta,
         tentativas=int(linha.ori_tentativas or 0),
         ultimo_desfecho=linha.ori_ultimo_desfecho,
+        dito_feito_no_numero=linha.ori_dito_feito_no_numero is True,
     )
 
 

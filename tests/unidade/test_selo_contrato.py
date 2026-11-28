@@ -803,6 +803,34 @@ def test_escada_para_com_sistema_fora_e_no_maximo() -> None:
     assert contrato.e_a_ultima_consulta([], 1)
 
 
+def test_a_resposta_ao_aviso_depois_de_sistema_fora_nao_reabre_a_escada() -> None:
+    """Conferencia final da etapa 3r (defeito 3 do verificador do G3ar; decisao do coordenador): o ``sistema_fora``
+    conta pela ultima linha de origem ``consulta``. O sistema volta a ``ativo``, um bloqueio o avisa, e a resposta ao
+    aviso, de qualquer estado ou sem resposta, entra depois: a escada continua parada (critica A2)."""
+    parou = [_linha(1), _linha(2, desfecho="sistema_fora")]
+    assert contrato.parou_por_sistema_fora(parou)
+    for estado in contrato.ESTADOS:
+        depois = [*parou, _linha(3, "aviso", estado=estado)]
+        assert contrato.parou_por_sistema_fora(depois)
+        assert _proxima(depois) is None
+    assert _proxima([*parou, _linha(3, "aviso", "sem_resposta")]) is None
+    # So a consulta conta: sem consulta nenhuma, ou com a ultima consulta de outro desfecho, a escada nao parou.
+    assert not contrato.parou_por_sistema_fora([])
+    assert not contrato.parou_por_sistema_fora([_linha(2, "aviso", "sistema_fora")])
+    assert not contrato.parou_por_sistema_fora([*parou, _linha(3, desfecho="sala_fora")])
+    assert not contrato.parou_por_sistema_fora([_linha(2, desfecho="sistema_fora"), _linha(3)])
+
+
+def test_o_que_diz_que_a_escrita_foi_feita_impede_o_numero_novo() -> None:
+    """Critica M4.2, decisao do coordenador na conferencia final da etapa 3r: concluida e parcial (contam como
+    ``aconteceu`` e ``em_parte``) impedem o numero novo, de qualquer origem; o resto nao. Nenhum deles queima o numero,
+    e a lista nao se mistura com a dos que queimam."""
+    assert contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO == ("concluida", "parcial")
+    assert {contrato.CONTA_COMO[e] for e in contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO} == {"aconteceu", "em_parte"}
+    assert not set(contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO) & set(contrato.ESTADOS_QUE_QUEIMAM)
+    assert set(contrato.ESTADOS_QUE_IMPEDEM_NUMERO_NOVO) <= set(contrato.ESTADOS_FINAIS)
+
+
 def test_a_resposta_ao_aviso_nunca_encerra_a_escada() -> None:
     """Decisao 1 do coordenador (retoque da etapa 3, D2): so recibo e consulta encerram. O ``parada`` (ou qualquer
     estado final) do aviso, sozinho ou depois do recibo em andamento, deixa a escada seguir; duas ``nao_recebida`` do

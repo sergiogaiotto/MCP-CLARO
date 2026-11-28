@@ -8,12 +8,14 @@ Com o duble de verdade e o cortador (``tests/cortador.py``, so usado) entre o de
 - sem resposta: 8 tentativas, ``sistema_nao_respondeu_consulta`` no fim; com 3 operacoes seguidas assim (ou com
   ``desconhecido`` no fim, B8), o selo e retirado e o ADMIN e avisado; depois de um reteste, so contam as que
   terminaram depois do teste novo, e as paradas em ``sistema_fora`` nunca contam; a conta le as 50 que terminaram
-  mais perto de agora, e as que ainda estao na escada saem antes do limite;
+  mais perto de agora, e as que ainda estao na escada saem antes do limite; a acao confirmada so pelo recibo nao
+  entra na conta;
 - respostas invalidas (instrucao no estado, resposta grande, outro numero) dao ``resposta_invalida``; o membro a mais
   e ignorado; nada do texto do sistema chega ao banco nem ao extrato;
 - chave apagada, ou recusada pelo sistema (401, a chave fica marcada vencida): ``sem_chave``, sem gastar tentativa
   nem contar contra o sistema (M7); erro JSON-RPC e evento fora da janela da hora sao ``resposta_invalida``;
-- fora de ``ativo``, nada e perguntado (``sistema_fora``, A2), e a escada para; com a porta fechada, nada e
+- fora de ``ativo``, nada e perguntado (``sistema_fora``, A2), e a escada para de vez: uma resposta ao aviso de
+  bloqueio depois nao a reabre (conferencia final da etapa 3r); com a porta fechada, nada e
   perguntado nem gravado (409 ``porta_fechada``, decisao 2 do coordenador), e a escada nao anda;
 - contradicao: o sistema que se contradiz perde o selo, e o extrato e o ADMIN ficam sabendo (depois de um reteste,
   o aviso ao ADMIN e do selo de agora);
@@ -25,6 +27,7 @@ O relogio da escada e o do banco: ``voltar_no_tempo`` poe o envio e as respostas
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -37,6 +40,7 @@ from exemplos import selo_mentiroso, selo_nivel2, selo_nivel3
 from mcp_claro.config.settings import Parametros
 from mcp_claro.despachante import chaves
 from mcp_claro.ligacao.cliente import Resposta
+from mcp_claro.saida import fila
 from mcp_claro.saida.despachante import ligacao_sem_sala
 from mcp_claro.selo import consulta, contrato
 from mcp_claro.selo.consulta import NadaAPerguntar, PortaFechada, SemEnvio
@@ -994,3 +998,83 @@ async def test_com_mais_de_cinquenta_terminadas_a_conta_le_as_mais_recentes(banc
         assert (vigente.nivel, vigente.motivo) == (1, "retirado")
         [aviso] = await a.avisos_ao_admin(cn, "selo_retirado")
         assert aviso.corpo["motivo"] == "nao_respondeu_consultas"
+
+
+# --- Conferencia final da etapa 3r (decisoes do coordenador e provas que faltavam) -----------------------------
+
+
+async def _bloquear_o_sistema(cn: a.Cena, operacoes: list[Any], em_conferencia: tuple[int, ...] = ()) -> uuid.UUID:
+    """Um bloqueio de alcance ``sistema`` (do ADMIN) e o comprovante dele, como a transacao do bloqueio os grava."""
+    ja = [{"protocolo": op.protocolo, "estado": "enviada"} for i, op in enumerate(operacoes) if i not in em_conferencia]
+    conferindo = [{"protocolo": operacoes[i].protocolo, "estado": "nao_confirmada"} for i in em_conferencia]
+    async with cn.dono.begin() as c:
+        bloqueio = (
+            await c.execute(
+                text(
+                    "INSERT INTO bloqueios (tipo, alcance, sistema_id, quem, motivo)"
+                    " VALUES ('bloqueio', 'sistema', :s, 'admin:teste', 'teste da consulta') RETURNING id"
+                ),
+                {"s": cn.sistema.id},
+            )
+        ).scalar_one()
+        await c.execute(
+            text(
+                "INSERT INTO comprovantes (bloqueio_id, ja_saidas, em_conferencia)"
+                " VALUES (:b, CAST(:j AS jsonb), CAST(:e AS jsonb))"
+            ),
+            {"b": bloqueio, "j": json.dumps(ja), "e": json.dumps(conferindo)},
+        )
+    return uuid.UUID(str(bloqueio))
+
+
+async def test_a_resposta_ao_aviso_depois_de_sistema_fora_nao_reabre_a_escada(banco_migrado: Parametros) -> None:
+    """Defeito 3 do verificador do G3ar (decisao do coordenador): com o sistema desativado, a consulta grava
+    ``sistema_fora`` e a escada para (critica A2). O sistema volta a ``ativo``, um bloqueio o avisa, e a resposta ao
+    aviso entra depois do ``sistema_fora``: a rota continua dizendo 409 ``nada_a_perguntar``, o duble nao e chamado de
+    novo, e a tela segue em "o sistema nao confirmou; a decisao e sua" (``Operacao.consulta_acabou``)."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        op = await _nao_confirmada(cn)  # o duble nunca viu o numero
+        await a.voltar_no_tempo(cn, [op.id])
+        async with cn.dono.begin() as c:
+            await c.execute(text("UPDATE sistemas SET situacao = 'desativado' WHERE id = :s"), {"s": cn.sistema.id})
+        perguntador = cn.perguntador()
+        assert (await perguntador.consultar(op.id)).desfecho == "sistema_fora"
+        async with cn.dono.begin() as c:
+            await c.execute(text("UPDATE sistemas SET situacao = 'ativo' WHERE id = :s"), {"s": cn.sistema.id})
+        await _bloquear_o_sistema(cn, [op], em_conferencia=(0,))
+        await perguntador.derivar_avisos()
+        assert await perguntador.avisar_bloqueios() == 1
+        linhas = [(x.origem, x.desfecho, x.estado) for x in await a.informacoes(cn, op.id)]
+        assert linhas == [("consulta", "sistema_fora", None), ("aviso", "respondeu", "nao_recebida")]
+        await a.voltar_no_tempo(cn, [op.id])
+        antes = cn.chamadas(contrato.FERRAMENTA_CONSULTAR)
+        with pytest.raises(NadaAPerguntar):
+            await perguntador.consultar(op.id)
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == antes
+        assert len(await a.informacoes(cn, op.id)) == 2
+        async with cn.dono.connect() as c:
+            lida = await fila.por_id(c, op.id)
+        assert lida is not None
+        assert lida.informado is not None
+        assert (lida.informado.origem, lida.informado.ultimo_desfecho) == ("aviso", "sistema_fora")
+        assert lida.consulta_acabou(8)
+
+
+async def test_o_recibo_no_meio_nao_interrompe_a_sequencia_da_retirada(banco_migrado: Parametros) -> None:
+    """Mutacao X9 do verificador do G3ar (o filtro ``origem = 'consulta'`` de ``recentes`` na conta da retirada). No
+    nivel 3 quase toda acao termina pelo recibo, sem consulta: duas escadas cheias sem resposta, uma acao confirmada so
+    pelo recibo ``concluida`` e a terceira que termina agora sem resposta retiram o selo. A acao do recibo nao entra
+    na conta (o selo nao e dela), e a sequencia segue."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=3, modo="consulta_muda") as cn:
+        primeiras = [await _escada_cheia(cn) for _ in range(2)]
+        await a.voltar_no_tempo(cn, primeiras, minutos=300)
+        async with cn.dono.begin() as c:
+            pelo_recibo = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+            await s.enviar(c, pelo_recibo.id, fim="enviada")
+            await s.informar(c, pelo_recibo.id, "concluida", origem="recibo")
+        await a.voltar_no_tempo(cn, [pelo_recibo.id], minutos=100)
+        terceira = await _escada_quase_cheia(cn)
+        await a.voltar_no_tempo(cn, [terceira])
+        assert (await cn.perguntador(prazo=0.5).consultar(terceira)).desfecho == "sem_resposta"
+        vigente = await a.selo_vigente(cn)
+        assert (vigente.nivel, vigente.motivo) == (1, "retirado")

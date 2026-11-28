@@ -30,10 +30,10 @@ de bloqueio sai de duas tarefas do proprio despachante. Regras comuns:
 Consulta (``Perguntador.consultar``): o despachante nao confia em quem chama (critica M7) e confere tudo pelo banco,
 com as funcoes do contrato (``proxima_consulta``, ``escada_vencida``, ``e_a_ultima_consulta``,
 ``resposta_que_encerra``): sem envio, 404; nada a perguntar (resposta que encerra, escada acabada no maximo ou pelo
-tempo, ``sistema_fora`` na ultima linha, outro protocolo com o mesmo numero, ainda nao e a vez, ou outra copia do
-despachante perguntando agora: critica M8), 409 ``nada_a_perguntar``; a porta fechada, 409 ``porta_fechada``. Uma
-``nao_recebida`` sozinha nao encerra (A3.3), e a resposta ao aviso de bloqueio nunca encerra (decisao 1 do
-coordenador no retoque da etapa 3). No fim da escada sem resposta que encerra, o extrato da pessoa ganha
+tempo, ``sistema_fora`` na ultima linha de consulta, outro protocolo com o mesmo numero, ainda nao e a vez, ou outra
+copia do despachante perguntando agora: critica M8), 409 ``nada_a_perguntar``; a porta fechada, 409
+``porta_fechada``. Uma ``nao_recebida`` sozinha nao encerra (A3.3), e a resposta ao aviso de bloqueio nunca encerra
+(decisao 1 do coordenador no retoque da etapa 3). No fim da escada sem resposta que encerra, o extrato da pessoa ganha
 ``sistema_nao_respondeu_consulta``; e, se as ultimas ``BADGE_LOOKUP_FAILS_TO_WITHDRAW`` operacoes do sistema que
 terminaram a escada depois do teste do selo de agora (e da ultima retirada) terminaram todas assim (sem resposta,
 resposta invalida ou ``desconhecido``, critica B8), o selo de agora e retirado (``nao_respondeu_consultas``), num
@@ -1269,11 +1269,12 @@ def terminou_sem_resposta(linhas: Sequence[contrato.LinhaInformada], maximo: int
     """Como a escada de uma operacao terminou, para a conta da retirada (critica B8): ``True`` sem resposta que
     encerra, com a ultima consulta sem resposta, invalida ou ``desconhecido``; ``False`` com resposta que encerra,
     ou com a escada acabada numa resposta do sistema (``em_andamento``, ``nao_recebida`` sozinha); ``None`` quando
-    nao conta: ainda na escada, parada por ``sistema_fora`` (o sistema nao foi perguntado) ou acabada pelo tempo sem o
+    nao conta: ainda na escada, parada por ``sistema_fora`` na ultima consulta (o sistema nao foi perguntado;
+    ``contrato.parou_por_sistema_fora``, mesmo com uma resposta ao aviso depois) ou acabada pelo tempo sem o
     maximo de tentativas que gastam (``contrato.escada_vencida``: o sistema nao foi perguntado o bastante)."""
     if contrato.resposta_que_encerra(linhas) is not None:
         return False
-    if linhas and linhas[-1].desfecho == "sistema_fora":
+    if contrato.parou_por_sistema_fora(linhas):
         return None
     if contrato.tentativas_da_consulta(linhas) < maximo:
         return None

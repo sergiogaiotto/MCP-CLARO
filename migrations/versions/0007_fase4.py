@@ -58,6 +58,7 @@ SET search_path = pg_catalog, public, pg_temp AS $$
                                         'desconhecido']
     WHEN 'estados_em_aberto' THEN ARRAY['em_andamento', 'desconhecido']
     WHEN 'estados_que_queimam' THEN ARRAY['nao_recebida', 'recusada', 'parada', 'desfeita']
+    WHEN 'estados_que_impedem_numero_novo' THEN ARRAY['concluida', 'parcial']
     WHEN 'eventos' THEN ARRAY['concluida', 'entregue', 'devolvida', 'desfeita', 'parada']
     WHEN 'origens' THEN ARRAY['recibo', 'consulta', 'aviso']
     WHEN 'desfechos' THEN ARRAY['respondeu', 'sem_resposta', 'resposta_invalida', 'sem_chave', 'sala_fora',
@@ -1830,7 +1831,11 @@ SQL_FICHAS = r"""
 -- cuja ultima resposta a consulta foi desconhecido e sobre cujo NUMERO o sistema nao deu resposta final: nenhuma acao
 -- que saiu com ele (a original, a primeira com o numero ou outro pedido igual que o copiou, pela cadeia de
 -- envios_selo.repete_operacao_id) tem selo_estado_final. Para o sistema, todas sao a mesma escrita, e um concluida
--- dito sobre o numero em outra acao ja diz que ela foi feita (defeito 2 do verificador do G4r, etapa 3r).
+-- dito sobre o numero em outra acao ja diz que ela foi feita (defeito 2 do verificador do G4r, etapa 3r). Pelo mesmo
+-- motivo, nenhuma resposta sobre o numero, de qualquer origem, diz que a escrita foi feita, inteira ou em parte
+-- (selo_vocabulario('estados_que_impedem_numero_novo'), concluida e parcial): a resposta ao aviso de bloqueio nao e
+-- final (nao encerra a escada nem queima o numero), mas impede o numero novo, que faria a escrita duas vezes (decisao
+-- do coordenador na conferencia final da etapa 3r).
 -- O banco nao conhece BADGE_LOOKUP_MAX_ATTEMPTS: a regra inteira, com a escada da original acabada (as tentativas,
 -- sistema_fora ou o tempo, contrato.escada_vencida), fica com o codigo (fila.confirmar_ficha e
 -- Operacao.original_ficou_em_desconhecido); esta guarda e a segunda barreira, com o que o banco sabe. O envio le a
@@ -1941,6 +1946,7 @@ BEGIN
     SELECT o.repete_operacao_id INTO repete FROM operacoes o WHERE o.id = NEW.operacao_id;
     -- O estado final conta pelo NUMERO da original: a cadeia de envios_selo.repete_operacao_id, como a contradicao
     -- (fila._SQL_OPERACAO): sobe ate o envio com o numero proprio e desce por todos os pedidos iguais que o copiaram.
+    -- Na mesma cadeia, uma resposta de qualquer origem que diga que a escrita foi feita tambem recusa.
     IF repete IS NULL
        OR EXISTS (
          WITH RECURSIVE acima (operacao_id, pai, passo) AS (
@@ -1954,11 +1960,15 @@ BEGIN
            SELECT x.operacao_id, n.passo + 1 FROM envios_selo x
            JOIN numero n ON x.repete_operacao_id = n.operacao_id WHERE n.passo < 100
          )
-         SELECT 1 FROM numero n WHERE selo_estado_final(n.operacao_id) IS NOT NULL)
+         SELECT 1 FROM numero n
+         WHERE selo_estado_final(n.operacao_id) IS NOT NULL
+            OR EXISTS (SELECT 1 FROM informacoes_sistema i
+                       WHERE i.operacao_id = n.operacao_id AND i.desfecho = 'respondeu'
+                         AND i.estado = ANY (selo_vocabulario('estados_que_impedem_numero_novo'))))
        OR (SELECT i.estado FROM informacoes_sistema i
            WHERE i.operacao_id = repete AND i.origem = 'consulta' AND i.desfecho = 'respondeu'
            ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) IS DISTINCT FROM 'desconhecido' THEN
-      RAISE EXCEPTION 'O numero novo so vale no pedido igual a uma acao sem resposta final sobre o numero dela, cuja ultima resposta a consulta foi desconhecido'
+      RAISE EXCEPTION 'O numero novo so vale no pedido igual a uma acao sem resposta final sobre o numero dela, cuja ultima resposta a consulta foi desconhecido, e sem resposta que diga que a escrita foi feita'
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;
@@ -2082,6 +2092,9 @@ GRANT SELECT ON medicoes.v_selos, medicoes.v_consultas_sistema TO grafana_leitor
 --   avisos_bloqueio: o aviso sai da transacao do bloqueio (critica A1);
 -- * operacoes.repete_operacao_id e fichas.selo: o INSERT da entrada e da tabela inteira (0005) e cobre as colunas
 --   novas, e ninguem tem UPDATE nelas;
+-- * fichas.numero_novo: o UPDATE dessa coluna, so para a entrada, esta no bloco FICHAS, junto da coluna (GRANT UPDATE
+--   (numero_novo) ON fichas TO mcp_claro_entrada); fichas_guarda o aceita so na confirmacao da ficha que espera, no
+--   pedido igual;
 -- * ferramentas_vistas.sumiu_em: o UPDATE de tabela inteira do despachante (0002) a cobre;
 -- * chaves_cifradas (a chave de teste): o despachante ja tem acesso inteiro (0002);
 -- * a identidade de informacoes_sistema nao pede GRANT de sequencia;

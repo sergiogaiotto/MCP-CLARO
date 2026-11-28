@@ -190,6 +190,15 @@ desfeito e a pessoa quer de novo (M4). ``nao_recebida`` so queima confirmada (``
 pelas respostas sobre o numero, critica A3.3): com uma so, o pedido igual sai com o mesmo numero, e o sistema
 honesto devolve o desfecho da primeira chamada, ou ``nao_recebida`` de novo."""
 
+ESTADOS_QUE_IMPEDEM_NUMERO_NOVO: Final[tuple[Estado, ...]] = ("concluida", "parcial")
+"""Com uma resposta destas sobre o numero da original, de QUALQUER origem (o aviso de bloqueio tambem), a ficha do
+pedido igual nao oferece o numero novo, e o banco o recusa (critica M4.2; decisao do coordenador na conferencia final
+da etapa 3r): o sistema disse que a escrita foi feita, inteira ou em parte, e o numero novo a faria duas vezes. A
+resposta ao aviso continua sem ser final (``ORIGENS_DA_RESPOSTA_FINAL``): ela nao encerra a escada nem queima o
+numero; so impede o numero novo, que e o lado arriscado. No banco,
+``selo_vocabulario('estados_que_impedem_numero_novo')``; sao os estados que contam como ``aconteceu`` e ``em_parte``
+(``CONTA_COMO``)."""
+
 EventoDepois = Literal["concluida", "entregue", "devolvida", "desfeita", "parada"]
 EVENTOS_DEPOIS: Final[tuple[EventoDepois, ...]] = ("concluida", "entregue", "devolvida", "desfeita", "parada")
 """Eventos de ``depois`` na consulta do nivel 3. Qualquer outro valor torna a resposta invalida."""
@@ -1452,10 +1461,12 @@ id)``:
   coisa, o banco ve a contradicao. So as respostas de origem ``recibo`` e ``consulta`` contam
   (``ORIGENS_DA_RESPOSTA_FINAL``): a resposta ao aviso de bloqueio nunca encerra a escada (decisao 1 do coordenador
   no retoque da etapa 3);
-- a escada tambem acaba quando a ultima linha e ``sistema_fora`` (critica A2: a escada para, e a decisao fica com a
-  pessoa), quando outro protocolo saiu com o mesmo numero depois (``selo_substituto``, lido pela rota no banco), no
-  maximo de tentativas que gastam e pelo tempo: nenhuma consulta vai depois de ``envios_selo.gravado_em`` mais
-  ``REAPROVEITAR_NUMERO_DIAS`` dias, a mesma janela do pedido igual (``escada_vencida``; decisao 3).
+- a escada tambem acaba quando a ultima linha de origem ``consulta`` e ``sistema_fora`` (critica A2: a escada para, e
+  a decisao fica com a pessoa; ``parou_por_sistema_fora``). Uma resposta ao aviso de bloqueio gravada depois nao a
+  reabre (decisao do coordenador na conferencia final da etapa 3r). Acaba ainda quando outro protocolo saiu com o
+  mesmo numero depois (``selo_substituto``, lido pela rota no banco), no maximo de tentativas que gastam e pelo
+  tempo: nenhuma consulta vai depois de ``envios_selo.gravado_em`` mais ``REAPROVEITAR_NUMERO_DIAS`` dias, a mesma
+  janela do pedido igual (``escada_vencida``; decisao 3).
 
 A mesma regra vale no banco, para a tela e o pedido igual: ``selo_estado_final`` (o que resolve o "estamos
 confirmando" e o que o botao "Registrar o que o sistema informou" registra) e ``medicoes.v_fila_agora`` contam como
@@ -1561,12 +1572,22 @@ def resposta_que_encerra(linhas: Sequence[LinhaInformada]) -> str | None:
     return valem[-1].estado if valem else None
 
 
+def parou_por_sistema_fora(linhas: Sequence[LinhaInformada]) -> bool:
+    """A ultima linha de origem ``consulta`` da operacao e ``sistema_fora``: a escada parou de vez (critica A2), e a
+    decisao fica com a pessoa. So a consulta grava ``sistema_fora``; a resposta ao aviso de bloqueio que chega depois
+    (o sistema voltou a ``ativo`` e foi avisado) nao reabre a escada (decisao do coordenador na conferencia final da
+    etapa 3r). ``linhas`` em ordem de ``(gravado_em, id)``."""
+    consultas = [x for x in linhas if x.origem == "consulta"]
+    return bool(consultas) and consultas[-1].desfecho == "sistema_fora"
+
+
 def proxima_consulta(
     linhas: Sequence[LinhaInformada], *, enviado_em: datetime, maximo: int, prazo_envio_segundos: float
 ) -> datetime | None:
     """Quando a proxima consulta sobre a operacao pode ir, ou ``None`` quando nao ha mais o que perguntar (resposta
-    final, ``sistema_fora`` na ultima linha, maximo de tentativas que gastam, ou a vez passaria do fim pelo tempo,
-    ``escada_vencida``). ``linhas`` em ordem de ``(gravado_em, id)``; ``maximo`` e ``BADGE_LOOKUP_MAX_ATTEMPTS``;
+    final, ``sistema_fora`` na ultima linha de consulta (``parou_por_sistema_fora``), maximo de tentativas que
+    gastam, ou a vez passaria do fim pelo tempo, ``escada_vencida``). ``linhas`` em ordem de ``(gravado_em, id)``;
+    ``maximo`` e ``BADGE_LOOKUP_MAX_ATTEMPTS``;
     ``prazo_envio_segundos`` e ``RESPONSE_MAX_WAIT_SECONDS``. Veja ``ESCADA_DA_CONSULTA_MINUTOS``. A rota (G3) recusa
     antes da hora (409) e as rotinas (G5) so pedem depois dela; quem pergunta confere tambem ``escada_vencida`` com o
     ``now()`` de agora (uma vez perdida por dias nao vai depois do fim).
@@ -1576,7 +1597,7 @@ def proxima_consulta(
     com o relogio monotonico."""
     if resposta_que_encerra(linhas) is not None:
         return None
-    if linhas and linhas[-1].desfecho == "sistema_fora":
+    if parou_por_sistema_fora(linhas):
         return None
     if espera_da_consulta(tentativas_da_consulta(linhas), maximo) is None:
         return None
@@ -1612,7 +1633,8 @@ linha de qualquer origem, degrau por todas as linhas de consulta, piso no prazo 
 - 404 ``{"motivo": "sem_envio"}``: a operacao nao existe ou nao saiu com numero;
 - 409 ``{"motivo": "nada_a_perguntar"}``: nada foi perguntado, porque ja tem resposta que encerra
   (``resposta_que_encerra``: uma ``nao_recebida`` sozinha ainda nao encerra, e a resposta ao aviso nunca encerra), a
-  escada acabou (no maximo de tentativas ou pelo tempo, ``escada_vencida``), a ultima linha e ``sistema_fora``, outro
+  escada acabou (no maximo de tentativas ou pelo tempo, ``escada_vencida``), a ultima linha de consulta e
+  ``sistema_fora`` (``parou_por_sistema_fora``), outro
   protocolo saiu com o mesmo numero depois (``selo_substituto``) ou ainda nao e a vez pela escada (chamar a rota em
   sequencia nao gasta as tentativas contra um sistema lento);
 - 409 ``{"motivo": "porta_fechada"}`` (decisao 2 do coordenador no retoque da etapa 3): era a vez, mas a porta de

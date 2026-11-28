@@ -66,6 +66,9 @@ def test_resposta_que_encerra_interrompe_e_sistema_fora_no_fim_nao_conta() -> No
     # O maximo baixou (BADGE_LOOKUP_MAX_ATTEMPTS e parametro): oito tentativas e depois sistema_fora.
     parada = [*[_linha(m) for m in range(8)], _linha(9, desfecho="sistema_fora")]
     assert consulta.terminou_sem_resposta(parada, 8) is None
+    # Conferencia final da etapa 3r: uma resposta ao aviso depois do sistema_fora nao devolve a operacao a conta.
+    for estado in ("desconhecido", "parada", "concluida"):
+        assert consulta.terminou_sem_resposta([*parada, _linha(10, "aviso", estado=estado)], 8) is None
     # A resposta ao aviso nao encerra: o "parada" do aviso no meio nao tira a operacao da conta (decisao 1).
     com_aviso = [_linha(0, "aviso", estado="parada"), *[_linha(1 + m) for m in range(8)]]
     assert consulta.terminou_sem_resposta(com_aviso, 8) is True
