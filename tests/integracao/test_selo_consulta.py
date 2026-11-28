@@ -7,12 +7,14 @@ Com o duble de verdade e o cortador (``tests/cortador.py``, so usado) entre o de
 - a vez e do banco: antes da hora, 409 e nada e perguntado; uma ``nao_recebida`` sozinha nao encerra (A3.3);
 - sem resposta: 8 tentativas, ``sistema_nao_respondeu_consulta`` no fim; com 3 operacoes seguidas assim (ou com
   ``desconhecido`` no fim, B8), o selo e retirado e o ADMIN e avisado; depois de um reteste, so contam as que
-  terminaram depois do teste novo, e as paradas em ``sistema_fora`` nunca contam;
+  terminaram depois do teste novo, e as paradas em ``sistema_fora`` nunca contam; a conta le as 50 que terminaram
+  mais perto de agora, e as que ainda estao na escada saem antes do limite;
 - respostas invalidas (instrucao no estado, resposta grande, outro numero) dao ``resposta_invalida``; o membro a mais
   e ignorado; nada do texto do sistema chega ao banco nem ao extrato;
 - chave apagada, ou recusada pelo sistema (401, a chave fica marcada vencida): ``sem_chave``, sem gastar tentativa
   nem contar contra o sistema (M7); erro JSON-RPC e evento fora da janela da hora sao ``resposta_invalida``;
-- fora de ``ativo`` ou com a porta fechada, nada e perguntado (``sistema_fora``, A2), e a escada para;
+- fora de ``ativo``, nada e perguntado (``sistema_fora``, A2), e a escada para; com a porta fechada, nada e
+  perguntado nem gravado (409 ``porta_fechada``, decisao 2 do coordenador), e a escada nao anda;
 - contradicao: o sistema que se contradiz perde o selo, e o extrato e o ADMIN ficam sabendo (depois de um reteste,
   o aviso ao ADMIN e do selo de agora);
 - duas copias do despachante ao mesmo tempo: uma pergunta so (M8).
@@ -36,8 +38,8 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.despachante import chaves
 from mcp_claro.ligacao.cliente import Resposta
 from mcp_claro.saida.despachante import ligacao_sem_sala
-from mcp_claro.selo import contrato
-from mcp_claro.selo.consulta import NadaAPerguntar, SemEnvio
+from mcp_claro.selo import consulta, contrato
+from mcp_claro.selo.consulta import NadaAPerguntar, PortaFechada, SemEnvio
 from tests import apoio_selo_g3a as a
 from tests import apoio_selos as s
 
@@ -356,34 +358,22 @@ async def test_resposta_com_outro_numero_e_invalida(banco_migrado: Parametros) -
         assert (await perguntador.consultar(op.id)).desfecho == "resposta_invalida"
 
 
-@pytest.mark.parametrize("fora", ["quarentena", "desativado", "porta_fechada"])
-async def test_fora_de_ativo_ou_porta_fechada_nada_e_perguntado(banco_migrado: Parametros, fora: str) -> None:
+@pytest.mark.parametrize("fora", ["quarentena", "desativado"])
+async def test_fora_de_ativo_nada_e_perguntado(banco_migrado: Parametros, fora: str) -> None:
+    """Critica A2: fora de ``ativo``, ``sistema_fora`` e a escada para. A porta fechada saiu daqui (decisao 2 do
+    coordenador, retoque da etapa 3): ela nao grava nada (``test_porta_fechada_nada_e_perguntado_nem_gravado``)."""
     async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
         async with cn.dono.begin() as c:
             op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
             await s.enviar(c, op.id)
-            if fora == "porta_fechada":
-                await c.execute(
-                    text(
-                        "UPDATE estado_saida SET aberta = false, motivo = 'teste', mudou_por = 'teste-g3a',"
-                        " mudou_em = now() WHERE id = 1"
-                    )
-                )
-            else:
-                await c.execute(
-                    text("UPDATE sistemas SET situacao = :f WHERE id = :s"), {"f": fora, "s": cn.sistema.id}
-                )
+            await c.execute(text("UPDATE sistemas SET situacao = :f WHERE id = :s"), {"f": fora, "s": cn.sistema.id})
         await a.voltar_no_tempo(cn, [op.id])
         perguntador = cn.perguntador()
         lido = await perguntador.consultar(op.id)
         assert (lido.desfecho, lido.estado) == ("sistema_fora", None)
         assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
         [linha] = [x for x in await a.extrato(cn, protocolo=op.protocolo) if x.tipo == "sistema_fora_consulta"]
-        esperado = {
-            "quarentena": "o sistema esta em quarentena",
-            "desativado": "o sistema nao esta ativo",
-            "porta_fechada": "a porta de saida esta fechada",
-        }[fora]
+        esperado = {"quarentena": "o sistema esta em quarentena", "desativado": "o sistema nao esta ativo"}[fora]
         assert esperado in linha.frase
         assert "a decisao fica com a pessoa" in linha.frase
         # A escada para: mesmo com o tempo passado, nada mais e perguntado.
@@ -547,10 +537,27 @@ async def test_depois_de_um_reteste_so_as_falhas_novas_contam(banco_migrado: Par
         assert len(await a.avisos_ao_admin(cn, "selo_retirado")) == 2
 
 
-async def test_contradicao_depois_do_reteste_avisa_o_admin_do_selo_de_agora(banco_migrado: Parametros) -> None:
+class Espia:
+    """Os contadores somados pela consulta (``selo.consulta.CONTADORES``), sem deixar de somar."""
+
+    def __init__(self, contadores: Any) -> None:
+        self.contadores = contadores
+        self.somados: list[tuple[str, dict[str, str]]] = []
+
+    def somar(self, nome: str, valor: int = 1, **rotulos: str) -> None:
+        self.somados.append((nome, rotulos))
+        self.contadores.somar(nome, valor, **rotulos)
+
+
+async def test_contradicao_depois_do_reteste_avisa_o_admin_do_selo_de_agora(
+    banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Duas operacoes do teste antigo com o recibo ``em_andamento``. A primeira se contradiz (o sistema diz que nao
     recebeu): o selo cai e o ADMIN e avisado. Vem um reteste aprovado. A segunda tambem se contradiz: o banco retira o
-    selo de agora, e o ADMIN e avisado dele (um aviso por teste retirado)."""
+    selo de agora, e o ADMIN e avisado dele (um aviso por teste retirado). O contador ``selo_retiradas`` soma uma vez
+    por teste retirado (D10 da conferencia da etapa 3): a segunda contradicao nao conta de novo o teste antigo."""
+    espia = Espia(consulta.CONTADORES)
+    monkeypatch.setattr(consulta, "CONTADORES", espia)
     async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
         ops = []
         async with cn.dono.begin() as c:
@@ -572,6 +579,7 @@ async def test_contradicao_depois_do_reteste_avisa_o_admin_do_selo_de_agora(banc
         avisos = await a.avisos_ao_admin(cn, "selo_retirado")
         assert len(avisos) == 2, "o ADMIN nao foi avisado da retirada do selo de agora"
         assert {x.corpo["motivo"] for x in avisos} == {"se_contradisse"}
+        assert [r for n, r in espia.somados if n == "selo_retiradas"] == [{"motivo": "se_contradisse"}] * 2
         async with cn.dono.connect() as c:
             retirados = (
                 await c.execute(
@@ -684,3 +692,305 @@ async def test_operacao_parada_em_sistema_fora_nao_conta_na_retirada(banco_migra
         assert (await cn.perguntador(prazo=0.5).consultar(terceira)).desfecho == "sem_resposta"
         assert (await a.selo_vigente(cn)).motivo == "vigente"
         assert await a.avisos_ao_admin(cn, "selo_retirado") == []
+
+
+# --- Retoque da etapa 3, G3ar (decisoes 1 a 3 do coordenador e provas que faltavam) ----------------------------
+
+
+async def _porta(cn: a.Cena, *, aberta: bool) -> None:
+    async with cn.dono.begin() as c:
+        if aberta:
+            await c.execute(text("UPDATE estado_saida SET aberta = true, motivo = NULL WHERE id = 1"))
+        else:
+            await c.execute(
+                text(
+                    "UPDATE estado_saida SET aberta = false, motivo = 'teste', mudou_por = 'teste-g3ar',"
+                    " mudou_em = now() WHERE id = 1"
+                )
+            )
+
+
+async def _nao_confirmada(cn: a.Cena) -> s.OperacaoDeTeste:
+    async with cn.dono.begin() as c:
+        op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+        await s.enviar(c, op.id)
+    return op
+
+
+async def test_porta_fechada_nada_e_perguntado_nem_gravado(banco_migrado: Parametros) -> None:
+    """Decisao 2 do coordenador: com a porta fechada, ``PortaFechada`` (409 ``porta_fechada``), nada perguntado e nada
+    gravado (nem ``informacoes_sistema`` nem extrato), quantas vezes for. A escada nao anda: aberta a porta, a consulta
+    vai na hora, sem esperar degrau nenhum. Antes, a consulta gravava ``sistema_fora`` e a escada parava para sempre
+    (D9 da conferencia da etapa 3)."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        op = await _nao_confirmada(cn)
+        await a.voltar_no_tempo(cn, [op.id])
+        antes = await a.extrato(cn, protocolo=op.protocolo)
+        await _porta(cn, aberta=False)
+        perguntador = cn.perguntador()
+        segredo, aberturas = perguntador._segredo, []
+
+        async def segredo_contado(*args: Any, **kw: Any) -> Any:
+            aberturas.append(1)
+            return await segredo(*args, **kw)
+
+        perguntador._segredo = segredo_contado  # type: ignore[method-assign]
+        for _ in range(3):
+            with pytest.raises(PortaFechada):
+                await perguntador.consultar(op.id)
+        assert aberturas == []  # com a porta fechada, nem a chave e aberta (nem renovada)
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
+        assert await a.informacoes(cn, op.id) == []
+        assert await a.extrato(cn, protocolo=op.protocolo) == antes
+        await _porta(cn, aberta=True)
+        lido = await perguntador.consultar(op.id)
+        assert (lido.desfecho, lido.estado) == ("respondeu", "nao_recebida")
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 1
+
+
+@pytest.mark.parametrize("mudanca", ["porta_fecha", "quarentena"])
+async def test_porta_ou_quarentena_enquanto_a_chave_abre_nada_e_perguntado(
+    banco_migrado: Parametros, mudanca: str
+) -> None:
+    """A chave pode demorar a abrir (a renovacao chama o servidor de autorizacao): a porta e a situacao do sistema sao
+    conferidas de novo antes de chamar. A porta que fecha nesse meio tempo nao grava nada; a quarentena grava
+    ``sistema_fora``. Nos dois, o duble conta zero consultas (critica A2)."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        op = await _nao_confirmada(cn)
+        await a.voltar_no_tempo(cn, [op.id])
+        perguntador = cn.perguntador()
+        segredo = perguntador._segredo
+
+        async def chave_que_demora(*args: Any, **kw: Any) -> Any:
+            if mudanca == "porta_fecha":
+                await _porta(cn, aberta=False)
+            else:
+                async with cn.dono.begin() as c:
+                    await c.execute(
+                        text("UPDATE sistemas SET situacao = 'quarentena' WHERE id = :s"), {"s": cn.sistema.id}
+                    )
+            return await segredo(*args, **kw)
+
+        perguntador._segredo = chave_que_demora  # type: ignore[method-assign]
+        if mudanca == "porta_fecha":
+            with pytest.raises(PortaFechada):
+                await perguntador.consultar(op.id)
+            assert await a.informacoes(cn, op.id) == []
+        else:
+            assert (await perguntador.consultar(op.id)).desfecho == "sistema_fora"
+            assert [(x.origem, x.desfecho) for x in await a.informacoes(cn, op.id)] == [("consulta", "sistema_fora")]
+            [linha] = [x for x in await a.extrato(cn, protocolo=op.protocolo) if x.tipo == "sistema_fora_consulta"]
+            assert "o sistema esta em quarentena" in linha.frase
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
+
+
+async def _ate_a_vez(cn: a.Cena, operacao_id: uuid.UUID, maximo: int = 8) -> float | None:
+    """Os minutos ate a vez da proxima consulta, pela mesma funcao do contrato e com o relogio do banco (um segundo a
+    mais, para ja ser a vez), ou ``None`` sem vez."""
+    async with cn.dono.connect() as c:
+        enviado_em, agora = (
+            await c.execute(
+                text("SELECT gravado_em, now() FROM envios_selo WHERE operacao_id = :o"), {"o": operacao_id}
+            )
+        ).one()
+        linhas = [
+            contrato.LinhaInformada(str(x.origem), str(x.desfecho), x.estado, x.gravado_em)
+            for x in await c.execute(
+                text(
+                    "SELECT origem, desfecho, estado, gravado_em FROM informacoes_sistema WHERE operacao_id = :o"
+                    " ORDER BY gravado_em, id"
+                ),
+                {"o": operacao_id},
+            )
+        ]
+    vez = contrato.proxima_consulta(linhas, enviado_em=enviado_em, maximo=maximo, prazo_envio_segundos=a.PRAZO_ENVIO)
+    return None if vez is None else max(0.0, (vez - agora).total_seconds() / 60) + 1 / 60
+
+
+async def test_sem_a_chave_poucas_linhas_por_dia_e_a_escada_acaba_pelo_tempo(banco_migrado: Parametros) -> None:
+    """Decisao 3 do coordenador e a sonda SONDA_SEM_CHAVE_CONSULTA do verificador (30 linhas em meia hora, sem fim):
+    com a chave da pessoa apagada, cada consulta grava ``sem_chave`` e o degrau sobe mesmo assim. Um minuto antes da
+    vez, 409. Em 7 dias pelo relogio do banco sao 48 perguntas (12 no primeiro dia e 6 por dia depois), uma linha
+    ``consulta_nao_feita`` so no extrato da pessoa, nenhuma chamada ao sistema, e a escada acaba pelo tempo
+    (``contrato.escada_vencida``), sem contar contra o selo."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        op = await _nao_confirmada(cn)
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        perguntador = cn.perguntador()
+        feitas = 0
+        while (minutos := await _ate_a_vez(cn, op.id)) is not None:
+            if feitas in (3, 9) and minutos > 2:
+                await a.voltar_no_tempo(cn, [op.id], minutos=minutos - 1)
+                with pytest.raises(NadaAPerguntar):  # ainda nao e a vez: o degrau subiu sem gastar tentativa
+                    await perguntador.consultar(op.id)
+                minutos = 1.0
+            await a.voltar_no_tempo(cn, [op.id], minutos=minutos)
+            lido = await perguntador.consultar(op.id)
+            assert (lido.desfecho, lido.estado) == ("sem_chave", None)
+            feitas += 1
+            assert feitas <= 48, "a escada sem a chave nao acaba"
+        assert feitas == 48
+        await a.voltar_no_tempo(cn, [op.id], minutos=300)
+        with pytest.raises(NadaAPerguntar):
+            await perguntador.consultar(op.id)
+        linhas = await a.informacoes(cn, op.id)
+        assert [(x.origem, x.desfecho) for x in linhas] == [("consulta", "sem_chave")] * 48
+        tipos = [x.tipo for x in await a.extrato(cn, protocolo=op.protocolo)]
+        assert tipos.count("consulta_nao_feita") == 1
+        assert "sistema_nao_respondeu_consulta" not in tipos
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
+        assert (await a.selo_vigente(cn)).motivo == "vigente"
+
+
+async def test_nada_e_perguntado_depois_do_fim_pelo_tempo(banco_migrado: Parametros) -> None:
+    """Decisao 3: nenhuma consulta depois de ``envios_selo.gravado_em`` mais ``REAPROVEITAR_NUMERO_DIAS`` dias, mesmo
+    que a vez pela escada tenha passado ha muito (as rotinas ficaram fora): a rota confere ``escada_vencida`` com o
+    ``now()`` de agora. Dez minutos antes do fim, a consulta ainda vai."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        dentro, fora = await _nao_confirmada(cn), await _nao_confirmada(cn)
+        await a.voltar_no_tempo(cn, [dentro.id], minutos=contrato.REAPROVEITAR_NUMERO_DIAS * 24 * 60 - 10)
+        await a.voltar_no_tempo(cn, [fora.id], minutos=contrato.REAPROVEITAR_NUMERO_DIAS * 24 * 60)
+        perguntador = cn.perguntador()
+        with pytest.raises(NadaAPerguntar):
+            await perguntador.consultar(fora.id)
+        assert await a.informacoes(cn, fora.id) == []
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
+        assert (await perguntador.consultar(dentro.id)).desfecho == "respondeu"
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 1
+
+
+async def test_linha_consulta_nao_feita_so_volta_com_outro_motivo(banco_migrado: Parametros) -> None:
+    """Decisao 3: a linha ``consulta_nao_feita`` so e gravada quando a ultima desse tipo da operacao nao tem o mesmo
+    motivo; ``informacoes_sistema`` continua com uma linha por pergunta."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        op = await _nao_confirmada(cn)
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        perguntador = cn.perguntador()
+        segredo = perguntador._segredo
+        trocas: list[str] = []
+
+        async def segredo_com_troca(*args: Any, **kw: Any) -> Any:
+            if trocas:
+                return None, None, trocas.pop()
+            return await segredo(*args, **kw)
+
+        perguntador._segredo = segredo_com_troca  # type: ignore[method-assign]
+        cofre = "o cofre de chaves esta trancado"
+        for troca in (None, None, cofre, cofre, None):
+            if troca is not None:
+                trocas.append(troca)
+            await a.voltar_no_tempo(cn, [op.id])
+            assert (await perguntador.consultar(op.id)).desfecho == "sem_chave"
+        frases = [x.frase for x in await a.extrato(cn, protocolo=op.protocolo) if x.tipo == "consulta_nao_feita"]
+        assert [("autorizou" in f, cofre in f) for f in frases] == [(True, False), (False, True), (True, False)]
+        assert len(await a.informacoes(cn, op.id)) == 5
+
+
+async def test_nivel_3_sem_depois_na_consulta_e_resposta_invalida(banco_migrado: Parametros) -> None:
+    """D7 da conferencia da etapa 3 (mutacao N3): a consulta confere a resposta pelo nivel do envio. No nivel 3, o
+    ``depois`` e exigido: o sistema que responde sem ele (``consulta_sem_depois``) da ``resposta_invalida``."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=3, modo="consulta_sem_depois") as cn:
+        op = await _nao_confirmada(cn)
+        assert (await a.envio(cn, op.id)).nivel == 3
+        await a.voltar_no_tempo(cn, [op.id])
+        lido = await cn.perguntador().consultar(op.id)
+        assert (lido.desfecho, lido.estado) == ("resposta_invalida", None)
+        assert [(x.origem, x.desfecho, x.estado) for x in await a.informacoes(cn, op.id)] == [
+            ("consulta", "resposta_invalida", None)
+        ]
+        assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 1
+
+
+async def _na_escada(cn: a.Cena, quantas: int) -> list[uuid.UUID]:
+    """Operacoes "nao confirmadas" com envio e UMA consulta sem resposta: ainda na escada."""
+    ops: list[uuid.UUID] = []
+    async with cn.dono.begin() as c:
+        for _ in range(quantas):
+            op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+            await s.enviar(c, op.id)
+            await s.informar(c, op.id, None, desfecho="sem_resposta")
+            ops.append(op.id)
+    return ops
+
+
+async def test_operacoes_ainda_na_escada_nao_contam_contra_o_selo(banco_migrado: Parametros) -> None:
+    """D2 (a) da conferencia da etapa 3: duas operacoes ainda na escada (uma consulta sem resposta cada) e a terceira
+    termina agora sem resposta: uma so terminou assim, e o selo fica. E a prova de ponta a ponta, pelas duas camadas:
+    as que ainda estao na escada saem no SQL (``_SQL_DA_RETIRADA``) e, se chegassem, ``terminou_sem_resposta`` daria
+    ``None``. Este teste so falha quando as duas camadas falham juntas. Com o filtro do SQL, elas nunca chegam a
+    ``terminou_sem_resposta``, entao ele NAO mata a mutacao N2 (``True`` na escada) sozinha: quem a mata e o teste
+    de unidade ``test_selo_consulta_g3ar::test_operacao_ainda_na_escada_nao_conta_na_retirada``. O SQL sem o
+    filtro, sozinho, morre por ``test_cinquenta_operacoes_na_escada_nao_seguram_a_retirada``."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=2, modo="consulta_muda") as cn:
+        na_escada = await _na_escada(cn, 2)
+        await a.voltar_no_tempo(cn, na_escada, minutos=100)
+        terceira = await _escada_quase_cheia(cn)
+        await a.voltar_no_tempo(cn, [terceira])
+        assert (await cn.perguntador(prazo=0.5).consultar(terceira)).desfecho == "sem_resposta"
+        assert (await a.selo_vigente(cn)).motivo == "vigente"
+        assert await a.avisos_ao_admin(cn, "selo_retirado") == []
+
+
+async def test_as_que_nao_contam_sao_puladas_e_a_sequencia_segue(banco_migrado: Parametros) -> None:
+    """D2 (b) da conferencia da etapa 3 (mutacao N1): duas terminaram sem resposta; depois delas, uma ainda na escada
+    e uma que chegou ao maximo e parou em ``sistema_fora`` (o maximo, um parametro, pode ter baixado). A terceira
+    termina agora sem resposta: as duas do meio nao contam e sao puladas, sao tres seguidas, e o selo cai."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=2, modo="consulta_muda") as cn:
+        primeiras = [await _escada_cheia(cn) for _ in range(2)]
+        await a.voltar_no_tempo(cn, primeiras, minutos=600)
+        [na_escada] = await _na_escada(cn, 1)
+        parada = await _escada_cheia(cn)
+        async with cn.dono.begin() as c:
+            await s.informar(c, parada, None, desfecho="sistema_fora")
+        await a.voltar_no_tempo(cn, [na_escada, parada], minutos=100)
+        terceira = await _escada_quase_cheia(cn)
+        await a.voltar_no_tempo(cn, [terceira])
+        assert (await cn.perguntador(prazo=0.5).consultar(terceira)).desfecho == "sem_resposta"
+        vigente = await a.selo_vigente(cn)
+        assert (vigente.nivel, vigente.motivo) == (1, "retirado")
+        [aviso] = await a.avisos_ao_admin(cn, "selo_retirado")
+        assert aviso.corpo["motivo"] == "nao_respondeu_consultas"
+
+
+async def test_cinquenta_operacoes_na_escada_nao_seguram_a_retirada(banco_migrado: Parametros) -> None:
+    """D4 da conferencia da etapa 3 (a sonda SONDA_JANELA: com 50 operacoes ainda na escada, consultadas depois do fim
+    das duas primeiras, o selo ficava): as que ainda estao na escada saem no SQL, antes do limite de operacoes lidas, e
+    tres seguidas sem resposta derrubam o selo."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=2, modo="consulta_muda") as cn:
+        primeiras = [await _escada_cheia(cn) for _ in range(2)]
+        terceira = await _escada_quase_cheia(cn)
+        await a.voltar_no_tempo(cn, [*primeiras, terceira])
+        outras = await _na_escada(cn, consulta.OPERACOES_NA_CONTA_DA_RETIRADA)
+        await a.voltar_no_tempo(cn, outras, minutos=100)
+        assert (await cn.perguntador(prazo=0.5).consultar(terceira)).desfecho == "sem_resposta"
+        vigente = await a.selo_vigente(cn)
+        assert (vigente.nivel, vigente.motivo) == (1, "retirado")
+
+
+async def test_com_mais_de_cinquenta_terminadas_a_conta_le_as_mais_recentes(banco_migrado: Parametros) -> None:
+    """A conta da retirada le as ``OPERACOES_NA_CONTA_DA_RETIRADA`` (50) que terminaram mais perto de agora (``ORDER
+    BY r.ultima DESC`` antes do ``LIMIT``, sonda SONDA_MAIS_DE_50 do verificador da etapa 3r). Ha 50 que terminaram
+    ha mais tempo com resposta que encerra e, depois delas, tres seguidas sem resposta (a terceira agora, pela
+    consulta de verdade): sao 53 terminadas, e as 50 mais recentes comecam pelas tres falhas, entao o selo cai. Lendo
+    as 50 mais antigas (mutacao V4a), so as respostas que encerram entrariam, e as tres falhas de agora nunca
+    derrubariam o selo."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=2, modo="consulta_muda") as cn:
+        antigas: list[uuid.UUID] = []
+        async with cn.dono.begin() as c:
+            for _ in range(consulta.OPERACOES_NA_CONTA_DA_RETIRADA):
+                op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+                await s.enviar(c, op.id)
+                await s.informar(c, op.id, "concluida")
+                antigas.append(op.id)
+        await a.voltar_no_tempo(cn, antigas, minutos=900)  # ainda depois do teste do selo (um dia atras)
+        primeiras = [await _escada_cheia(cn) for _ in range(2)]
+        await a.voltar_no_tempo(cn, primeiras, minutos=300)
+        terceira = await _escada_quase_cheia(cn)
+        await a.voltar_no_tempo(cn, [terceira])
+        assert (await cn.perguntador(prazo=0.5).consultar(terceira)).desfecho == "sem_resposta"
+        vigente = await a.selo_vigente(cn)
+        assert (vigente.nivel, vigente.motivo) == (1, "retirado")
+        [aviso] = await a.avisos_ao_admin(cn, "selo_retirado")
+        assert aviso.corpo["motivo"] == "nao_respondeu_consultas"

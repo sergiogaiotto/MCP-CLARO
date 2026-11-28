@@ -29,10 +29,18 @@ Fase 4 (selos de nivel 2 e 3):
   retrato de agora e gravado, em vez de falhar o pedido (A1);
 - o pedido igual a uma "nao confirmada" que saiu com numero leva ``repete_operacao_id`` (D16): o banco decide, no
   envio, se o numero e o mesmo (``envios_selo_nasce``). Um numero cujo desfecho ja se sabe (uma acao com ele
-  ``enviada`` ou com a decisao ``aconteceu``) nao e repetido (``original_que_repete``);
-- "Registrar o que o sistema informou" (``registrar_o_que_o_sistema_informou``) reusa ``decidir_nao_confirmada``; a
+  ``enviada`` ou com a decisao ``aconteceu``) nao e repetido (``original_que_repete``). Quando a original terminou a
+  consulta em ``desconhecido`` e nenhuma acao com o numero dela tem estado final
+  (``Operacao.original_ficou_em_desconhecido``), a pessoa pode escolher na ficha o numero novo
+  (``confirmar_ficha(..., numero_novo=True)``, ``fichas.numero_novo``, critica M4.2); sem a escolha, vale o mesmo
+  numero;
+- "Registrar o que o sistema informou" (``registrar_o_que_o_sistema_informou``) reusa ``decidir_nao_confirmada`` e
+  so grava o estado final que a pessoa viu (``estado_visto``), de um sistema que nao se contradisse sobre o numero; a
   pessoa que registra o contrario do que o sistema informou gera ``sistema_contradito`` e aviso ao ADMIN, e o selo
   fica (D19);
+- a resposta ao aviso de bloqueio (origem ``aviso``) aparece em ``Operacao.informado`` como o que o sistema disse,
+  mas nunca e final: nao resolve o "estamos confirmando" nem queima o numero (decisao 1 do coordenador, retoque da
+  etapa 3: ``selo_estado_final`` e ``envios_selo_nasce`` so contam recibo e consulta);
 - o comprovante do bloqueio junta, na leitura, o que os sistemas informaram (``Comprovante.informado``). O bloqueio
   em si e o da Fase 2: os avisos de bloqueio sao derivados depois, pelo despachante (critica A1).
 """
@@ -117,7 +125,13 @@ class InformadoDoSistema:
     - ``de_terceiro``: o que um servidor de terceiros informou (critica M9);
     - ``tentativas``: as consultas que gastaram a vez (origem ``consulta``, ``contrato.DESFECHOS_QUE_GASTAM_TENTATIVA``)
       e ``ultimo_desfecho``, o desfecho da ultima linha de qualquer origem. Com eles, ``Operacao.consulta_acabou`` diz
-      se a escada acabou sem resposta que encerra ("o sistema nao confirmou; a decisao e sua")."""
+      se a escada acabou sem resposta que encerra ("o sistema nao confirmou; a decisao e sua");
+    - ``se_contradisse``: alguma resposta sobre o NUMERO desta acao (as dela e as de toda acao que saiu com o mesmo
+      numero, original ou pedido igual) tem ``informacoes_sistema.contradiz``: o sistema deu respostas que nao combinam
+      (e o banco retirou o selo). O botao de um toque nao registra o que ele disse (decisao 6 do coordenador).
+
+    A ultima resposta pode ser a do aviso de bloqueio (origem ``aviso``): aparece em ``estado``, como o que o sistema
+    disse, mas nunca em ``estado_final`` (decisao 1 do coordenador, retoque da etapa 3)."""
 
     estado: str | None
     desfecho: str
@@ -127,9 +141,43 @@ class InformadoDoSistema:
     estado_final: str | None
     tentativas: int = 0
     ultimo_desfecho: str | None = None
+    se_contradisse: bool = False
 
 
 _INFORMADO: Final[type[contrato.Informado]] = InformadoDoSistema  # o mypy confere o contrato
+
+
+@dataclass(frozen=True, slots=True)
+class EscadaDaOriginal:
+    """A escada da consulta da "nao confirmada" que este pedido igual repete (``operacoes.repete_operacao_id``), lida
+    na mesma linha da operacao (critica M4.2): o envio dela, o estado final do NUMERO dela, o estado da ultima resposta
+    de origem ``consulta`` (``respondeu``) dela, as tentativas que gastaram a vez e o desfecho da ultima linha de
+    qualquer origem. So as categorias do contrato, nunca o numero.
+
+    ``estado_final_do_numero`` e um estado final do banco (``selo_estado_final``) de alguma acao que saiu com o numero
+    da original: ela mesma, a primeira acao com esse numero ou outro pedido igual que o copiou (a cadeia de
+    ``envios_selo.repete_operacao_id``, a mesma da contradicao, ``InformadoDoSistema.se_contradisse``). Para o sistema,
+    todas sao a mesma escrita: um ``concluida`` sobre o numero em outra acao ja diz que ela foi feita, e o numero novo
+    faria a escrita duas vezes (defeito 2 do verificador do G4r, etapa 3r). Com mais de um, vale o da acao mais perto
+    da primeira com o numero."""
+
+    enviado_em: datetime
+    estado_final_do_numero: str | None
+    ultima_consulta: str | None
+    tentativas: int
+    ultimo_desfecho: str | None
+
+
+def _escada_acabou(
+    *, tentativas: int, ultimo_desfecho: str | None, enviado_em: datetime, agora: datetime | None, maximo: int
+) -> bool:
+    """A escada da consulta acabou sem resposta que encerra, por uma das regras que nao dependem do estado final: as
+    tentativas chegaram a ``maximo`` (``BADGE_LOOKUP_MAX_ATTEMPTS``), a ultima linha e ``sistema_fora`` ou passou o
+    tempo (``contrato.escada_vencida``, com ``agora``, o ``now()`` do banco lido na mesma linha; decisao 3 do
+    coordenador, retoque da etapa 3)."""
+    if agora is not None and contrato.escada_vencida(enviado_em, agora):
+        return True
+    return ultimo_desfecho == "sistema_fora" or tentativas >= maximo
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,10 +230,24 @@ class Operacao:
     substituto: str | None = None
     """Um protocolo que saiu depois ao sistema com o numero desta acao (``selo_substituto``, do banco, critica M4): o
     fim da cadeia de pedidos iguais que copiaram o numero (o passo mais longo). O que o sistema informar aparece nele,
-    esta acao para de ser consultada e o botao de um toque fica desligado aqui. Dois pedidos iguais que repetem esta
-    mesma acao (no mesmo passo) so acontecem se o primeiro nao chegou ao fim (por exemplo, ``nao_saiu``): o numero de
-    uma acao cujo pedido igual foi ``enviada`` nao e mais repetido (``original_que_repete``). Nesse caso raro, o banco
-    escolhe entre os dois pelo id, nao pelo mais novo."""
+    esta acao para de ser consultada e o botao de um toque fica desligado aqui.
+
+    So contam os pedidos iguais cuja chamada pode ter chegado ao sistema: a fila em ``enviando``, ``enviada`` ou
+    ``nao_confirmada`` (decisao 5 do coordenador, retoque da etapa 3). Um pedido igual que terminou ``nao_saiu`` ou
+    ``sistema_pediu_dados`` nao substitui esta acao: ela segue na escada da consulta, e o pedido igual seguinte a
+    repete de novo (``original_que_repete`` so escolhe uma ``nao_confirmada``). Assim, dois pedidos iguais no mesmo
+    passo so existem quando o primeiro nao chegou ao sistema, e ele nao conta; se ainda houver dois que contam, vale o
+    envio mais novo (``envios_selo.gravado_em``)."""
+    envio_gravado_em: datetime | None = None
+    """A hora do envio com numero (``envios_selo.gravado_em``, do banco); None sem numero."""
+    lido_em: datetime | None = None
+    """O ``now()`` do banco na leitura desta linha (o mesmo SELECT): a hora que ``contrato.escada_vencida`` compara
+    com o envio. Nunca o relogio do processo."""
+    ficha_numero_novo: bool = False
+    """A pessoa escolheu na ficha o numero novo para este pedido igual (``fichas.numero_novo``, critica M4.2)."""
+    original: EscadaDaOriginal | None = None
+    """A escada da consulta da original que este pedido igual repete (``repete_operacao_id``), se ela saiu com numero;
+    None nos outros casos. Veja ``original_ficou_em_desconhecido``."""
 
     @property
     def nivel_do_selo(self) -> int | None:
@@ -199,18 +261,56 @@ class Operacao:
         nivel = (self.selo or {}).get("nivel")
         return nivel if type(nivel) is int and nivel in (1, 2, 3) else None
 
+    @property
+    def escada_vencida(self) -> bool:
+        """A escada da consulta acabou pelo tempo (``contrato.escada_vencida``): a acao saiu com numero ha
+        ``contrato.REAPROVEITAR_NUMERO_DIAS`` dias ou mais, pela hora do banco (``lido_em``). Decisao 3 do
+        coordenador, retoque da etapa 3."""
+        return (
+            self.envio_gravado_em is not None
+            and self.lido_em is not None
+            and contrato.escada_vencida(self.envio_gravado_em, self.lido_em)
+        )
+
     def consulta_acabou(self, maximo: int) -> bool:
         """A escada da consulta acabou sem resposta que encerra (``contrato.ESCADA_DA_CONSULTA_MINUTOS``): a acao
         saiu com numero, o sistema nao deu estado final e ou as tentativas chegaram a ``maximo``
         (``BADGE_LOOKUP_MAX_ATTEMPTS``), ou a ultima linha e ``sistema_fora``, ou outro protocolo saiu depois com o
-        mesmo numero (``substituto``). A tela diz "o sistema nao confirmou; a decisao e sua"."""
+        mesmo numero (``substituto``), ou passou o tempo da escada (``escada_vencida``, mesmo sem nenhuma linha: as
+        linhas que nao gastam tentativa nao a fazem rodar sem fim, decisao 3 do coordenador). A tela e o texto ao
+        aplicativo dizem "o sistema nao confirmou; a decisao e sua"."""
         if self.envio_nivel is None or (self.informado is not None and self.informado.estado_final is not None):
             return False
-        if self.substituto is not None:
+        if self.substituto is not None or self.escada_vencida:
             return True
         if self.informado is None:
             return False
         return self.informado.ultimo_desfecho == "sistema_fora" or self.informado.tentativas >= maximo
+
+    def original_ficou_em_desconhecido(self, maximo: int) -> bool:
+        """Este pedido igual repete uma "nao confirmada" (``repete_protocolo``) que saiu com numero e terminou a escada
+        da consulta sem resposta final, com a ultima resposta a consulta ``desconhecido`` (critica M4.2, decisao 4 do
+        coordenador). A escada acabou pelas mesmas regras de ``consulta_acabou``: as tentativas (``maximo``,
+        ``BADGE_LOOKUP_MAX_ATTEMPTS``), ``sistema_fora`` na ultima linha ou o tempo (``contrato.escada_vencida``).
+        "Sem resposta final" vale pelo NUMERO da original, nao so por ela: nenhuma acao que saiu com esse numero tem
+        estado final (``EscadaDaOriginal.estado_final_do_numero``).
+
+        So assim a ficha mostra o aviso e a escolha "mandar com numero novo" ("o sistema nao sabe se o primeiro foi
+        feito; com numero novo, pode fazer duas vezes"), e ``confirmar_ficha(..., numero_novo=True)`` a aceita. O banco
+        confere a parte que sabe (``fichas_guarda``: nenhum estado final sobre o numero e a ultima resposta a consulta
+        ``desconhecido``)."""
+        o = self.original
+        if self.repete_protocolo is None or o is None or o.estado_final_do_numero is not None:
+            return False
+        if o.ultima_consulta != "desconhecido":
+            return False
+        return _escada_acabou(
+            tentativas=o.tentativas,
+            ultimo_desfecho=o.ultimo_desfecho,
+            enviado_em=o.enviado_em,
+            agora=self.lido_em,
+            maximo=maximo,
+        )
 
     @property
     def de_estranhos(self) -> bool:
@@ -245,7 +345,11 @@ class Operacao:
 # Fase 4: o envio com numero (so as colunas que a entrada e as rotinas leem: nunca envios_selo.chave, critica M10), a
 # ultima informacao do sistema, o estado final do banco e o protocolo que saiu depois com o mesmo numero. Sem envio,
 # nada disso e lido (as subconsultas param no primeiro teste). As tentativas contam como
-# contrato.tentativas_da_consulta.
+# contrato.tentativas_da_consulta. now() e a hora do banco na leitura (contrato.escada_vencida). A contradicao conta
+# pelo numero, pela cadeia de envios_selo.repete_operacao_id (a mesma de original_que_repete): sobe ate o envio com o
+# numero proprio e desce por todos os pedidos iguais que o copiaram. A escada da original (ori) so existe no pedido
+# igual cuja original saiu com numero; o estado final dela conta pelo numero, pela mesma cadeia, a partir do envio da
+# original (o numero que o pedido igual levaria).
 _SQL_OPERACAO = """
 SELECT o.id, o.protocolo, o.codigo_conferencia, o.pessoa_id, o.aplicativo_id, o.ordem_id, o.ferramenta_id,
        o.sistema_id, o.argumentos, o.aplicativo_diz, o.resultado, o.desfecho, o.criada_em,
@@ -253,10 +357,15 @@ SELECT o.id, o.protocolo, o.codigo_conferencia, o.pessoa_id, o.aplicativo_id, o.
        r.nome_vitrine, s.nome AS sistema_nome, d.decisao AS decisao_pessoa,
        fi.expira_em AS ficha_expira_em, fi.exige_passkey AS ficha_exige_passkey, fi.risco AS ficha_risco,
        fi.decisao AS ficha_decisao, s.origem AS sistema_origem, r.texto_de_fora, fi.sinais AS ficha_sinais,
-       fi.selo AS ficha_selo, e.nivel AS envio_nivel, ro.protocolo AS repete_protocolo,
+       fi.selo AS ficha_selo, fi.numero_novo AS ficha_numero_novo, e.nivel AS envio_nivel,
+       e.gravado_em AS envio_gravado_em, now() AS lido_em, ro.protocolo AS repete_protocolo,
        me.protocolo AS mesmo_numero_de, inf.origem AS inf_origem, inf.desfecho AS inf_desfecho,
        inf.estado AS inf_estado, inf.gravado_em AS inf_gravado_em, ult.desfecho AS inf_ultimo_desfecho,
-       ult.tentativas AS inf_tentativas, ult.estado_final AS inf_estado_final, sub.protocolo AS substituto
+       ult.tentativas AS inf_tentativas, ult.estado_final AS inf_estado_final, num.se_contradisse AS inf_se_contradisse,
+       sub.protocolo AS substituto, ori.enviado_em AS ori_enviado_em,
+       ori.estado_final_do_numero AS ori_estado_final_do_numero,
+       ori.ultima_consulta AS ori_ultima_consulta, ori.tentativas AS ori_tentativas,
+       ori.ultimo_desfecho AS ori_ultimo_desfecho
 FROM operacoes o
 JOIN fila_saida f ON f.operacao_id = o.id
 JOIN ferramentas_revisadas r ON r.id = o.ferramenta_id
@@ -280,8 +389,47 @@ LEFT JOIN LATERAL (
   WHERE e.operacao_id IS NOT NULL
 ) ult ON true
 LEFT JOIN LATERAL (
+  WITH RECURSIVE acima (operacao_id, repete, passo) AS (
+    SELECT e.operacao_id, e.repete_operacao_id, 0
+    UNION ALL
+    SELECT x.operacao_id, x.repete_operacao_id, a.passo + 1 FROM envios_selo x
+    JOIN acima a ON x.operacao_id = a.repete WHERE a.passo < 100
+  ), numero (operacao_id, passo) AS (
+    SELECT a.operacao_id, 0 FROM acima a WHERE a.repete IS NULL
+    UNION ALL
+    SELECT x.operacao_id, n.passo + 1 FROM envios_selo x
+    JOIN numero n ON x.repete_operacao_id = n.operacao_id WHERE n.passo < 100
+  )
+  SELECT EXISTS (SELECT 1 FROM numero n JOIN informacoes_sistema i ON i.operacao_id = n.operacao_id
+                 WHERE i.contradiz) AS se_contradisse
+  WHERE e.operacao_id IS NOT NULL
+) num ON true
+LEFT JOIN LATERAL (
   SELECT x.protocolo FROM operacoes x WHERE e.operacao_id IS NOT NULL AND x.id = selo_substituto(o.id)
 ) sub ON true
+LEFT JOIN LATERAL (
+  WITH RECURSIVE acima (operacao_id, repete, passo) AS (
+    SELECT x.operacao_id, x.repete_operacao_id, 0 FROM envios_selo x WHERE x.operacao_id = o.repete_operacao_id
+    UNION ALL
+    SELECT x.operacao_id, x.repete_operacao_id, a.passo + 1 FROM envios_selo x
+    JOIN acima a ON x.operacao_id = a.repete WHERE a.passo < 100
+  ), numero (operacao_id, passo) AS (
+    SELECT a.operacao_id, 0 FROM acima a WHERE a.repete IS NULL
+    UNION ALL
+    SELECT x.operacao_id, n.passo + 1 FROM envios_selo x
+    JOIN numero n ON x.repete_operacao_id = n.operacao_id WHERE n.passo < 100
+  )
+  SELECT eo.gravado_em AS enviado_em,
+         (SELECT fim.estado FROM numero n CROSS JOIN LATERAL (SELECT selo_estado_final(n.operacao_id) AS estado) fim
+          WHERE fim.estado IS NOT NULL ORDER BY n.passo, n.operacao_id LIMIT 1) AS estado_final_do_numero,
+         (SELECT i.estado FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id AND i.origem = 'consulta'
+            AND i.desfecho = 'respondeu' ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS ultima_consulta,
+         (SELECT count(*) FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id AND i.origem = 'consulta'
+            AND i.desfecho = ANY (selo_vocabulario('desfechos_que_gastam_tentativa'))) AS tentativas,
+         (SELECT i.desfecho FROM informacoes_sistema i WHERE i.operacao_id = eo.operacao_id
+          ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) AS ultimo_desfecho
+  FROM envios_selo eo WHERE eo.operacao_id = o.repete_operacao_id
+) ori ON true
 """
 
 
@@ -337,6 +485,22 @@ def _operacao(linha: Row[Any]) -> Operacao:
         repete_protocolo=linha.repete_protocolo,
         mesmo_numero_de=linha.mesmo_numero_de,
         substituto=linha.substituto,
+        envio_gravado_em=linha.envio_gravado_em,
+        lido_em=linha.lido_em,
+        ficha_numero_novo=linha.ficha_numero_novo is True,
+        original=_original(linha),
+    )
+
+
+def _original(linha: Row[Any]) -> EscadaDaOriginal | None:
+    if linha.ori_enviado_em is None:
+        return None
+    return EscadaDaOriginal(
+        enviado_em=linha.ori_enviado_em,
+        estado_final_do_numero=linha.ori_estado_final_do_numero,
+        ultima_consulta=linha.ori_ultima_consulta,
+        tentativas=int(linha.ori_tentativas or 0),
+        ultimo_desfecho=linha.ori_ultimo_desfecho,
     )
 
 
@@ -352,6 +516,7 @@ def _informado(linha: Row[Any]) -> InformadoDoSistema | None:
         estado_final=linha.inf_estado_final,
         tentativas=int(linha.inf_tentativas or 0),
         ultimo_desfecho=linha.inf_ultimo_desfecho,
+        se_contradisse=linha.inf_se_contradisse is True,
     )
 
 
@@ -450,7 +615,12 @@ async def original_que_repete(
     ``aconteceu`` da pessoa, o sistema ja recebeu a escrita desse numero e respondeu. Um pedido igual que chega
     depois, fora da janela do pedido igual, e um pedido novo: com o mesmo numero, um sistema honesto responderia "ja
     feito" e nao faria. Por isso ele sai com numero novo. Sem isso, a mesma original ganharia dois pedidos iguais com
-    o numero dela, e ``selo_substituto`` escolheria entre eles pelo id.
+    o numero dela que chegaram ao sistema.
+
+    So uma ``nao_confirmada`` e escolhida: um pedido igual R que terminou ``nao_saiu`` ou ``sistema_pediu_dados`` e mais
+    novo que a original O, mas nao e repetido (o banco recusaria, ``operacoes_repete_confere``, e a operacao nova
+    sairia com numero novo com o desfecho de O ainda desconhecido). O pedido igual seguinte repete O e leva o numero
+    dela, e R nao substitui O (``selo_substituto``, decisao 5 do coordenador).
 
     So e chamada quando ``pedido_igual`` nao devolveu nada: a resposta do sistema nao muda quem conta como repeticao."""
     valor = (
@@ -954,6 +1124,8 @@ async def confirmar_ficha(
     rapida_segundos: int,
     login_refeito: bool = False,
     passkey_ligada: bool = True,
+    numero_novo: bool = False,
+    maximo_consultas: int | None = None,
 ) -> Operacao:
     """Confirma a ficha e libera a acao com a espera visivel. A ficha vale uma vez, so para esta operacao.
 
@@ -961,7 +1133,18 @@ async def confirmar_ficha(
     ela. Com a passkey desligada (inclusive a ficha montada antes, quando pedia passkey), a acao de risco alto
     confirma com a passkey ou com o login refeito (``login_refeito``). O banco guarda como foi
     (``confirmada_com``) e recusa a ficha de risco alto confirmada so com a sessao.
+
+    Fase 4, critica M4.2 (decisao 4 do coordenador): ``numero_novo`` e a escolha explicita da pessoa, na ficha do pedido
+    igual, de mandar com numero novo, gravada em ``fichas.numero_novo`` na mesma transacao (o mesmo UPDATE da
+    decisao). Vale so quando a original terminou a escada da consulta em ``desconhecido``
+    (``Operacao.original_ficou_em_desconhecido``, com ``maximo_consultas``, o ``BADGE_LOOKUP_MAX_ATTEMPTS``, que e
+    obrigatorio com ``numero_novo``). Fora disso, ``DecisaoRecusada("numero_novo_nao_cabe")`` e nada muda (a pessoa ve
+    a ficha de novo); o banco confere de novo o que sabe (``fichas_guarda``) e, se recusar (uma resposta chegou entre a
+    leitura e o UPDATE), e a mesma recusa. Sem a escolha, o envio leva o mesmo numero da original (o lado seguro), e o
+    banco decide no envio (``envios_selo_nasce``). Com ela, o extrato da confirmacao leva ``dados.numero_novo``.
     """
+    if numero_novo and maximo_consultas is None:
+        raise ValueError("numero_novo pede maximo_consultas (BADGE_LOOKUP_MAX_ATTEMPTS)")
     f = await _ficha_travada(c, ficha_id, pessoa_id)
     if f.exige_passkey and passkey_ligada:
         if not com_passkey:
@@ -974,6 +1157,10 @@ async def confirmar_ficha(
     confirmada_com = "passkey" if com_passkey else "login_refeito" if login_refeito else "sessao"
     if f.codigo_conferencia != f.codigo_operacao:
         raise DecisaoRecusada("codigo_nao_bate", "O codigo de conferencia nao bate com o pedido. Nada seguiu.")
+    if numero_novo and maximo_consultas is not None:
+        atual = _existe(await por_id(c, f.operacao_id))
+        if not atual.original_ficou_em_desconhecido(maximo_consultas):
+            raise DecisaoRecusada("numero_novo_nao_cabe", NUMERO_NOVO_NAO_CABE)
     liberada = (
         await c.execute(
             text(
@@ -985,13 +1172,26 @@ async def confirmar_ficha(
     ).scalar_one_or_none()
     if liberada is None:
         raise DecisaoRecusada("nao_esta_aguardando", "Esta acao nao espera mais confirmacao. Veja o protocolo.")
-    await c.execute(
-        text(
-            "UPDATE fichas SET decisao = 'confirmada', decidida_em = now(), decidida_por = :p, com_passkey = :pk,"
-            " segundos_ate_decidir = :s, confirmada_com = :cc WHERE id = :f AND decisao IS NULL"
-        ),
-        {"f": ficha_id, "p": pessoa_id, "pk": com_passkey, "s": f.segundos, "cc": confirmada_com},
-    )
+    valores = {"f": ficha_id, "p": pessoa_id, "pk": com_passkey, "s": f.segundos, "cc": confirmada_com}
+    if numero_novo:
+        try:
+            async with c.begin_nested():
+                await c.execute(text(_SQL_CONFIRMA_FICHA_NUMERO_NOVO), valores)
+        except DBAPIError as erro:
+            # A guarda do banco (fichas_guarda) recusou: entre a leitura e o UPDATE, o numero da original ganhou
+            # resposta final, ou a original outra resposta a consulta. Nada muda: quem chama desfaz a liberacao junto
+            # com a recusa.
+            log.info("numero_novo_recusado_pelo_banco", erro=type(erro).__name__)
+            raise DecisaoRecusada("numero_novo_nao_cabe", NUMERO_NOVO_NAO_CABE) from erro
+        CONTADORES.somar("selo_numero_novo_escolhido")
+    else:
+        await c.execute(text(_SQL_CONFIRMA_FICHA), valores)
+    dados: dict[str, Any] = {
+        "rapida_demais": float(f.segundos) < rapida_segundos,
+        "segundos": round(float(f.segundos), 1),
+    }
+    if numero_novo:
+        dados["numero_novo"] = True
     await registrar(
         c,
         papel="entrada",
@@ -1001,10 +1201,24 @@ async def confirmar_ficha(
         pessoa_id=pessoa_id,
         aplicativo_id=f.aplicativo_id,
         sistema_id=f.sistema_id,
-        dados={"rapida_demais": float(f.segundos) < rapida_segundos, "segundos": round(float(f.segundos), 1)},
+        dados=dados,
     )
     op = _existe(await por_id(c, f.operacao_id))
     return op
+
+
+_SQL_CONFIRMA_FICHA: Final = (
+    "UPDATE fichas SET decisao = 'confirmada', decidida_em = now(), decidida_por = :p, com_passkey = :pk,"
+    " segundos_ate_decidir = :s, confirmada_com = :cc WHERE id = :f AND decisao IS NULL"
+)
+_SQL_CONFIRMA_FICHA_NUMERO_NOVO: Final = (
+    "UPDATE fichas SET decisao = 'confirmada', decidida_em = now(), decidida_por = :p, com_passkey = :pk,"
+    " segundos_ate_decidir = :s, confirmada_com = :cc, numero_novo = true WHERE id = :f AND decisao IS NULL"
+)
+NUMERO_NOVO_NAO_CABE: Final = (
+    "O numero novo so vale quando o sistema nao confirmou o primeiro pedido e a consulta terminou sem saber. Nada"
+    " seguiu; veja a ficha de novo."
+)
 
 
 async def recusar_ficha(c: AsyncConnection, ficha_id: uuid.UUID, *, pessoa_id: uuid.UUID) -> Operacao:
@@ -1232,11 +1446,19 @@ async def _sistema_contradito(
 
 
 async def registrar_o_que_o_sistema_informou(
-    c: AsyncConnection, operacao_id: uuid.UUID, *, pessoa_id: uuid.UUID, emails_admin: Sequence[str] = ()
+    c: AsyncConnection,
+    operacao_id: uuid.UUID,
+    *,
+    pessoa_id: uuid.UUID,
+    estado_visto: str,
+    emails_admin: Sequence[str] = (),
 ) -> Operacao:
     """O botao "Registrar o que o sistema informou" (desenho 5.3): grava a decisao da pessoa de acordo com o estado
     final que o sistema informou (``DECISAO_PELO_SISTEMA``), com a observacao ``OBSERVACAO_DO_SISTEMA``, por
     ``decidir_nao_confirmada``. Quem decide continua sendo a pessoa, com um toque; nada e reenviado.
+
+    ``estado_visto`` e o estado final que a tela mostrou a pessoa (o formulario o manda, decisao 6 do coordenador): o
+    toque registra o que ela viu, e nunca uma resposta que chegou depois.
 
     Recusa (``DecisaoRecusada``), sem gravar nada:
 
@@ -1244,6 +1466,10 @@ async def registrar_o_que_o_sistema_informou(
       basta (critica A3.3);
     - ``resultado_em_outro_protocolo``: outro protocolo saiu depois com o mesmo numero, e o que o sistema informar
       aparece nele (``Operacao.substituto``, critica M4);
+    - ``sistema_se_contradisse``: alguma resposta do sistema sobre o numero desta acao
+      (``informacoes_sistema.contradiz``, ``InformadoDoSistema.se_contradisse``) nao combina com outra; o que ele diz
+      nao vale um toque, e a pessoa decide pelo formulario;
+    - ``informado_mudou``: o estado final de agora nao e o que a pessoa viu (``estado_visto``); ela ve a tela de novo;
     - ``terceiro_nao_recebida``: um servidor de terceiros disse ``nao_recebida``; o que ele informa e texto de
       estranhos, e a pessoa confere por fora antes de decidir (critica A3.3);
     - ``decida_pelo_formulario``: ``parcial`` ou ``desfeita``, que nao cabem num toque;
@@ -1265,6 +1491,17 @@ async def registrar_o_que_o_sistema_informou(
             "sem_resposta_final",
             "O sistema ainda nao deu uma resposta final sobre este pedido. Nada foi registrado; decida pelo"
             " formulario.",
+        )
+    if op.informado is not None and op.informado.se_contradisse:
+        raise DecisaoRecusada(
+            "sistema_se_contradisse",
+            "O sistema deu respostas que nao combinam sobre este pedido. Nada foi registrado; confira no sistema e"
+            " decida pelo formulario.",
+        )
+    if final != estado_visto:
+        raise DecisaoRecusada(
+            "informado_mudou",
+            "O que o sistema informou mudou depois que a tela foi aberta. Nada foi registrado; veja a tela de novo.",
         )
     if op.de_terceiro and final == "nao_recebida":
         raise DecisaoRecusada(

@@ -43,7 +43,10 @@ Fase 4 (selos, desenho 7.3): a ficha nasce com o retrato do selo efetivo da pess
 ``_meta`` o selo da operacao (``selo_da_operacao``), nunca a coluna antiga ``sistemas.selo``. Na "nao confirmada" que
 saiu com numero, o texto diz que o MCP-CLARO esta perguntando ao sistema e, com resposta, o que o sistema informou
 (so o vocabulario do contrato, ``_meta`` ``informado``), marcado como dito pelo sistema ou, num terceiro, pelo servidor
-de terceiros (critica M9). O aplicativo nunca recebe o numero da operacao, o recibo nem texto do sistema.
+de terceiros (critica M9). O aplicativo nunca recebe o numero da operacao, o recibo nem texto do sistema. O fim da
+escada da consulta ("a decisao fica com a pessoa") segue ``Operacao.consulta_acabou``: as tentativas, ``sistema_fora``,
+o pedido igual que levou o numero e o tempo (``contrato.escada_vencida``, pela hora do banco). So a "enviada" diz que
+saiu com o numero de outro protocolo; "nao saiu" e "o sistema pediu dados" nao (decisao 5 do coordenador).
 """
 
 from __future__ import annotations
@@ -515,7 +518,9 @@ def texto_do_estado(op: Operacao, *, consultas_maximas: int | None = None) -> st
             f"{decidido}"
         )
     texto = f"Protocolo {prot}: {FRASE[op.estado]}"
-    if op.mesmo_numero_de is not None and op.estado in fila.PASSOU_POR_ENVIANDO:
+    # So a "enviada" diz que saiu com o numero da original: "nao saiu" e "o sistema pediu dados" nao chegaram ao fim
+    # no sistema, nao substituem a original (selo_substituto, decisao 5 do coordenador) e a frase se contradiria.
+    if op.mesmo_numero_de is not None and op.estado == Estado.ENVIADA:
         texto += f" Saiu com o mesmo numero do protocolo {op.mesmo_numero_de}."
     return texto
 

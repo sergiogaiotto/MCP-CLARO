@@ -3,8 +3,9 @@
 - ``/interno/chaves`` aceita so a lista fechada ``contrato.TIPOS_DE_CHAVE_DO_ADMIN``: a chave de teste do selo
   (``teste_selo``) e guardada a parte e nunca sobrescreve a de producao; tipo desconhecido e 400, e nada muda; o dono
   certo vai ao extrato (critica M11);
-- ``contrato.ROTA_CONSULTAR``: so ``operacao_id`` no corpo (texto que o banco nao guarda e 400, pela regra de
-  ``_so_texto_valido``), 404 sem envio, 409 antes da vez, 200 com o desfecho, 503 quando a falha e do banco;
+- ``contrato.ROTA_CONSULTAR``: so ``operacao_id`` no corpo, como texto (texto que o banco nao guarda e 400, pela
+  regra de ``_so_texto_valido``; um inteiro de 32 algarismos tambem), 404 sem envio, 409 antes da vez, 409
+  ``porta_fechada`` com a porta de saida fechada, 200 com o desfecho, 503 quando a falha e do banco;
 - a leitura das ferramentas (``_listar``) marca ``ferramentas_vistas.sumiu_em`` do que o sistema deixou de listar e
   tira a marca quando volta: o selo cai por ``contrato_sumiu`` e volta (critica M1).
 """
@@ -135,6 +136,7 @@ async def test_rota_da_consulta(cena: Any) -> None:
         {},
         {"operacao_id": "nao-e-uuid"},
         {"operacao_id": 1},
+        {"operacao_id": 12345678901234567890123456789012},  # N7: um inteiro de 32 algarismos seria lido como uuid
         {"operacao_id": None},
         {"operacao_id": "UUID", "ultima": True},
         {"operacao_id": "\x00"},
@@ -149,6 +151,30 @@ async def test_rota_da_consulta_so_aceita_o_numero_da_operacao(cena: Any, corpo:
     r = await postar(http, contrato.ROTA_CONSULTAR, corpo)
     assert (r.status_code, r.json()["motivo"]) == (400, "pedido_invalido")
     assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
+
+
+async def test_rota_da_consulta_com_a_porta_fechada_e_409_porta_fechada(cena: Any) -> None:
+    """Decisao 2 do coordenador (retoque da etapa 3): era a vez, mas a porta de saida esta fechada: 409
+    ``{"motivo": "porta_fechada"}``, nada perguntado e nada gravado; com a porta aberta, 200 na hora."""
+    cn, http, _ = cena
+    async with cn.dono.begin() as c:
+        op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+        await s.enviar(c, op.id)
+        await c.execute(
+            text(
+                "UPDATE estado_saida SET aberta = false, motivo = 'teste', mudou_por = 'teste-g3ar', mudou_em = now()"
+                " WHERE id = 1"
+            )
+        )
+    await a.voltar_no_tempo(cn, [op.id])
+    r = await postar(http, contrato.ROTA_CONSULTAR, {"operacao_id": str(op.id)})
+    assert (r.status_code, r.json()) == (409, {"motivo": "porta_fechada"})
+    assert cn.chamadas(contrato.FERRAMENTA_CONSULTAR) == 0
+    assert await a.informacoes(cn, op.id) == []
+    async with cn.dono.begin() as c:
+        await c.execute(text("UPDATE estado_saida SET aberta = true, motivo = NULL WHERE id = 1"))
+    r = await postar(http, contrato.ROTA_CONSULTAR, {"operacao_id": str(op.id)})
+    assert (r.status_code, r.json()) == (200, {"desfecho": "respondeu", "estado": "nao_recebida"})
 
 
 async def test_rota_da_consulta_com_o_banco_fora_e_503(cena: Any, monkeypatch: pytest.MonkeyPatch) -> None:

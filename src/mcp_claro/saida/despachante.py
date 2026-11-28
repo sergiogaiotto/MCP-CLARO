@@ -636,7 +636,8 @@ class PortaDeSaida:
         """Grava o fim do envio, tentando de novo algumas vezes se o banco falhar. ``pedidos``: as categorias do que o
         sistema pediu no meio (``dados.pedidos`` da linha do fim). ``selo`` e ``recibo``: o que o passo do selo decidiu
         e o recibo lido do resultado (nivel 3), gravados na mesma transacao, depois do fim e num SAVEPOINT
-        (``_gravar_selo``): uma falha ali nunca impede o fim.
+        (``_gravar_selo``): uma falha ali nunca impede o fim. O retrato do selo (``SeloDoEnvio.retrato``) vai tambem em
+        ``dados.selo`` da linha do fim (``fila.finalizar``).
 
         Antes, troca U+0000 por U+FFFD no resultado (o banco recusaria a gravacao todas as vezes). Sem conseguir
         gravar, levanta ``FimNaoGravado``: o turno da porta acaba, a conexao da trava cai, e quem assumir a porta
@@ -651,7 +652,9 @@ class PortaDeSaida:
         for tentativa in range(1, TENTATIVAS_DO_FIM + 1):
             try:
                 async with self.engine.begin() as c:
-                    await fila.finalizar(c, op, final, resultado, desfecho, pedidos=pedidos)
+                    # O retrato do selo com que a acao saiu vai em dados.selo da linha do fim (pedido do G4: desenho
+                    # 7.2); sem passo do selo (terceiro, ou sem leitura), a linha fica como antes.
+                    await fila.finalizar(c, op, final, resultado, desfecho, pedidos=pedidos, selo=selo.retrato)
                     if selo is not SEM_SELO or recibo is not None:
                         await self._gravar_selo(c, op, final, selo, recibo)
             except (SQLAlchemyError, OSError, TimeoutError) as erro:

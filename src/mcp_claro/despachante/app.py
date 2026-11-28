@@ -21,8 +21,9 @@ Rotas internas (nunca expostas ao portao):
 - ``POST /interno/autorizacao/*``: autorizacao OAuth por pessoa (``despachante.autorizacao``);
 - ``POST /interno/selo/consultar`` (``contrato.ROTA_CONSULTAR``): a consulta ao proprio sistema, pedida pelas rotinas,
   com ``{"operacao_id": "<uuid>"}`` e nada mais no corpo (``selo.consulta``). O despachante confere pelo banco se ja e
-  a vez: 200 com o desfecho, 404 ``sem_envio``, 409 ``nada_a_perguntar``, e 503 ``conferencia_nao_feita`` quando a
-  falha e do MCP-CLARO no banco (nada gravado), como as declaracoes (contrato K5).
+  a vez: 200 com o desfecho, 404 ``sem_envio``, 409 ``nada_a_perguntar``, 409 ``porta_fechada`` (era a vez, mas a
+  porta de saida esta fechada: nada perguntado nem gravado) e 503 ``conferencia_nao_feita`` quando a falha e do
+  MCP-CLARO no banco (nada gravado), como as declaracoes (contrato K5).
 
 Fase 4: duas tarefas do despachante cuidam do aviso de bloqueio (``selo.consulta.Perguntador``): uma deriva os avisos
 dos comprovantes novos e outra os manda, a cada ``OUTBOX_SWEEP_SECONDS``. Com varias copias do papel no ar, cada aviso
@@ -84,7 +85,7 @@ from mcp_claro.ligacao.sala_cliente import ClienteSala
 from mcp_claro.logs import logger
 from mcp_claro.saida.despachante import PortaDeSaida
 from mcp_claro.selo import contrato
-from mcp_claro.selo.consulta import NadaAPerguntar, Perguntador, SemEnvio
+from mcp_claro.selo.consulta import NadaAPerguntar, Perguntador, PortaFechada, SemEnvio
 from mcp_claro.tarefas import descarregar_contadores_periodicamente
 from mcp_claro.versao import VERSAO_MCP
 from mcp_claro.visitas.tls import contexto_do_despachante
@@ -429,8 +430,9 @@ def criar_app_despachante(
         return JSONResponse({"guardada": True})
 
     async def consultar_selo(pedido: Request) -> JSONResponse:
-        """``contrato.ROTA_CONSULTAR``: so ``operacao_id`` no corpo. O despachante nao confia em quem chama (critica
-        M7): confere tudo pelo banco antes de perguntar."""
+        """``contrato.ROTA_CONSULTAR``: so ``operacao_id`` no corpo, como texto (um inteiro de 32 algarismos tambem
+        seria lido como uuid, e e 400). O despachante nao confia em quem chama (critica M7): confere tudo pelo banco
+        antes de perguntar."""
         corpo = await _corpo(pedido)
         operacao_id = _uuid(corpo.get("operacao_id"))
         if operacao_id is None or set(corpo) != {"operacao_id"} or not isinstance(corpo.get("operacao_id"), str):
@@ -441,6 +443,8 @@ def criar_app_despachante(
             return JSONResponse({"motivo": "sem_envio"}, status_code=404)
         except NadaAPerguntar:
             return JSONResponse({"motivo": "nada_a_perguntar"}, status_code=409)
+        except PortaFechada:
+            return JSONResponse({"motivo": "porta_fechada"}, status_code=409)
         except FALHA_DO_BANCO as erro:
             log.warning("consulta_sem_banco", erro=type(erro).__name__)
             return JSONResponse({"motivo": CONFERENCIA_NAO_FEITA, "mensagem": MENSAGEM_SEM_BANCO}, status_code=503)

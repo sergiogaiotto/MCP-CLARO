@@ -7,12 +7,17 @@ de bloqueio sai de duas tarefas do proprio despachante. Regras comuns:
 - consulta e aviso so vao a sistema ``ativo`` na 2026-07-28, com a porta de saida aberta e, num terceiro, com a
   revisao do servidor do teste ainda vigente (critica A2). Fora disso, nada e perguntado: a consulta grava
   ``sistema_fora`` (sem gastar tentativa, e a escada para) e o aviso fica ``sistema_fora``, com a linha legivel no
-  extrato. Nada sai com a porta fechada, nem o aviso de bloqueio: ele espera a porta abrir, se o bloqueio ainda
-  valer (``bloqueio_encerrado`` se acabou antes);
+  extrato. Nada sai com a porta fechada: a consulta nao pergunta nem grava nada (``PortaFechada``, 409
+  ``porta_fechada``; a escada nao anda, decisao 2 do coordenador no retoque da etapa 3), e o aviso de bloqueio espera
+  a porta abrir, se o bloqueio ainda valer (``bloqueio_encerrado`` se acabou antes). Depois de abrir a chave (que
+  pode demorar: a renovacao chama o servidor de autorizacao), a porta e a situacao do sistema sao conferidas de novo,
+  antes de chamar;
 - a chave e a da operacao: a da pessoa (renovada antes, se for preciso) ou a do programa. Sem chave (cofre trancado,
   chave apagada ou vencida) nada e perguntado, nada conta contra o sistema e nenhuma tentativa e gasta (critica
-  M7): a consulta grava ``sem_chave``, e o aviso espera a chave, como espera a porta abrir. Um 401 com a chave da
-  pessoa marca a chave vencida e tambem e falha do MCP-CLARO;
+  M7): a consulta grava ``sem_chave`` (o degrau sobe mesmo assim, e a linha ``consulta_nao_feita`` do extrato so
+  volta com outro motivo), e o aviso espera a chave, como espera a porta abrir, com uma linha so para a dona
+  (``aviso_bloqueio_ainda_nao_saiu``). Um 401 com a chave da pessoa marca a chave vencida e tambem e falha do
+  MCP-CLARO;
 - um POST so por pergunta (``ligacao.chamar_ferramenta`` faz exatamente um), com prazo
   ``BADGE_LOOKUP_TIMEOUT_SECONDS`` e teto de resposta. A resposta passa por ``selo.respostas`` (validacao estrita):
   so as categorias do contrato e horas do MCP-CLARO chegam ao banco, ao extrato e as telas, nunca texto do sistema;
@@ -23,15 +28,18 @@ de bloqueio sai de duas tarefas do proprio despachante. Regras comuns:
   ``sistema_se_contradisse`` no extrato da pessoa e o aviso ``selo_retirado`` ao ADMIN.
 
 Consulta (``Perguntador.consultar``): o despachante nao confia em quem chama (critica M7) e confere tudo pelo banco,
-com as funcoes do contrato (``proxima_consulta``, ``e_a_ultima_consulta``, ``resposta_que_encerra``): sem envio, 404;
-nada a perguntar (resposta que encerra, escada acabada, ``sistema_fora`` na ultima linha, outro protocolo com o mesmo
-numero, ainda nao e a vez, ou outra copia do despachante perguntando agora: critica M8), 409. Uma ``nao_recebida``
-sozinha nao encerra (A3.3). No fim da escada sem resposta que encerra, o extrato da pessoa ganha
+com as funcoes do contrato (``proxima_consulta``, ``escada_vencida``, ``e_a_ultima_consulta``,
+``resposta_que_encerra``): sem envio, 404; nada a perguntar (resposta que encerra, escada acabada no maximo ou pelo
+tempo, ``sistema_fora`` na ultima linha, outro protocolo com o mesmo numero, ainda nao e a vez, ou outra copia do
+despachante perguntando agora: critica M8), 409 ``nada_a_perguntar``; a porta fechada, 409 ``porta_fechada``. Uma
+``nao_recebida`` sozinha nao encerra (A3.3), e a resposta ao aviso de bloqueio nunca encerra (decisao 1 do
+coordenador no retoque da etapa 3). No fim da escada sem resposta que encerra, o extrato da pessoa ganha
 ``sistema_nao_respondeu_consulta``; e, se as ultimas ``BADGE_LOOKUP_FAILS_TO_WITHDRAW`` operacoes do sistema que
 terminaram a escada depois do teste do selo de agora (e da ultima retirada) terminaram todas assim (sem resposta,
 resposta invalida ou ``desconhecido``, critica B8), o selo de agora e retirado (``nao_respondeu_consultas``), num
 SAVEPOINT da mesma transacao, com aviso ao ADMIN. As falhas de antes de um reteste aprovado nao contam contra o selo
-novo.
+novo, e as operacoes ainda na escada (ou cuja escada acabou pelo tempo, sem o maximo de tentativas) saem da conta
+antes do limite de operacoes lidas (SQL).
 
 Aviso de bloqueio (``Perguntador.derivar_avisos`` e ``Perguntador.avisar_bloqueios``; critica A1): o bloqueio continua
 o da Fase 2. Uma tarefa deriva os avisos dos comprovantes novos (que ja nao mudam) e de ``envios_selo``, so de um
@@ -42,8 +50,14 @@ UPDATE SKIP LOCKED``), abre a chave da pessoa, reserva a vez antes de chamar (``
 grava uma linha de ``informacoes_sistema`` (origem ``aviso``) por operacao, com ``sistema_informou_no_bloqueio`` no
 extrato da dona. Sem resposta depois de ``BADGE_BLOCK_NOTICE_ATTEMPTS`` tentativas, o aviso fica ``sem_resposta``,
 com ``aviso_bloqueio_sem_resposta``. Quando a falha e do MCP-CLARO (a chave nao abre, ou o sistema recusa a chave da
-pessoa na ultima tentativa), o sistema nao leva a culpa: sem chave o aviso espera, sem gastar tentativa; a chave
-recusada na ultima vez deixa o aviso ``sistema_fora``, com ``aviso_bloqueio_sistema_fora`` e o motivo nosso.
+pessoa na ultima tentativa), o sistema nao leva a culpa: sem chave o aviso espera, sem gastar tentativa, e a dona
+ganha ``aviso_bloqueio_ainda_nao_saiu`` na primeira vez (uma so por bloqueio e sistema); a chave recusada na ultima
+vez deixa o aviso ``sistema_fora``, com ``aviso_bloqueio_sistema_fora`` e o motivo nosso. A resposta ao aviso fica
+gravada, mas nunca encerra a escada da consulta (``contrato.ORIGENS_DA_RESPOSTA_FINAL``): um ``parada`` seguido da
+escrita e pego pela consulta seguinte, como contradicao.
+
+Retirada e contador: ``selo_retiradas`` soma uma vez por teste retirado (o aviso ao ADMIN de cada um vai uma vez so
+por transacao, mesmo com varios numeros contraditos na mesma resposta ao aviso).
 """
 
 from __future__ import annotations
@@ -98,11 +112,14 @@ LIMITE_DA_RODADA: Final = 20
 """Avisos (e bloqueios a derivar) por rodada das tarefas do aviso."""
 
 OPERACOES_NA_CONTA_DA_RETIRADA: Final = 50
-"""Quantas operacoes do sistema, das que mais recentemente tiveram consulta, a conta da retirada le (critica B8). Bem
-acima de ``BADGE_LOOKUP_FAILS_TO_WITHDRAW`` (ate 20): as que ainda estao na escada nao contam e sao puladas."""
+"""Quantas operacoes do sistema, das que mais recentemente terminaram a escada, a conta da retirada le (critica B8).
+Bem acima de ``BADGE_LOOKUP_FAILS_TO_WITHDRAW`` (ate 20). As que ainda estao na escada (e as que pararam sem o maximo
+de tentativas: ``sistema_fora`` ou o fim pelo tempo) saem no SQL, antes do limite: uma rajada de operacoes ainda
+sendo consultadas nao segura a retirada."""
 
 TRAVA_DA_CONSULTA: Final = "mcp_claro.selo.consulta"
 TRAVA_DA_DERIVACAO: Final = "mcp_claro.selo.derivar"
+TRAVA_DO_AVISO_SEM_CHAVE: Final = "mcp_claro.selo.aviso_sem_chave"
 
 MOTIVOS_DA_RETIRADA: Final[Mapping[str, str]] = {
     "se_contradisse": "o sistema deu respostas que nao combinam",
@@ -131,6 +148,11 @@ class SemEnvio(LookupError):
 
 class NadaAPerguntar(Exception):
     """Nada foi perguntado: nao e a vez (409 ``nada_a_perguntar``)."""
+
+
+class PortaFechada(Exception):
+    """Era a vez, mas a porta de saida esta fechada: nada foi perguntado nem gravado, e a escada nao anda (409
+    ``porta_fechada``, decisao 2 do coordenador no retoque da etapa 3). As rotinas tentam na proxima rodada."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,7 +220,9 @@ async def avisar_retirada(
     chave_unica: str,
     emails_admin: Sequence[str],
 ) -> None:
-    """O aviso ``selo_retirado`` ao ADMIN (uma vez por ``chave_unica``), sem protocolo nem pessoa."""
+    """O aviso ``selo_retirado`` ao ADMIN (uma vez por ``chave_unica``), sem protocolo nem pessoa, e o contador
+    ``selo_retiradas``. Quem chama passa uma vez por teste retirado na transacao (``contradicoes`` junta os numeros
+    contraditos antes): o contador conta retiradas, nunca numeros nem avisos repetidos."""
     legivel = MOTIVOS_DA_RETIRADA[motivo]
     assunto, texto_aviso = aviso_admin("selo_retirado", sistema=sistema_nome, motivo=legivel)
     await avisar_admin(
@@ -212,31 +236,41 @@ async def avisar_retirada(
     CONTADORES.somar("selo_retiradas", motivo=motivo)
 
 
-async def contradicao(
+@dataclass(frozen=True, slots=True)
+class Contradito:
+    """Um numero sobre o qual o sistema se contradisse, com o que a linha da dona leva."""
+
+    protocolo: str
+    pessoa_id: uuid.UUID
+    aplicativo_id: uuid.UUID | None
+    teste_id: uuid.UUID
+
+
+async def contradicoes(
     c: AsyncConnection,
     *,
     sistema_id: uuid.UUID,
     sistema_nome: str,
-    protocolo: str,
-    pessoa_id: uuid.UUID,
-    aplicativo_id: uuid.UUID | None,
-    teste_id: uuid.UUID,
+    contraditos: Sequence[Contradito],
     emails_admin: Sequence[str],
 ) -> None:
-    """O sistema se contradisse sobre o numero do ``protocolo`` (o banco ja retirou o selo): a linha da pessoa e o
-    aviso ao ADMIN, um por teste retirado nesta transacao. O gatilho retira o teste do envio (``teste_id``) e, se for
-    outro, o ultimo teste aprovado do sistema: depois de um reteste, contradizer-se sobre um envio do teste antigo
-    derruba o selo de agora, e o ADMIN fica sabendo deste, mesmo que o antigo ja tivesse sido retirado e avisado."""
-    await registrar(
-        c,
-        papel="despachante",
-        tipo="sistema_se_contradisse",
-        campos={"sistema": sistema_nome, "protocolo": protocolo},
-        protocolo=protocolo,
-        pessoa_id=pessoa_id,
-        aplicativo_id=aplicativo_id,
-        sistema_id=sistema_id,
-    )
+    """O sistema se contradisse sobre estes numeros, na mesma transacao (o banco ja retirou o selo): uma linha
+    ``sistema_se_contradisse`` por protocolo, e depois, uma vez so, o aviso ao ADMIN e o contador, um por teste
+    retirado nesta transacao (D10 da conferencia da etapa 3: uma resposta ao aviso com varios numeros contraditos nao
+    soma a mesma retirada varias vezes). O gatilho retira o teste do envio e, se for outro, o ultimo teste aprovado do
+    sistema: depois de um reteste, contradizer-se sobre um envio do teste antigo derruba o selo de agora, e o ADMIN fica
+    sabendo deste, mesmo que o antigo ja tivesse sido retirado e avisado."""
+    for x in contraditos:
+        await registrar(
+            c,
+            papel="despachante",
+            tipo="sistema_se_contradisse",
+            campos={"sistema": sistema_nome, "protocolo": x.protocolo},
+            protocolo=x.protocolo,
+            pessoa_id=x.pessoa_id,
+            aplicativo_id=x.aplicativo_id,
+            sistema_id=sistema_id,
+        )
     retirados = await retirados_agora(c, sistema_id, "se_contradisse")
     for retirado in retirados:
         await avisar_retirada(
@@ -248,7 +282,33 @@ async def contradicao(
             emails_admin=emails_admin,
         )
     log.warning(
-        "sistema_se_contradisse", sistema=sistema_nome, retirados=len(retirados), do_envio=teste_id in retirados
+        "sistema_se_contradisse",
+        sistema=sistema_nome,
+        numeros=len(contraditos),
+        retirados=len(retirados),
+        do_envio=any(x.teste_id in retirados for x in contraditos),
+    )
+
+
+async def contradicao(
+    c: AsyncConnection,
+    *,
+    sistema_id: uuid.UUID,
+    sistema_nome: str,
+    protocolo: str,
+    pessoa_id: uuid.UUID,
+    aplicativo_id: uuid.UUID | None,
+    teste_id: uuid.UUID,
+    emails_admin: Sequence[str],
+) -> None:
+    """O sistema se contradisse sobre o numero do ``protocolo`` (o banco ja retirou o selo): ``contradicoes`` com um
+    numero so (o recibo e a consulta gravam uma linha por transacao)."""
+    await contradicoes(
+        c,
+        sistema_id=sistema_id,
+        sistema_nome=sistema_nome,
+        contraditos=(Contradito(protocolo, pessoa_id, aplicativo_id, teste_id),),
+        emails_admin=emails_admin,
     )
 
 
@@ -276,15 +336,14 @@ def motivo_sem_chave(erro: BaseException) -> str:
     return CHAVE_NAO_ABRIU
 
 
-def fora_de_ativo(linha: Any, *, porta_aberta: bool) -> str | None:
+def fora_de_ativo(linha: Any) -> str | None:
     """Por que nada e perguntado ao sistema agora (critica A2), ou None. ``linha``: ``situacao``, ``versao_mcp``,
-    ``origem``, ``revisao_servidor_id`` (de agora) e ``revisao_do_teste`` (a do teste do envio)."""
+    ``origem``, ``revisao_servidor_id`` (de agora) e ``revisao_do_teste`` (a do teste do envio). A porta fechada nao
+    entra aqui: com ela, a consulta nao grava nada (``PortaFechada``) e o aviso espera."""
     if linha.situacao == "quarentena":
         return "o sistema esta em quarentena"
     if linha.situacao != "ativo" or linha.versao_mcp != VERSAO_MCP:
         return "o sistema nao esta ativo"
-    if not porta_aberta:
-        return "a porta de saida esta fechada"
     if linha.origem != "proprio" and (
         linha.revisao_servidor_id is None or str(linha.revisao_servidor_id) != str(linha.revisao_do_teste)
     ):
@@ -406,9 +465,10 @@ class Perguntador:
     # --- Consulta ------------------------------------------------------------------------------------------------
 
     async def consultar(self, operacao_id: uuid.UUID) -> Desfecho:
-        """A consulta da rota ``contrato.ROTA_CONSULTAR``. Levanta ``SemEnvio`` (404) e ``NadaAPerguntar`` (409);
-        uma falha do banco sobe como veio (503 na rota). Uma copia do despachante por vez pergunta sobre a operacao
-        (trava consultiva de sessao, numa conexao sem transacao aberta durante a chamada, critica M8)."""
+        """A consulta da rota ``contrato.ROTA_CONSULTAR``. Levanta ``SemEnvio`` (404), ``NadaAPerguntar`` (409
+        ``nada_a_perguntar``) e ``PortaFechada`` (409 ``porta_fechada``: nada perguntado nem gravado); uma falha do
+        banco sobe como veio (503 na rota). Uma copia do despachante por vez pergunta sobre a operacao (trava
+        consultiva de sessao, numa conexao sem transacao aberta durante a chamada, critica M8)."""
         async with self.engine.connect() as c:
             travou = (
                 await c.execute(
@@ -435,6 +495,13 @@ class Perguntador:
         segredo, aberta, sem_chave = await self._segredo(
             sistema, pessoa_id=vez.pessoa_id, aplicativo_id=vez.aplicativo_id
         )
+        # A chave pode demorar a abrir (a renovacao chama o servidor de autorizacao): a porta e a situacao do sistema
+        # sao conferidas de novo antes de chamar, como no aviso (critica A2, decisao 2 do coordenador).
+        fora = await self._fora_agora(c, vez)
+        if fora is not None:
+            async with c.begin():
+                await self._gravar_consulta(c, vez, _Lido("sistema_fora", motivo=fora))
+            return Desfecho("sistema_fora")
         if sem_chave is not None:
             lido = _Lido("sem_chave", motivo=sem_chave)
         else:
@@ -492,12 +559,13 @@ class Perguntador:
         proxima = contrato.proxima_consulta(
             linhas, enviado_em=linha.gravado_em, maximo=self.maximo, prazo_envio_segundos=self.prazo_envio
         )
-        if proxima is None or proxima > linha.agora:
+        if proxima is None or proxima > linha.agora or contrato.escada_vencida(linha.gravado_em, linha.agora):
             raise NadaAPerguntar("ainda nao e a vez, ou nao ha mais o que perguntar")
         sistema = await repositorio.sistema_por_id(c, uuid.UUID(str(linha.sistema_id)))
         if sistema is None:  # pragma: no cover - a chave estrangeira do envio garante
             raise SemEnvio("sistema do envio sumiu")
-        porta_aberta = (await regras_estado.ler_saida(c)).aberta
+        if not (await regras_estado.ler_saida(c)).aberta:
+            raise PortaFechada("a porta de saida esta fechada")
         return _Vez(
             operacao_id=operacao_id,
             numero=str(linha.chave),
@@ -511,8 +579,27 @@ class Perguntador:
             sistema=sistema,
             linhas=tuple(linhas),
             ultima=contrato.e_a_ultima_consulta(linhas, self.maximo),
-            fora=fora_de_ativo(linha, porta_aberta=porta_aberta),
+            fora=fora_de_ativo(linha),
         )
+
+    async def _fora_agora(self, c: AsyncConnection, vez: _Vez) -> str | None:
+        """Depois de abrir a chave, de novo: com a porta fechada levanta ``PortaFechada`` (nada perguntado nem
+        gravado); fora de ``ativo`` (ou com a revisao do terceiro trocada) da o motivo de ``sistema_fora``. Numa
+        transacao curta, fechada antes da chamada."""
+        async with c.begin():
+            if not (await regras_estado.ler_saida(c)).aberta:
+                raise PortaFechada("a porta de saida fechou enquanto a chave abria")
+            linha = (
+                await c.execute(
+                    text(
+                        "SELECT s.situacao, s.versao_mcp, s.origem, s.revisao_servidor_id,"
+                        " t.revisao_servidor_id AS revisao_do_teste FROM sistemas s, testes_selo t"
+                        " WHERE s.id = :s AND t.id = :t"
+                    ),
+                    {"s": vez.sistema.id, "t": vez.teste_id},
+                )
+            ).one()
+        return fora_de_ativo(linha)
 
     async def _gravar_consulta(self, c: AsyncConnection, vez: _Vez, lido: _Lido) -> None:
         """A linha do extrato da pessoa e a de ``informacoes_sistema`` (por ultimo), na mesma transacao curta, e o
@@ -542,13 +629,15 @@ class Perguntador:
                 dados={"origem": "consulta", "desfecho": lido.desfecho},
                 **comum,
             )
-        elif lido.desfecho in ("sem_chave", "sala_fora"):
+        elif lido.desfecho in ("sem_chave", "sala_fora") and await _motivo_novo(c, vez.protocolo, lido.motivo):
+            # Decisao 3 do coordenador: a linha so volta quando o motivo muda (sem a chave da pessoa, a escada segue
+            # perguntando pelos degraus, e o extrato nao ganha a mesma linha a cada vez).
             await registrar(
                 c,
                 papel="despachante",
                 tipo="consulta_nao_feita",
                 campos={"sistema": sistema.nome, "protocolo": vez.protocolo, "motivo": lido.motivo},
-                dados={"origem": "consulta", "desfecho": lido.desfecho},
+                dados={"origem": "consulta", "desfecho": lido.desfecho, "motivo": lido.motivo},
                 **comum,
             )
         falha_do_sistema = lido.desfecho in contrato.DESFECHOS_DE_FALHA_DO_SISTEMA or (
@@ -593,9 +682,12 @@ class Perguntador:
     async def _talvez_retirar(self, c: AsyncConnection, sistema: Sistema) -> bool:
         """Critica B8 e D18: as ultimas ``falhas_para_retirar`` operacoes do sistema que terminaram a escada
         terminaram todas sem resposta (ou com resposta invalida, ou ``desconhecido``): o selo de agora e retirado
-        (``nao_respondeu_consultas``). As que ainda estao na escada sao puladas; as que terminaram com resposta que
-        encerra interrompem a sequencia; as que pararam por ``sistema_fora`` (o sistema nao foi perguntado) nao
-        contam.
+        (``nao_respondeu_consultas``). As que terminaram com resposta que encerra interrompem a sequencia. As que
+        ainda estao na escada, as que pararam por ``sistema_fora`` antes do maximo e as que acabaram pelo tempo sem o
+        maximo de tentativas que gastam (``contrato.escada_vencida``: o sistema nao foi perguntado o bastante) nao
+        contam: saem no SQL (``_SQL_DA_RETIRADA``), antes do limite de ``OPERACOES_NA_CONTA_DA_RETIRADA`` (D4 da
+        conferencia da etapa 3). ``terminou_sem_resposta`` decide o resto, e pula (``None``) a que chegou ao maximo e
+        parou depois em ``sistema_fora`` (o maximo, ``BADGE_LOOKUP_MAX_ATTEMPTS``, pode ter baixado).
 
         So contam as operacoes cuja escada terminou (a ultima linha de consulta) depois do teste do selo de agora:
         as falhas de antes de um reteste aprovado ja derrubaram (ou nao) o selo antigo e nunca derrubam o novo. A
@@ -609,21 +701,14 @@ class Perguntador:
             return False  # nada a retirar
         linhas = (
             await c.execute(
-                text(
-                    "WITH corte AS (SELECT greatest(CAST(:t AS timestamptz), now() - make_interval(days => :d))"
-                    " AS desde),"
-                    " ops AS (SELECT i.operacao_id, max(i.gravado_em) AS ultima FROM informacoes_sistema i, corte"
-                    " WHERE i.sistema_id = :s AND i.origem = 'consulta' AND i.gravado_em > corte.desde"
-                    " GROUP BY i.operacao_id ORDER BY ultima DESC LIMIT :k)"
-                    " SELECT i.operacao_id, i.origem, i.desfecho, i.estado, i.gravado_em, ops.ultima"
-                    " FROM informacoes_sistema i JOIN ops ON ops.operacao_id = i.operacao_id"
-                    " ORDER BY ops.ultima DESC, i.operacao_id, i.gravado_em, i.id"
-                ),
+                text(_SQL_DA_RETIRADA),
                 {
                     "s": sistema.id,
                     "t": vigente_agora.testado_em,
                     "d": contrato.GUARDA_MINIMA_DIAS,
                     "k": OPERACOES_NA_CONTA_DA_RETIRADA,
+                    "maximo": self.maximo,
+                    "gastam": list(contrato.DESFECHOS_QUE_GASTAM_TENTATIVA),
                 },
             )
         ).all()
@@ -833,6 +918,7 @@ class Perguntador:
                     text("UPDATE avisos_bloqueio SET proxima_em = now() + make_interval(mins => :m) WHERE id = :a"),
                     {"a": pego.aviso_id, "m": ESPERA_SEM_CHAVE_MINUTOS},
                 )
+                await _avisar_que_ainda_nao_saiu(c, a, pego.sistema, sem_chave)
                 CONTADORES.somar("selo_avisos_bloqueio", desfecho="sem_chave")
                 log.warning("selo_aviso_sem_chave", sistema=pego.sistema.nome)
                 return True
@@ -885,7 +971,7 @@ class Perguntador:
             )
             CONTADORES.somar("selo_avisos_bloqueio", desfecho="bloqueio_encerrado")
             return True
-        fora = fora_de_ativo(a, porta_aberta=True)
+        fora = fora_de_ativo(a)
         if fora is None and sistema.tipo_chave != "por_pessoa":
             # Defesa: o banco so grava teste de selo de sistema com chave por pessoa, e trocar o tipo da chave tira o
             # sistema de "ativo" (0002); este caminho fica para o caso de a regra mudar.
@@ -977,7 +1063,7 @@ class Perguntador:
                     sistema_id=sistema.id,
                     dados={"origem": "aviso", "estado": estado_do_numero},
                 )
-            contraditas: list[_NumeroDoAviso] = []
+            contraditas: list[Contradito] = []
             for n in vez.operacoes:  # por ultimo, todas do mesmo sistema (uma trava so)
                 info = Informacao(
                     n.operacao_id,
@@ -988,16 +1074,14 @@ class Perguntador:
                     aviso_id=vez.aviso_id,
                 )
                 if await gravar_informacao(c, info):
-                    contraditas.append(n)
-            for n in contraditas:
-                await contradicao(
+                    contraditas.append(Contradito(n.protocolo, vez.pessoa_id, n.aplicativo_id, n.teste_id))
+            if contraditas:
+                # Uma vez so por transacao: o aviso ao ADMIN e o contador contam testes retirados, nao numeros (D10).
+                await contradicoes(
                     c,
                     sistema_id=sistema.id,
                     sistema_nome=sistema.nome,
-                    protocolo=n.protocolo,
-                    pessoa_id=vez.pessoa_id,
-                    aplicativo_id=n.aplicativo_id,
-                    teste_id=n.teste_id,
+                    contraditos=contraditas,
                     emails_admin=self.emails_admin,
                 )
         CONTADORES.somar("selo_avisos_bloqueio", desfecho="respondido")
@@ -1054,7 +1138,7 @@ class _AvisoPego:
 
 
 _COLUNAS_DO_AVISO: Final = (
-    "SELECT a.id, a.bloqueio_id, a.sistema_id, a.pessoa_id, a.operacoes, a.tentativas,"
+    "SELECT a.id, a.bloqueio_id, a.sistema_id, a.pessoa_id, a.operacoes, a.tentativas, a.criado_em,"
     " b.encerrado_em, s.situacao, s.versao_mcp, s.origem, s.revisao_servidor_id,"
     " (SELECT t.revisao_servidor_id FROM envios_selo e JOIN testes_selo t ON t.id = e.teste_id"
     "  WHERE e.operacao_id = ANY (a.operacoes) ORDER BY e.gravado_em DESC LIMIT 1) AS revisao_do_teste"
@@ -1108,6 +1192,52 @@ dele e tem o ultimo estado informado em aberto (critica B9). Cada numero uma vez
 mesmo, critica B12): fica o envio mais recente."""
 
 
+_SQL_DA_RETIRADA: Final = """
+WITH corte AS (SELECT greatest(CAST(:t AS timestamptz), now() - make_interval(days => :d)) AS desde),
+recentes AS (
+  SELECT i.operacao_id, max(i.gravado_em) AS ultima FROM informacoes_sistema i, corte
+  WHERE i.sistema_id = :s AND i.origem = 'consulta' AND i.gravado_em > corte.desde
+  GROUP BY i.operacao_id
+),
+ops AS (
+  SELECT r.operacao_id, r.ultima FROM recentes r
+  WHERE selo_estado_final(r.operacao_id) IS NOT NULL
+     OR (SELECT count(*) FROM informacoes_sistema x
+         WHERE x.operacao_id = r.operacao_id AND x.origem = 'consulta'
+           AND x.desfecho = ANY (CAST(:gastam AS text[]))) >= :maximo
+  ORDER BY r.ultima DESC LIMIT :k
+)
+SELECT ops.operacao_id, i.origem, i.desfecho, i.estado, i.gravado_em, ops.ultima
+FROM ops CROSS JOIN LATERAL (
+  SELECT x.origem, x.desfecho, x.estado, x.gravado_em, x.id FROM informacoes_sistema x
+  WHERE x.operacao_id = ops.operacao_id
+) i
+ORDER BY ops.ultima DESC, ops.operacao_id, i.gravado_em, i.id
+"""
+"""As linhas das operacoes do sistema que terminaram a escada (consulta depois do corte: o teste do selo de agora, ou
+30 dias), das que terminaram mais perto de agora para tras: so as com resposta que encerra (``selo_estado_final``, a
+regra de ``contrato.resposta_que_encerra``) ou com o maximo de tentativas que gastam. As que ainda estao na escada, ou
+pararam antes do maximo (``sistema_fora``, fim pelo tempo), saem antes do ``LIMIT`` (D4 da conferencia da etapa 3):
+uma rajada de operacoes ainda sendo consultadas nao segura a retirada. ``recentes`` le o indice
+``informacoes_sistema_consultas`` da 0007, e as linhas de cada operacao vem pelo indice dela (``LATERAL``), sem ler a
+tabela inteira, que e so de acrescentar e de todos os sistemas."""
+
+
+async def _motivo_novo(c: AsyncConnection, protocolo: str, motivo: str | None) -> bool:
+    """A ultima linha ``consulta_nao_feita`` da operacao (pelo protocolo) nao tem este motivo (decisao 3 do
+    coordenador: sem a chave da pessoa, o extrato nao ganha a mesma linha a cada degrau)."""
+    ultimo = (
+        await c.execute(
+            text(
+                "SELECT dados ->> 'motivo' FROM extrato WHERE protocolo = :p AND tipo = 'consulta_nao_feita'"
+                " ORDER BY id DESC LIMIT 1"
+            ),
+            {"p": protocolo},
+        )
+    ).first()
+    return ultimo is None or ultimo[0] != motivo
+
+
 async def _linhas(c: AsyncConnection, operacao_id: uuid.UUID) -> list[contrato.LinhaInformada]:
     return [
         contrato.LinhaInformada(str(x.origem), str(x.desfecho), x.estado, x.gravado_em)
@@ -1122,14 +1252,16 @@ async def _linhas(c: AsyncConnection, operacao_id: uuid.UUID) -> list[contrato.L
 
 
 def _vale_perguntar(fila: str, linhas: Sequence[contrato.LinhaInformada]) -> bool:
-    """Ha duvida a tirar: a acao ficou "nao confirmada", ou saiu "enviada" com o ultimo estado informado em aberto
-    (``em_andamento`` ou ``desconhecido``, critica B9). O resto (ainda na fila, enviando, nao saiu, enviada com
-    desfecho) nao se pergunta."""
+    """Ha duvida a tirar: a acao ficou "nao confirmada", ou saiu "enviada" com o ultimo estado informado pelo recibo
+    ou pela consulta em aberto (``em_andamento`` ou ``desconhecido``, critica B9). A resposta ao aviso nao conta
+    (``contrato.ORIGENS_DA_RESPOSTA_FINAL``, decisao 1 do coordenador): um ``parada`` do aviso sobre uma escrita em
+    andamento nao encerra, e a consulta seguinte pega o sistema que escreveu mesmo assim. O resto (ainda na fila,
+    enviando, nao saiu, enviada com desfecho) nao se pergunta."""
     if fila == "nao_confirmada":
         return True
     if fila != "enviada":
         return False
-    ditos = [x.estado for x in linhas if x.desfecho == "respondeu"]
+    ditos = [x.estado for x in linhas if x.desfecho == "respondeu" and x.origem in contrato.ORIGENS_DA_RESPOSTA_FINAL]
     return bool(ditos) and ditos[-1] in contrato.ESTADOS_EM_ABERTO
 
 
@@ -1137,7 +1269,8 @@ def terminou_sem_resposta(linhas: Sequence[contrato.LinhaInformada], maximo: int
     """Como a escada de uma operacao terminou, para a conta da retirada (critica B8): ``True`` sem resposta que
     encerra, com a ultima consulta sem resposta, invalida ou ``desconhecido``; ``False`` com resposta que encerra,
     ou com a escada acabada numa resposta do sistema (``em_andamento``, ``nao_recebida`` sozinha); ``None`` quando
-    nao conta: ainda na escada, ou parada por ``sistema_fora`` (o sistema nao foi perguntado)."""
+    nao conta: ainda na escada, parada por ``sistema_fora`` (o sistema nao foi perguntado) ou acabada pelo tempo sem o
+    maximo de tentativas que gastam (``contrato.escada_vencida``: o sistema nao foi perguntado o bastante)."""
     if contrato.resposta_que_encerra(linhas) is not None:
         return False
     if linhas and linhas[-1].desfecho == "sistema_fora":
@@ -1148,6 +1281,40 @@ def terminou_sem_resposta(linhas: Sequence[contrato.LinhaInformada], maximo: int
     ultima = consultas[-1]
     return ultima.desfecho in contrato.DESFECHOS_DE_FALHA_DO_SISTEMA or (
         ultima.desfecho == "respondeu" and ultima.estado == "desconhecido"
+    )
+
+
+async def _avisar_que_ainda_nao_saiu(c: AsyncConnection, a: Any, sistema: Sistema, motivo: str) -> None:
+    """Na primeira vez que a chave da pessoa nao abre para o aviso do bloqueio, a dona ganha uma linha legivel
+    (``aviso_bloqueio_ainda_nao_saiu``), uma so por bloqueio e sistema: as partes de ate 100 numeros do mesmo bloqueio
+    sao um aviso so para ela, e as voltas seguintes sem a chave nao repetem a linha. O motivo e o nosso (``SEM_CHAVE``),
+    nunca texto do sistema. A procura vai pelo indice da pessoa no extrato, so desde que o aviso nasceu; duas copias
+    do despachante com duas partes do mesmo bloqueio fazem fila na trava da transacao, e a segunda ve a linha da
+    primeira."""
+    pessoa_id = uuid.UUID(str(a.pessoa_id))
+    await c.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:t), hashtext(:k))"),
+        {"t": TRAVA_DO_AVISO_SEM_CHAVE, "k": f"{a.bloqueio_id}:{sistema.id}:{pessoa_id}"},
+    )
+    ja = (
+        await c.execute(
+            text(
+                "SELECT 1 FROM extrato WHERE pessoa_id = :p AND criado_em >= :desde"
+                " AND tipo = 'aviso_bloqueio_ainda_nao_saiu' AND sistema_id = :s AND dados ->> 'bloqueio' = :b LIMIT 1"
+            ),
+            {"p": pessoa_id, "desde": a.criado_em, "s": sistema.id, "b": str(a.bloqueio_id)},
+        )
+    ).first()
+    if ja is not None:
+        return
+    await registrar(
+        c,
+        papel="despachante",
+        tipo="aviso_bloqueio_ainda_nao_saiu",
+        campos={"sistema": sistema.nome, "motivo": motivo},
+        pessoa_id=pessoa_id,
+        sistema_id=sistema.id,
+        dados={"bloqueio": str(a.bloqueio_id)},
     )
 
 

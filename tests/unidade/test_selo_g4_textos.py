@@ -9,12 +9,15 @@ M9).
 - Textos e ``_meta`` ao aplicativo: so o vocabulario do contrato, sem acento; num terceiro, "o servidor de terceiros" e
   ``de_terceiro`` no ``_meta`` (M9).
 - "Registrar o que o sistema informou" recusa um terceiro que disse ``nao_recebida`` (A3.3), sem tocar o banco.
+- Retoque da etapa 3 (G4r): a escada acaba pelo tempo (``contrato.escada_vencida``, decisao 3); a ficha do pedido
+  igual sabe se a original terminou em ``desconhecido`` (M4.2, decisao 4); so a "enviada" diz que saiu com o numero da
+  original (decisao 5); o botao registra so o que a pessoa viu, de um sistema que nao se contradisse (decisao 6).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -259,6 +262,127 @@ async def test_terceiro_que_disse_nao_recebida_nao_tem_o_botao(monkeypatch: pyte
 
     monkeypatch.setattr(fila, "por_id", por_id)
     with pytest.raises(fila.DecisaoRecusada) as recusa:
-        await fila.registrar_o_que_o_sistema_informou(None, op.id, pessoa_id=op.pessoa_id)  # type: ignore[arg-type]
+        await fila.registrar_o_que_o_sistema_informou(
+            None,  # type: ignore[arg-type]
+            op.id,
+            pessoa_id=op.pessoa_id,
+            estado_visto="nao_recebida",
+        )
     assert recusa.value.motivo == "terceiro_nao_recebida"
+    assert recusa.value.mensagem.isascii()
+
+
+# --- Retoque da etapa 3 (G4r) -----------------------------------------------------------------------------------
+
+SETE_DIAS = timedelta(days=contrato.REAPROVEITAR_NUMERO_DIAS)
+
+
+def test_consulta_acaba_pelo_tempo_pela_hora_do_banco() -> None:
+    """Decisao 3 do coordenador: ``escada_vencida`` com o envio e o ``now()`` do banco lidos na mesma linha; a escada
+    acaba pelo tempo mesmo sem nenhuma linha e sem tentativas, e nunca com estado final."""
+    enviado = AGORA - SETE_DIAS
+    vencida = operacao(informado=None, envio_gravado_em=enviado, lido_em=AGORA)
+    assert vencida.escada_vencida
+    assert vencida.consulta_acabou(8)
+    quase = operacao(informado=None, envio_gravado_em=enviado + timedelta(microseconds=1), lido_em=AGORA)
+    assert not quase.escada_vencida
+    assert not quase.consulta_acabou(8)
+    sem_tentativas = informado(estado=None, desfecho="sem_chave", estado_final=None, tentativas=0)
+    assert operacao(informado=sem_tentativas, envio_gravado_em=enviado, lido_em=AGORA).consulta_acabou(8)
+    assert not operacao(informado=informado(), envio_gravado_em=enviado, lido_em=AGORA).consulta_acabou(8)
+    assert not operacao(informado=None, envio_gravado_em=enviado, lido_em=None).escada_vencida  # sem a hora do banco
+    sem_numero = operacao(envio_nivel=None, informado=None, envio_gravado_em=enviado, lido_em=AGORA)
+    assert not sem_numero.consulta_acabou(8)
+    texto = texto_do_estado(vencida, consultas_maximas=8)
+    assert "ele nao confirmou; a decisao fica com a pessoa" in texto
+
+
+def _original(**mudar: Any) -> fila.EscadaDaOriginal:
+    base: dict[str, Any] = {
+        "enviado_em": AGORA - timedelta(hours=9),
+        "estado_final_do_numero": None,
+        "ultima_consulta": "desconhecido",
+        "tentativas": 8,
+        "ultimo_desfecho": "respondeu",
+    }
+    base.update(mudar)
+    return fila.EscadaDaOriginal(**base)
+
+
+@pytest.mark.parametrize(
+    ("mudar", "esperado"),
+    [
+        ({}, True),
+        ({"tentativas": 7}, False),
+        ({"tentativas": 2, "ultimo_desfecho": "sistema_fora"}, True),
+        ({"tentativas": 2, "enviado_em": AGORA - SETE_DIAS}, True),
+        ({"tentativas": 2, "enviado_em": AGORA - SETE_DIAS + timedelta(microseconds=1)}, False),
+        ({"estado_final_do_numero": "concluida"}, False),  # na original ou em outra acao com o numero dela
+        ({"ultima_consulta": "em_andamento"}, False),
+        ({"ultima_consulta": None}, False),
+    ],
+)
+def test_a_original_ficou_em_desconhecido(mudar: dict[str, Any], esperado: bool) -> None:
+    """Critica M4.2: a ficha do pedido igual so oferece o numero novo quando a original terminou a escada sem resposta
+    final, com a ultima resposta a consulta ``desconhecido``."""
+    op = operacao(
+        estado=Estado.AGUARDANDO_FICHA,
+        envio_nivel=None,
+        informado=None,
+        repete_protocolo="CLR-2026-00000077",
+        original=_original(**mudar),
+        lido_em=AGORA,
+    )
+    assert op.original_ficou_em_desconhecido(8) is esperado
+
+
+def test_sem_original_lida_nao_ha_numero_novo() -> None:
+    assert not operacao(
+        repete_protocolo="CLR-2026-00000077", original=None, lido_em=AGORA
+    ).original_ficou_em_desconhecido(8)
+    assert not operacao(repete_protocolo=None, original=_original(), lido_em=AGORA).original_ficou_em_desconhecido(8)
+
+
+@pytest.mark.parametrize(
+    ("estado", "diz"),
+    [(Estado.NAO_SAIU, False), (Estado.SISTEMA_PEDIU_DADOS, False), (Estado.ENVIADA, True)],
+)
+def test_so_a_enviada_diz_que_saiu_com_o_numero_da_original(estado: Estado, diz: bool) -> None:
+    """Decisao 5 do coordenador: o pedido igual que nao chegou ao fim no sistema nao diz que saiu com o numero da
+    original (a frase se contradiria com "Nada aconteceu")."""
+    op = operacao(estado=estado, resultado=None, mesmo_numero_de="CLR-2026-00000077")
+    texto = texto_do_estado(op, consultas_maximas=8)
+    assert ("Saiu com o mesmo numero do protocolo CLR-2026-00000077." in texto) is diz
+    assert texto.isascii()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("visto", "contradisse", "motivo"),
+    [
+        ("concluida", True, "sistema_se_contradisse"),
+        ("recusada", True, "sistema_se_contradisse"),
+        ("recusada", False, "informado_mudou"),
+        (None, False, "informado_mudou"),
+    ],
+)
+async def test_o_botao_registra_so_o_que_a_pessoa_viu(
+    monkeypatch: pytest.MonkeyPatch, visto: str | None, contradisse: bool, motivo: str
+) -> None:
+    """Decisao 6 do coordenador, sem banco: a contradicao do sistema sobre o numero recusa antes de tudo (mesmo com o
+    estado de agora), e o estado de agora diferente do que a pessoa viu recusa ``informado_mudou``."""
+    op = operacao(informado=informado(estado="concluida", estado_final="concluida", se_contradisse=contradisse))
+
+    async def por_id(_c: Any, _i: uuid.UUID) -> Operacao:
+        return op
+
+    monkeypatch.setattr(fila, "por_id", por_id)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        await fila.registrar_o_que_o_sistema_informou(
+            None,  # type: ignore[arg-type]
+            op.id,
+            pessoa_id=op.pessoa_id,
+            estado_visto=visto,  # type: ignore[arg-type]
+        )
+    assert recusa.value.motivo == motivo
     assert recusa.value.mensagem.isascii()

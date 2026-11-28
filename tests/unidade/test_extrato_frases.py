@@ -173,6 +173,7 @@ FASE4 = {
     "aviso_bloqueio_sem_resposta": {"sistema": "Cobranca"},
     "aviso_bloqueio_sistema_fora": {"sistema": "Cobranca", "motivo": "o sistema esta em quarentena"},
     "aviso_bloqueio_dispensado": {"sistema": "Cobranca"},
+    "aviso_bloqueio_ainda_nao_saiu": {"sistema": "Cobranca", "motivo": "a pessoa ainda nao autorizou o sistema"},
     "acao_enviada_mesmo_numero": {
         "ferramenta": "enviar_lembrete",
         "original": "CLR-2026-00000007",
@@ -236,8 +237,9 @@ TEXTOS_FASE4 = {
         "O MCP-CLARO nao avisou o sistema Cobranca do bloqueio: o sistema esta em quarentena; o comprovante fica sem"
         " o que ele informaria."
     ),
-    "aviso_bloqueio_dispensado": (
-        "O bloqueio acabou antes de a porta de saida abrir; o MCP-CLARO nao avisou o sistema Cobranca."
+    "aviso_bloqueio_dispensado": "O bloqueio acabou antes de o aviso sair; o MCP-CLARO nao avisou o sistema Cobranca.",
+    "aviso_bloqueio_ainda_nao_saiu": (
+        "O MCP-CLARO ainda nao conseguiu avisar o sistema Cobranca do bloqueio: a pessoa ainda nao autorizou o sistema."
     ),
     "acao_enviada_mesmo_numero": (
         "Acao enviar_lembrete enviada uma vez ao sistema com o mesmo numero do protocolo CLR-2026-00000007;"
@@ -325,6 +327,12 @@ def test_frases_da_fase_4_dizem_o_que_o_desenho_e_a_critica_pedem() -> None:
     assert "A falha e do MCP-CLARO, nao do sistema." in FRASES["consulta_nao_feita"].modelo
     # A1 e D22: a acao sai sem numero, nunca para a porta.
     assert "enviada uma vez ao sistema sem o numero do selo" in FRASES["acao_enviada_sem_numero"].modelo
+    # D5 (etapa 3r): o aviso dispensado nao culpa a porta (ela podia estar aberta e faltar a chave), e o aviso que
+    # ainda nao saiu (sem a chave da pessoa) tem frase propria, com o motivo nosso.
+    assert "porta" not in FRASES["aviso_bloqueio_dispensado"].modelo
+    assert "antes de o aviso sair" in FRASES["aviso_bloqueio_dispensado"].modelo
+    assert FRASES["aviso_bloqueio_ainda_nao_saiu"].campos() == {"sistema", "motivo"}
+    assert "ainda nao conseguiu avisar" in FRASES["aviso_bloqueio_ainda_nao_saiu"].modelo
     # Nenhuma linha leva o numero da operacao: nenhum campo chamado numero, operacao ou chave.
     for tipo in FASE4:
         assert not FRASES[tipo].campos() & {"numero", "operacao", "chave", "recibo"}

@@ -611,15 +611,37 @@ async def test_os_pedidos_do_sistema_vao_do_envio_ao_fim_gravado(
     _com_chave(p, monkeypatch)
     estado, corpo, desfecho, pedidos = await p._enviar(OP, FERRAMENTA_T, None, None)
     assert (estado, pedidos) == (Estado.ENVIADA, ("fio_antigo:elicitation/create",))
-    gravados: list[tuple[Estado, tuple[str, ...]]] = []
+    gravados: list[tuple[Estado, tuple[str, ...], Any]] = []
 
-    async def finalizar(_c: Any, _op: Any, estado: Estado, *_: Any, pedidos: Any = ()) -> bool:
-        gravados.append((estado, tuple(pedidos)))
+    async def finalizar(_c: Any, _op: Any, estado: Estado, *_: Any, pedidos: Any = (), selo: Any = None) -> bool:
+        gravados.append((estado, tuple(pedidos), selo))
         return True
 
     monkeypatch.setattr(porta_de_saida.fila, "finalizar", finalizar)
     await p._gravar_fim(OP, estado, corpo, desfecho, pedidos=pedidos)
-    assert gravados == [(Estado.ENVIADA, ("fio_antigo:elicitation/create",))]
+    assert gravados == [(Estado.ENVIADA, ("fio_antigo:elicitation/create",), None)]
+
+
+async def test_o_fim_leva_o_retrato_do_selo_a_linha_do_fim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pedido do G4 (etapa 3r, item 7 do G3ar): ``_gravar_fim`` passa ``SeloDoEnvio.retrato`` a ``fila.finalizar``
+    (``dados.selo`` da linha do fim); sem passo do selo (``SEM_SELO``: terceiro), nada, como antes."""
+    p = PortaDeSaida(engine=EngineFalso(), cifra=None)  # type: ignore[arg-type]
+    vistos: list[Any] = []
+
+    async def finalizar(*_: Any, pedidos: Any = (), selo: Any = None) -> bool:
+        vistos.append(selo)
+        return True
+
+    async def sem_linhas_do_selo(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(porta_de_saida.fila, "finalizar", finalizar)
+    monkeypatch.setattr(p, "_gravar_selo", sem_linhas_do_selo)
+    retrato = {"nivel": 2, "teste_id": "t", "testado_em": "x", "vale_ate": "y", "modo": "ambiente_de_teste"}
+    selo = porta_de_saida.SeloDoEnvio(nivel=2, chave=str(uuid.uuid4()), retrato=retrato | {"motivo": "vigente"})
+    await p._gravar_fim(OP, Estado.ENVIADA, {"content": []}, "o sistema respondeu", selo=selo)
+    await p._gravar_fim(OP, Estado.ENVIADA, {"content": []}, "o sistema respondeu")
+    assert vistos == [retrato | {"motivo": "vigente"}, None]
 
 
 @pytest.mark.parametrize(

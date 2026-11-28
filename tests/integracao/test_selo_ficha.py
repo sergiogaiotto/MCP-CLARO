@@ -10,7 +10,7 @@
 - ``tipo_da_recusa`` nao le o selo, e a leitura segue quando a leitura com o selo falha (A1).
 - A1 na transacao do pedido e na resposta: um erro do banco ao ler o selo (``vigente.ler`` com ``SELECT 1 / 0``), ou
   o banco que recusa tambem o retrato relido, deixa a ficha sem retrato, sem erro; e a resposta sem selo lido vai com
-  o nivel 1.
+  o nivel 1. O mesmo vale para um selo fora do vocabulario lido do banco (``ValueError``, W6 do verificador).
 - Os textos ao aplicativo nao tem acento.
 """
 
@@ -406,3 +406,27 @@ async def test_resposta_ao_aplicativo_com_o_selo_que_nao_se_le_vai_no_nivel_1(
     assert somados.count("selo_da_operacao_nao_lido") == 2
     monkeypatch.undo()
     assert meta(await m.consultar(op.protocolo))[META_SELO] == 2  # lido, o efetivo de agora e o 2
+
+
+async def test_selo_fora_do_vocabulario_lido_do_banco_nao_para_o_pedido(
+    mundo: MundoSelo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W6 do verificador (o ramo ``ValueError`` de ``_selo_lido_agora``): a leitura do selo na transacao do pedido
+    levanta ``ValueError`` (um selo fora do vocabulario lido do banco, por exemplo um motivo novo). Pela regra de A1,
+    a ficha nasce sem retrato, o pedido segue e o contador ``selo_nao_lido_no_pedido`` sobe."""
+    m = mundo
+    await m.gravar_teste(nivel=2)
+    f = await _ferramenta_com_selo(m, com_selo=False)  # sem o selo da vitrine: o selo e lido na transacao
+
+    async def ler_fora_do_vocabulario(_c: Any, _sistema_id: Any) -> Any:
+        raise ValueError("motivo do selo fora do vocabulario")
+
+    somados = _espiar_contadores(monkeypatch)
+    monkeypatch.setattr(vigente, "ler", ler_fora_do_vocabulario)
+    op = await _registrar(m, f, {"para": "w6@exemplo.teste", "texto": "x"})
+    assert op.estado == Estado.AGUARDANDO_FICHA
+    assert op.selo is None
+    assert await m.ficha_selo(op) is None
+    assert [n for n in somados if n.startswith("selo_")] == ["selo_nao_lido_no_pedido"]
+    [pedida] = await m.extrato("acao_pedida", op.protocolo)
+    assert "selo" not in pedida.dados

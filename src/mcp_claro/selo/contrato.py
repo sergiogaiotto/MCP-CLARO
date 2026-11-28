@@ -213,8 +213,10 @@ DESFECHOS: Final[tuple[Desfecho, ...]] = (
     "sala_fora",
     "sistema_fora",
 )
-"""Como terminou uma pergunta ao sistema. ``sistema_fora`` (critica A2): o sistema nao esta ``ativo``, a porta de
-saida esta fechada (consulta) ou, num terceiro, a revisao do servidor nao e a vigente: nada foi perguntado."""
+"""Como terminou uma pergunta ao sistema. ``sistema_fora`` (critica A2): o sistema nao esta ``ativo`` (ou na
+2026-07-28) ou, num terceiro, a revisao do servidor nao e a vigente: nada foi perguntado. Com a porta de saida
+fechada, a consulta nao pergunta nem grava nada (409 ``porta_fechada`` em ``ROTA_CONSULTAR``, decisao 2 do
+coordenador no retoque da etapa 3), e o aviso espera."""
 
 DESFECHOS_QUE_GASTAM_TENTATIVA: Final[tuple[Desfecho, ...]] = ("respondeu", "sem_resposta", "resposta_invalida")
 """So estes contam na escada da consulta. ``sem_chave``, ``sala_fora`` e ``sistema_fora`` sao do MCP-CLARO ou da
@@ -275,16 +277,23 @@ escritas da bateria). ``porta_fechada``: a passagem para ``rodando`` foi recusad
 ``teto_de_chamadas``: o plano da declaracao passa do teto (B5)."""
 
 ESTADOS_DO_AVISO: Final = ("pendente", "respondido", "sem_resposta", "sistema_fora", "bloqueio_encerrado")
-"""``avisos_bloqueio.estado``. Com a porta fechada o aviso espera (continua ``pendente``, sem gastar tentativa):
-nada sai com a porta fechada. ``sistema_fora``: o sistema saiu de ``ativo`` (A2). ``bloqueio_encerrado``: o
-bloqueio acabou antes de o aviso sair, e ele nao sai mais.
+"""``avisos_bloqueio.estado``. Com a porta fechada, ou sem a chave da pessoa, o aviso espera (continua ``pendente``,
+sem gastar tentativa): nada sai com a porta fechada, e sem a chave a falha e do MCP-CLARO (critica M7). Na primeira
+vez que a chave nao abre, a dona ganha uma linha no extrato, uma so por bloqueio e sistema
+(``aviso_bloqueio_ainda_nao_saiu``, com o motivo nosso). ``sistema_fora``: o MCP-CLARO nao avisou o sistema, e o
+comprovante nao o culpa: o sistema saiu de ``ativo`` (A2), a chave da pessoa foi recusada na ultima tentativa (401,
+M7), ou, por defesa, o sistema nao tem chave por pessoa. ``sem_resposta``: o sistema foi chamado em todas as
+tentativas e nao respondeu. ``bloqueio_encerrado``: o bloqueio acabou antes de o aviso sair, e ele nao sai mais
+(``aviso_bloqueio_dispensado``).
 
 So um bloqueio (``bloqueios.tipo = 'bloqueio'``) avisa os sistemas; uma pausa nao pede que parem nem queima numeros
 (decisao do coordenador, etapa 1). O despachante (G3) filtra pelo tipo e marca a pausa em
 ``avisos_bloqueio_derivados`` com nenhum aviso; o banco recusa o aviso de uma pausa. A resposta ao aviso
 (``informacoes_sistema`` de origem ``aviso``) so existe depois de o aviso chamar o sistema: com a vez reservada
-(``tentativas`` >= 1) e fora de ``sistema_fora`` e ``bloqueio_encerrado``, que nunca chamam. Nesses dois, o extrato
-diz o que houve e nenhuma linha de ``informacoes_sistema`` e gravada."""
+(``tentativas`` >= 1) e fora de ``sistema_fora`` e ``bloqueio_encerrado``, que nunca gravam resposta (a chave
+recusada na ultima tentativa chamou o sistema, mas ele nao respondeu ao aviso). Nesses dois, o extrato diz o que houve
+e nenhuma linha de ``informacoes_sistema`` e gravada. A resposta ao aviso fica gravada e mostrada, mas nunca encerra
+a escada da consulta nem queima o numero (``ORIGENS_DA_RESPOSTA_FINAL``)."""
 
 TIPO_CHAVE_TESTE: Final = "teste_selo"
 """``chaves_cifradas.tipo`` da chave da bateria, guardada pelo ADMIN. A bateria usa so ela, nunca a de uma pessoa
@@ -1423,12 +1432,15 @@ id)``:
 
 - as tentativas ja feitas sao so as linhas de origem ``consulta`` com desfecho em ``DESFECHOS_QUE_GASTAM_TENTATIVA``
   (``tentativas_da_consulta``). O recibo e a resposta ao aviso nunca contam como tentativa, nem ``sem_chave``,
-  ``sala_fora`` e ``sistema_fora``;
+  ``sala_fora`` e ``sistema_fora``. So elas contam para o maximo (``BADGE_LOOKUP_MAX_ATTEMPTS``);
 - a hora base e a ultima linha da operacao, de qualquer origem e de qualquer desfecho, ou, sem nenhuma,
   ``envios_selo.gravado_em`` (``hora_base_da_consulta``). Uma linha que nao gasta tentativa (``sem_chave``,
   ``sala_fora``) empurra a vez seguinte, sem gastar a escada;
-- a tentativa ``n`` (contada de 0) vai ``ESCADA_DA_CONSULTA_MINUTOS[n]`` minutos depois da hora base. Passado o fim
-  da escada, vale o ultimo degrau, ate ``BADGE_LOOKUP_MAX_ATTEMPTS`` (``espera_da_consulta``);
+- o degrau da espera e contado por TODAS as linhas de origem ``consulta`` da operacao, as que gastam e as que nao
+  gastam tentativa (``degrau_da_consulta``; decisao 3 do coordenador no retoque da etapa 3): a vez ``n`` (contada de
+  0) vai ``ESCADA_DA_CONSULTA_MINUTOS[n]`` minutos depois da hora base, e, passado o fim da escada, vale o ultimo
+  degrau. Sem linhas que nao gastam, o degrau e o numero de tentativas, como antes. Com a chave da pessoa apagada
+  (``sem_chave`` a cada pergunta), as linhas ficam poucas: depois do oitavo degrau, uma a cada 240 minutos;
 - critica A3.3 (decisao do coordenador, etapa 1): a primeira consulta, e toda consulta, so vai depois do prazo do
   envio (``RESPONSE_MAX_WAIT_SECONDS``, o prazo da chamada na porta de saida) mais
   ``MARGEM_DA_CONSULTA_SEGUNDOS``, contados de ``envios_selo.gravado_em``: antes disso a chamada ainda pode estar a
@@ -1437,21 +1449,30 @@ id)``:
   ``nao_recebida`` so confirmada por duas respostas assim com ao menos o primeiro degrau
   (``ESCADA_DA_CONSULTA_MINUTOS[0]`` minutos) entre a primeira e a ultima (A3.3, ``nao_recebida_confirmada``). A
   segunda pergunta pega o sistema que diz ``nao_recebida`` de uma escrita em andamento: se ele responder outra
-  coisa, o banco ve a contradicao;
+  coisa, o banco ve a contradicao. So as respostas de origem ``recibo`` e ``consulta`` contam
+  (``ORIGENS_DA_RESPOSTA_FINAL``): a resposta ao aviso de bloqueio nunca encerra a escada (decisao 1 do coordenador
+  no retoque da etapa 3);
 - a escada tambem acaba quando a ultima linha e ``sistema_fora`` (critica A2: a escada para, e a decisao fica com a
-  pessoa) e quando outro protocolo saiu com o mesmo numero depois (``selo_substituto``, lido pela rota no banco).
+  pessoa), quando outro protocolo saiu com o mesmo numero depois (``selo_substituto``, lido pela rota no banco), no
+  maximo de tentativas que gastam e pelo tempo: nenhuma consulta vai depois de ``envios_selo.gravado_em`` mais
+  ``REAPROVEITAR_NUMERO_DIAS`` dias, a mesma janela do pedido igual (``escada_vencida``; decisao 3).
 
 A mesma regra vale no banco, para a tela e o pedido igual: ``selo_estado_final`` (o que resolve o "estamos
 confirmando" e o que o botao "Registrar o que o sistema informou" registra) e ``medicoes.v_fila_agora`` contam como
-``resposta_que_encerra``, sobre as respostas da operacao; a queima do numero no pedido igual (``envios_selo_nasce``)
-conta as respostas sobre o numero (a original e os pedidos iguais que sairam com ele). Uma ``nao_recebida`` sozinha
-aparece como dita pelo sistema, com "continuamos perguntando", sem o botao de um toque, e o pedido igual sai com o
-mesmo numero.
+``resposta_que_encerra``, sobre as respostas de origem ``recibo`` e ``consulta`` da operacao; a queima do numero no
+pedido igual (``envios_selo_nasce``) conta as respostas sobre o numero (a original e os pedidos iguais que sairam com
+ele), tambem sem as do aviso. Uma ``nao_recebida`` sozinha aparece como dita pelo sistema, com "continuamos
+perguntando", sem o botao de um toque, e o pedido igual sai com o mesmo numero. A resposta ao aviso continua gravada
+e mostrada (``Comprovante.avisos``); so nao e final. Um sistema que respondeu ``parada`` ao aviso e fez a escrita e
+pego pela consulta seguinte: o gatilho de contradicao da 0007 compara as linhas de toda origem.
 
 Fim da escada sem resposta que encerra (decisao do coordenador, retoque do G0): quando ``e_a_ultima_consulta`` ja
 passou e nenhuma resposta encerra (inclusive uma ``nao_recebida`` sozinha, sem a segunda), a operacao fica como na
 Fase 2: ``selo_estado_final`` continua ``None``, a decisao e da pessoa, e a tela (G6) troca "continuamos perguntando"
-por "o sistema nao confirmou; a decisao e sua". Nada e resolvido sozinho, e o pedido igual sai com o mesmo numero.
+por "o sistema nao confirmou; a decisao e sua". Nada e resolvido sozinho, e o pedido igual sai com o mesmo numero. A
+escada acabada pelo tempo (``escada_vencida``) e tratada igual na tela (G6) e em ``Operacao.consulta_acabou`` (G4); se
+ela acabou sem chegar ao maximo de tentativas que gastam, a operacao nao entra na conta da retirada por
+``nao_respondeu_consultas``: o sistema nao foi perguntado o bastante.
 
 Gravacao das respostas (G3 e G5): cada transacao grava ``informacoes_sistema`` de UM sistema so, e por ultimo (depois
 dos outros UPDATE e INSERT da transacao). A trava consultiva da 0007 e por sistema: duas transacoes que gravassem
@@ -1460,15 +1481,25 @@ respostas de dois sistemas em ordens opostas poderiam se esperar em ciclo."""
 MARGEM_DA_CONSULTA_SEGUNDOS: Final = 60
 """Folga, alem do prazo do envio, antes de qualquer consulta sobre a operacao (critica A3.3)."""
 
+ORIGENS_DA_RESPOSTA_FINAL: Final[tuple[Origem, ...]] = ("recibo", "consulta")
+"""As origens cuja resposta encerra a escada, resolve o "estamos confirmando" e queima o numero (decisao 1 do
+coordenador no retoque da etapa 3, desenho 5.2). A resposta ao aviso (origem ``aviso``) fica gravada e mostrada, mas
+nunca e final: um sistema que diz ``parada`` e escreve mesmo assim e pego pela consulta seguinte."""
+
+
+def _minutos_do_degrau(degrau: int) -> int:
+    return ESCADA_DA_CONSULTA_MINUTOS[min(degrau, len(ESCADA_DA_CONSULTA_MINUTOS) - 1)]
+
 
 def espera_da_consulta(feitas: int, maximo: int) -> int | None:
     """Minutos de espera antes da proxima consulta, depois de ``feitas`` tentativas que gastam a vez, ou ``None``
-    quando a escada acabou (``feitas >= maximo``, o ``BADGE_LOOKUP_MAX_ATTEMPTS``)."""
+    quando a escada acabou (``feitas >= maximo``, o ``BADGE_LOOKUP_MAX_ATTEMPTS``). Sem linhas que nao gastam
+    tentativa, e a espera de ``proxima_consulta``; com elas, o degrau sai de ``degrau_da_consulta``."""
     if feitas < 0:
         raise ValueError("feitas nao e negativo")
     if feitas >= maximo:
         return None
-    return ESCADA_DA_CONSULTA_MINUTOS[min(feitas, len(ESCADA_DA_CONSULTA_MINUTOS) - 1)]
+    return _minutos_do_degrau(feitas)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1487,9 +1518,24 @@ def tentativas_da_consulta(linhas: Iterable[LinhaInformada]) -> int:
     return sum(1 for x in linhas if x.origem == "consulta" and x.desfecho in DESFECHOS_QUE_GASTAM_TENTATIVA)
 
 
+def degrau_da_consulta(linhas: Iterable[LinhaInformada]) -> int:
+    """O degrau da proxima espera: todas as linhas de origem ``consulta``, as que gastam e as que nao gastam tentativa
+    (``sem_chave``, ``sala_fora``). Uma linha que nao gasta nao gasta o maximo, mas sobe a espera: sem a chave da
+    pessoa, a escada nao pergunta a cada minuto sem fim (decisao 3 do coordenador no retoque da etapa 3)."""
+    return sum(1 for x in linhas if x.origem == "consulta")
+
+
 def hora_base_da_consulta(linhas: Sequence[LinhaInformada], enviado_em: datetime) -> datetime:
     """A hora de onde conta o degrau: a ultima linha da operacao, de qualquer origem e desfecho, ou o envio."""
     return max((x.gravado_em for x in linhas), default=enviado_em)
+
+
+def escada_vencida(enviado_em: datetime, agora: datetime) -> bool:
+    """A escada da consulta acabou pelo tempo: ``agora`` (o ``now()`` do banco) ja passou de ``enviado_em``
+    (``envios_selo.gravado_em``) mais ``REAPROVEITAR_NUMERO_DIAS`` dias, a mesma janela do pedido igual. Depois
+    disso nenhuma consulta vai, e a tela e ``Operacao.consulta_acabou`` (G4) dizem "o sistema nao confirmou; a
+    decisao e sua" (decisao 3 do coordenador no retoque da etapa 3)."""
+    return agora >= enviado_em + timedelta(days=REAPROVEITAR_NUMERO_DIAS)
 
 
 def nao_recebida_confirmada(horas: Iterable[datetime]) -> bool:
@@ -1502,9 +1548,14 @@ def nao_recebida_confirmada(horas: Iterable[datetime]) -> bool:
 
 def resposta_que_encerra(linhas: Sequence[LinhaInformada]) -> str | None:
     """O estado final que encerra a escada (critica A3.3), ou ``None``: o ultimo (pela ordem de ``linhas``) estado de
-    ``ESTADOS_FINAIS`` entre as respostas, com ``nao_recebida`` so quando ``nao_recebida_confirmada``. Mesma regra de
-    ``selo_estado_final`` no banco, sobre as linhas da operacao."""
-    finais = [x for x in linhas if x.desfecho == "respondeu" and x.estado in ESTADOS_FINAIS]
+    ``ESTADOS_FINAIS`` entre as respostas de origem ``recibo`` e ``consulta`` (``ORIGENS_DA_RESPOSTA_FINAL``), com
+    ``nao_recebida`` so quando ``nao_recebida_confirmada`` por elas. A resposta ao aviso nunca encerra nem confirma.
+    Mesma regra de ``selo_estado_final`` no banco, sobre as linhas da operacao."""
+    finais = [
+        x
+        for x in linhas
+        if x.origem in ORIGENS_DA_RESPOSTA_FINAL and x.desfecho == "respondeu" and x.estado in ESTADOS_FINAIS
+    ]
     confirmada = nao_recebida_confirmada(x.gravado_em for x in finais if x.estado == "nao_recebida")
     valem = [x for x in finais if x.estado != "nao_recebida" or confirmada]
     return valem[-1].estado if valem else None
@@ -1514,9 +1565,11 @@ def proxima_consulta(
     linhas: Sequence[LinhaInformada], *, enviado_em: datetime, maximo: int, prazo_envio_segundos: float
 ) -> datetime | None:
     """Quando a proxima consulta sobre a operacao pode ir, ou ``None`` quando nao ha mais o que perguntar (resposta
-    final, ``sistema_fora`` na ultima linha ou escada acabada). ``linhas`` em ordem de ``(gravado_em, id)``;
-    ``maximo`` e ``BADGE_LOOKUP_MAX_ATTEMPTS``; ``prazo_envio_segundos`` e ``RESPONSE_MAX_WAIT_SECONDS``. Veja
-    ``ESCADA_DA_CONSULTA_MINUTOS``. A rota (G3) recusa antes da hora (409) e as rotinas (G5) so pedem depois dela.
+    final, ``sistema_fora`` na ultima linha, maximo de tentativas que gastam, ou a vez passaria do fim pelo tempo,
+    ``escada_vencida``). ``linhas`` em ordem de ``(gravado_em, id)``; ``maximo`` e ``BADGE_LOOKUP_MAX_ATTEMPTS``;
+    ``prazo_envio_segundos`` e ``RESPONSE_MAX_WAIT_SECONDS``. Veja ``ESCADA_DA_CONSULTA_MINUTOS``. A rota (G3) recusa
+    antes da hora (409) e as rotinas (G5) so pedem depois dela; quem pergunta confere tambem ``escada_vencida`` com o
+    ``now()`` de agora (uma vez perdida por dias nao vai depois do fim).
 
     A hora devolvida e do relogio do banco (``gravado_em`` e ``envios_selo.gravado_em`` sao ``now()`` dele): compare
     sempre com o ``now()`` do banco, lido na mesma transacao (``SELECT now()``), nunca com o relogio do processo nem
@@ -1525,12 +1578,14 @@ def proxima_consulta(
         return None
     if linhas and linhas[-1].desfecho == "sistema_fora":
         return None
-    espera = espera_da_consulta(tentativas_da_consulta(linhas), maximo)
-    if espera is None:
+    if espera_da_consulta(tentativas_da_consulta(linhas), maximo) is None:
         return None
-    pelo_degrau = hora_base_da_consulta(linhas, enviado_em) + timedelta(minutes=espera)
+    pelo_degrau = hora_base_da_consulta(linhas, enviado_em) + timedelta(
+        minutes=_minutos_do_degrau(degrau_da_consulta(linhas))
+    )
     pelo_envio = enviado_em + timedelta(seconds=prazo_envio_segundos + MARGEM_DA_CONSULTA_SEGUNDOS)
-    return max(pelo_degrau, pelo_envio)
+    vez = max(pelo_degrau, pelo_envio)
+    return None if escada_vencida(enviado_em, vez) else vez
 
 
 def e_a_ultima_consulta(linhas: Sequence[LinhaInformada], maximo: int) -> bool:
@@ -1546,15 +1601,23 @@ Pedido: ``POST`` com ``{"operacao_id": "<uuid>"}``, pela regra de ``_so_texto_va
 interna nao distingue quem chama (critica M7), por isso o despachante nao confia no chamador e confere tudo pelo
 banco antes de perguntar, com as mesmas funcoes das rotinas: le as linhas de ``informacoes_sistema`` da operacao e
 ``envios_selo.gravado_em`` e calcula ``proxima_consulta`` (tentativas so de origem ``consulta``, hora base na ultima
-linha de qualquer origem, piso no prazo do envio, ``espera_da_consulta``) e ``e_a_ultima_consulta``. Respostas:
+linha de qualquer origem, degrau por todas as linhas de consulta, piso no prazo do envio, fim pelo tempo,
+``espera_da_consulta``), ``escada_vencida`` e ``e_a_ultima_consulta``. Respostas:
 
 - 200 ``{"desfecho": <DESFECHOS>, "estado": <ESTADOS> | null}``: a pergunta foi gravada em ``informacoes_sistema``
-  (com ``sistema_fora``, ``sem_chave`` e ``sala_fora`` tambem; esses nao gastam tentativa);
+  (com ``sistema_fora``, ``sem_chave`` e ``sala_fora`` tambem; esses nao gastam tentativa). ``sistema_fora``
+  (quarentena, fora de ``ativo``, fora da 2026-07-28 ou revisao do terceiro diferente da do teste) encerra a escada
+  (A2). A linha ``consulta_nao_feita`` do extrato so e gravada quando a ultima linha desse tipo da operacao nao tem o
+  mesmo motivo; ``informacoes_sistema`` continua com uma linha por pergunta;
 - 404 ``{"motivo": "sem_envio"}``: a operacao nao existe ou nao saiu com numero;
 - 409 ``{"motivo": "nada_a_perguntar"}``: nada foi perguntado, porque ja tem resposta que encerra
-  (``resposta_que_encerra``: uma ``nao_recebida`` sozinha ainda nao encerra), a escada acabou, a ultima linha e
-  ``sistema_fora``, outro protocolo saiu com o mesmo numero depois (``selo_substituto``) ou ainda nao e a vez pela
-  escada (chamar a rota em sequencia nao gasta as tentativas contra um sistema lento);
+  (``resposta_que_encerra``: uma ``nao_recebida`` sozinha ainda nao encerra, e a resposta ao aviso nunca encerra), a
+  escada acabou (no maximo de tentativas ou pelo tempo, ``escada_vencida``), a ultima linha e ``sistema_fora``, outro
+  protocolo saiu com o mesmo numero depois (``selo_substituto``) ou ainda nao e a vez pela escada (chamar a rota em
+  sequencia nao gasta as tentativas contra um sistema lento);
+- 409 ``{"motivo": "porta_fechada"}`` (decisao 2 do coordenador no retoque da etapa 3): era a vez, mas a porta de
+  saida esta fechada (agora, ou fechou enquanto a chave abria): nada foi perguntado e nada foi gravado, a escada nao
+  anda e nao gasta tentativa. As rotinas (G5) tentam de novo na proxima rodada;
 - 503 ``{"motivo": "conferencia_nao_feita"}``: falha do MCP-CLARO no banco; nada foi gravado.
 
 A retirada por ``nao_respondeu_consultas`` vai na mesma transacao da consulta que falhou (o banco exige a prova
@@ -1574,7 +1637,9 @@ class ConfereNoDespachante(Protocol):
     """G5, ``rotinas/despachante.py``: ``ClienteDespachante.conferir(operacao_id)``, que vai a ``ROTA_CONSULTAR``.
 
     Sem o ``ultima`` do desenho (critica M7). Levanta ``ConferenciaNaoFeita`` quando a falha e do MCP-CLARO (o
-    despachante nao atendeu, 503); 404 e 409 voltam como ``LookupError``."""
+    despachante nao atendeu, 503); 404 e 409 voltam como ``LookupError``. O 409 ``porta_fechada`` (decisao 2 do
+    coordenador no retoque da etapa 3) nao encerra nada: a operacao continua na vez e as rotinas tentam de novo na
+    proxima rodada, como com 503."""
 
     async def conferir(self, operacao_id: uuid.UUID) -> RespostaDaConsulta: ...
 

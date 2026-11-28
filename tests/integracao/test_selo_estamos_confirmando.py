@@ -14,6 +14,19 @@ e as respostas do sistema. O caminho inteiro (porta, duble que conta as chamadas
   pode registrar.
 - "Registrar o que o sistema informou" grava a decisao da pessoa so com estado final; a pessoa que contraria o sistema
   gera ``sistema_contradito`` e aviso ao ADMIN, e o selo fica.
+
+Retoque da etapa 3 (G4r, decisoes do coordenador):
+
+- decisao 5: um pedido igual que terminou ``nao_saiu`` ou ``sistema_pediu_dados`` nao substitui a original, que segue
+  na escada, e o pedido igual seguinte a repete (V07 do verificador);
+- decisao 3: a escada acaba tambem pelo tempo (``contrato.escada_vencida``, pela hora do banco), mesmo sem tentativas;
+- decisao 4 (M4.2): com a original em ``desconhecido`` no fim da escada, so a escolha da pessoa na ficha
+  (``confirmar_ficha(..., numero_novo=True)``) da numero novo; fora da regra, a recusa nao muda nada. "Sem resposta
+  final" conta pelo numero da original (toda acao que saiu com ele), e a ultima resposta a consulta, so pelas linhas
+  ``respondeu`` (defeitos 2 e 3 do verificador do G4r);
+- decisao 6: o botao registra so o estado que a pessoa viu (``estado_visto``) e nunca o de um sistema que se
+  contradisse sobre o numero, nem quando a resposta que contradiz esta na original e o botao e o do pedido igual
+  (defeito 1 do verificador do G4r).
 """
 
 from __future__ import annotations
@@ -26,8 +39,10 @@ import pytest
 from sqlalchemy import text
 
 from mcp_claro.config.settings import Parametros
+from mcp_claro.medicoes.contadores import CONTADORES
 from mcp_claro.saida import fila
 from mcp_claro.saida.estados import Estado
+from mcp_claro.selo import contrato
 from tests.integracao.test_selo_g4_apoio import (
     ARGUMENTOS,
     META_INFORMADO,
@@ -92,6 +107,19 @@ async def decisoes(m: MundoSelo, op: fila.Operacao) -> list[Any]:
                 )
             ).all()
         )
+
+
+def espiar_contadores(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Os nomes que ``CONTADORES.somar`` recebeu daqui em diante (a soma de verdade continua)."""
+    somados: list[str] = []
+    somar = CONTADORES.somar
+
+    def espiar(nome: str, valor: int = 1, **rotulos: str) -> None:
+        somados.append(nome)
+        somar(nome, valor, **rotulos)
+
+    monkeypatch.setattr(CONTADORES, "somar", espiar)
+    return somados
 
 
 # --- Item 1: o que o sistema informou e o estado final ---------------------------------------------------------
@@ -426,7 +454,9 @@ async def test_registrar_o_que_o_sistema_informou_grava_a_decisao_da_pessoa(
     op, _ = await nao_confirmada(m)
     await m.informar(op, estado)
     async with m.entrada_db.begin() as c:
-        depois = await fila.registrar_o_que_o_sistema_informou(c, op.id, pessoa_id=m.pessoas["ana"])
+        depois = await fila.registrar_o_que_o_sistema_informou(
+            c, op.id, pessoa_id=m.pessoas["ana"], estado_visto=estado
+        )
     assert depois.decisao_pessoa == decisao
     assert [(d.decisao, d.observacao) for d in await decisoes(m, op)] == [(decisao, fila.OBSERVACAO_DO_SISTEMA)]
     assert await m.extrato("sistema_contradito", op.protocolo) == []
@@ -439,13 +469,17 @@ async def test_registrar_nao_recebida_so_com_ela_confirmada(mundo: MundoSelo) ->
     primeira = await m.informar(op, "nao_recebida")
     with pytest.raises(fila.DecisaoRecusada) as recusa:
         async with m.entrada_db.begin() as c:
-            await fila.registrar_o_que_o_sistema_informou(c, op.id, pessoa_id=m.pessoas["ana"])
+            await fila.registrar_o_que_o_sistema_informou(
+                c, op.id, pessoa_id=m.pessoas["ana"], estado_visto="nao_recebida"
+            )
     assert recusa.value.motivo == "sem_resposta_final"
     assert await decisoes(m, op) == []
     await m.recuar_informacao(primeira.id, 2)
     await m.informar(op, "nao_recebida")
     async with m.entrada_db.begin() as c:
-        depois = await fila.registrar_o_que_o_sistema_informou(c, op.id, pessoa_id=m.pessoas["ana"])
+        depois = await fila.registrar_o_que_o_sistema_informou(
+            c, op.id, pessoa_id=m.pessoas["ana"], estado_visto="nao_recebida"
+        )
     assert depois.decisao_pessoa == "nao_aconteceu"
 
 
@@ -460,6 +494,7 @@ async def test_registrar_o_que_o_sistema_informou_recusa(mundo: MundoSelo, caso:
         "substituto": "resultado_em_outro_protocolo",
         "outra_pessoa": "operacao_desconhecida",
     }[caso]
+    visto = {"sem_resposta": "desconhecido", "parcial": "parcial"}.get(caso, "concluida")  # o que a tela mostrou
     if caso == "sem_resposta":
         await m.informar(op, "desconhecido")
     elif caso == "parcial":
@@ -474,7 +509,7 @@ async def test_registrar_o_que_o_sistema_informou_recusa(mundo: MundoSelo, caso:
         pessoa = m.pessoas["real"]
     with pytest.raises(fila.DecisaoRecusada) as recusa:
         async with m.entrada_db.begin() as c:
-            await fila.registrar_o_que_o_sistema_informou(c, op.id, pessoa_id=pessoa)
+            await fila.registrar_o_que_o_sistema_informou(c, op.id, pessoa_id=pessoa, estado_visto=visto)
     assert recusa.value.motivo == motivo
     assert recusa.value.mensagem.isascii()
     assert await decisoes(m, op) == []
@@ -516,3 +551,397 @@ async def test_nao_sei_nunca_contraria(mundo: MundoSelo) -> None:
 
 
 PREFIXO_REPETIDO = "br.com.claro.mcp-claro/repetido"
+
+
+# --- Retoque da etapa 3 (G4r) -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fim", ["nao_saiu", "sistema_pediu_dados"])
+async def test_pedido_igual_que_nao_chegou_ao_sistema_nao_substitui_a_original(mundo: MundoSelo, fim: str) -> None:
+    """Decisao 5 do coordenador e V07 (W1) do verificador. O fica nao confirmada com o numero K. R repete O, leva K e
+    termina ``fim``: a chamada nao chegou ao fim no sistema. O fica sem substituto e segue na escada da consulta; o
+    texto de O nao manda olhar R, e o de R nao diz que saiu com o numero de O. T, o pedido igual seguinte, repete O
+    (a "nao confirmada", nao o R mais novo) e leva K; agora T substitui O."""
+    m = mundo
+    o, envio_o = await nao_confirmada(m)
+    r, envio_r = await _pedido_igual_que_sai(m, o, fim)
+    assert (r.repete_protocolo, r.mesmo_numero_de, envio_r.chave) == (o.protocolo, o.protocolo, envio_o.chave)
+
+    original = await m.por_id(o.id)
+    assert original.substituto is None
+    assert not original.consulta_acabou(m.p.BADGE_LOOKUP_MAX_ATTEMPTS)  # segue na escada
+    [texto_o] = textos(await m.consultar(o.protocolo))
+    assert "saiu depois ao sistema com o mesmo numero" not in texto_o
+    assert "O MCP-CLARO esta perguntando ao sistema o que houve" in texto_o
+    [texto_r] = textos(await m.consultar(r.protocolo))
+    assert "Saiu com o mesmo numero" not in texto_r
+
+    t = await m.operacao(protocolo_de(await m.agir()))
+    assert t.repete_protocolo == o.protocolo  # sem o filtro da nao_confirmada, T escolheria R e o banco recusaria
+    t = await m.confirmar(t)
+    envio_t = await m.sair_com_numero(t)
+    assert (envio_t.chave, envio_t.repete_operacao_id) == (envio_o.chave, o.id)
+    assert (await m.por_id(o.id)).substituto == t.protocolo
+
+
+async def envelhecer_envio(m: MundoSelo, op: fila.Operacao, *, minutos: int) -> None:
+    """Poe o envio com numero ``minutos`` antes de agora, pela hora do banco (o dono desliga a guarda de "so de
+    acrescentar" so nesta transacao)."""
+    async with m.dono.begin() as c:
+        await c.execute(text("ALTER TABLE envios_selo DISABLE TRIGGER envios_selo_sem_update_delete"))
+        await c.execute(
+            text("UPDATE envios_selo SET gravado_em = now() - make_interval(mins => :m) WHERE operacao_id = :o"),
+            {"m": minutos, "o": op.id},
+        )
+        await c.execute(text("ALTER TABLE envios_selo ENABLE TRIGGER envios_selo_sem_update_delete"))
+
+
+SETE_DIAS_EM_MINUTOS = contrato.REAPROVEITAR_NUMERO_DIAS * 24 * 60
+
+
+async def test_a_escada_acaba_pelo_tempo_mesmo_sem_tentativas(mundo: MundoSelo) -> None:
+    """Decisao 3 do coordenador: linhas que nao gastam tentativa (``sem_chave``) nao fazem a escada rodar sem fim. Com o
+    envio ha ``REAPROVEITAR_NUMERO_DIAS`` dias, pela hora do banco lida no mesmo SELECT (``Operacao.lido_em``), a
+    consulta acabou, e o aplicativo ouve que a decisao fica com a pessoa; um minuto antes, ainda nao."""
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    op, _ = await nao_confirmada(m)
+    for _ in range(3):
+        await m.informar(op, None, desfecho="sem_chave")
+    await envelhecer_envio(m, op, minutos=SETE_DIAS_EM_MINUTOS - 1)
+    antes = await m.por_id(op.id)
+    assert antes.informado is not None
+    assert antes.informado.tentativas == 0
+    assert antes.lido_em is not None
+    assert antes.envio_gravado_em is not None
+    assert not antes.escada_vencida
+    assert not antes.consulta_acabou(maximo)
+    [texto] = textos(await m.consultar(op.protocolo))
+    assert "O MCP-CLARO esta perguntando ao sistema o que houve" in texto
+
+    await envelhecer_envio(m, op, minutos=SETE_DIAS_EM_MINUTOS + 1)
+    depois = await m.por_id(op.id)
+    async with m.dono.connect() as c:
+        agora = (await c.execute(text("SELECT now()"))).scalar_one()
+    assert depois.lido_em is not None
+    assert depois.lido_em <= agora  # a hora do banco, nunca a do processo
+    assert depois.escada_vencida
+    assert depois.consulta_acabou(maximo)
+    [texto] = textos(await m.consultar(op.protocolo))
+    assert "O MCP-CLARO perguntou ao sistema o que houve e ele nao confirmou; a decisao fica com a pessoa." in texto
+
+
+async def test_a_escada_pelo_tempo_vale_sem_nenhuma_linha_e_nunca_com_estado_final(mundo: MundoSelo) -> None:
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    sem_linha, _ = await nao_confirmada(m)
+    com_final, _ = await nao_confirmada(m, {"para": "final@exemplo.teste", "texto": "f"})
+    await m.informar(com_final, "concluida")
+    for op in (sem_linha, com_final):
+        await envelhecer_envio(m, op, minutos=SETE_DIAS_EM_MINUTOS + 1)
+    sem = await m.por_id(sem_linha.id)
+    assert sem.informado is None
+    assert sem.consulta_acabou(maximo)
+    final = await m.por_id(com_final.id)
+    assert final.escada_vencida
+    assert not final.consulta_acabou(maximo)  # com estado final, nada a perguntar: nao "acabou sem resposta"
+
+
+# --- Decisao 4 (M4.2): o numero novo por escolha da pessoa na ficha ---------------------------------------------
+
+
+async def _ficou_em_desconhecido(m: MundoSelo) -> tuple[fila.Operacao, Any, fila.Operacao]:
+    """O sai com o numero K, a escada inteira responde ``desconhecido`` e a pessoa decide ``nao_aconteceu``. T e o
+    pedido igual, esperando a ficha. Devolve O, o envio de O e T."""
+    o, envio_o = await nao_confirmada(m)
+    for _ in range(m.p.BADGE_LOOKUP_MAX_ATTEMPTS):
+        await m.informar(o, "desconhecido")
+    await m.decidir(o, "nao_aconteceu")
+    t = await m.operacao(protocolo_de(await m.agir()))
+    assert t.estado == Estado.AGUARDANDO_FICHA
+    assert t.repete_protocolo == o.protocolo
+    return o, envio_o, t
+
+
+async def _confirmar_com_numero_novo(m: MundoSelo, op: fila.Operacao, **mais: Any) -> fila.Operacao:
+    assert op.ficha_id is not None
+    async with m.entrada_db.begin() as c:
+        return await fila.confirmar_ficha(
+            c,
+            op.ficha_id,
+            pessoa_id=m.pessoas["ana"],
+            com_passkey=True,
+            espera_segundos=0,
+            rapida_segundos=0,
+            numero_novo=True,
+            maximo_consultas=mais.pop("maximo_consultas", m.p.BADGE_LOOKUP_MAX_ATTEMPTS),
+        )
+
+
+async def test_com_a_escolha_da_pessoa_o_pedido_igual_sai_com_numero_novo(
+    mundo: MundoSelo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    o, envio_o, t = await _ficou_em_desconhecido(m)
+    assert t.original is not None
+    assert t.original_ficou_em_desconhecido(maximo)
+    assert not t.original_ficou_em_desconhecido(maximo + 1)  # uma tentativa a mais na escada: ainda nao acabou
+    somados = espiar_contadores(monkeypatch)
+    liberada = await _confirmar_com_numero_novo(m, t)
+    assert (liberada.estado, liberada.ficha_numero_novo) == (Estado.LIBERADA, True)
+    assert somados.count("selo_numero_novo_escolhido") == 1  # defeito 4 do verificador do G4r
+    [linha] = await m.extrato("ficha_confirmada", t.protocolo)
+    assert linha.dados["numero_novo"] is True
+    envio_t = await m.sair_com_numero(liberada)
+    assert envio_t.chave != envio_o.chave  # numero novo, por escolha da pessoa
+    assert envio_t.repete_operacao_id is None
+    depois = await m.por_id(t.id)
+    assert (depois.repete_protocolo, depois.mesmo_numero_de) == (o.protocolo, None)
+    assert (await m.por_id(o.id)).substituto is None
+
+
+async def test_sem_a_escolha_o_pedido_igual_leva_o_mesmo_numero(
+    mundo: MundoSelo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O lado seguro: com a original em ``desconhecido`` no fim da escada, a ficha confirmada sem a caixa leva o mesmo
+    numero (o sistema honesto devolve o desfecho da primeira)."""
+    m = mundo
+    o, envio_o, t = await _ficou_em_desconhecido(m)
+    somados = espiar_contadores(monkeypatch)
+    liberada = await m.confirmar(t)
+    assert liberada.ficha_numero_novo is False
+    assert "selo_numero_novo_escolhido" not in somados
+    [linha] = await m.extrato("ficha_confirmada", t.protocolo)
+    assert "numero_novo" not in linha.dados
+    envio_t = await m.sair_com_numero(liberada)
+    assert (envio_t.chave, envio_t.repete_operacao_id) == (envio_o.chave, o.id)
+
+
+@pytest.mark.parametrize("caso", ["escada_em_aberto", "resposta_final", "ultima_em_andamento", "sem_repeticao"])
+async def test_o_numero_novo_e_recusado_fora_da_regra_e_nada_muda(
+    mundo: MundoSelo, monkeypatch: pytest.MonkeyPatch, caso: str
+) -> None:
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    if caso == "sem_repeticao":
+        t = await m.operacao(protocolo_de(await m.agir({"para": "novo@exemplo.teste", "texto": "n"})))
+        assert t.repete_protocolo is None
+    else:
+        o, _ = await nao_confirmada(m)
+        for _ in range(maximo - 1 if caso == "escada_em_aberto" else maximo):
+            await m.informar(o, "desconhecido")
+        if caso == "resposta_final":
+            await m.informar(o, "concluida")
+        elif caso == "ultima_em_andamento":
+            await m.informar(o, "em_andamento")
+        await m.decidir(o, "nao_aconteceu")
+        t = await m.operacao(protocolo_de(await m.agir()))
+        assert t.repete_protocolo == o.protocolo
+    assert not t.original_ficou_em_desconhecido(maximo)
+    somados = espiar_contadores(monkeypatch)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        await _confirmar_com_numero_novo(m, t)
+    assert recusa.value.motivo == "numero_novo_nao_cabe"
+    assert recusa.value.mensagem.isascii()
+    atual = await m.por_id(t.id)
+    assert (atual.estado, atual.ficha_decisao, atual.ficha_numero_novo) == (Estado.AGUARDANDO_FICHA, None, False)
+    assert await m.extrato("ficha_confirmada", t.protocolo) == []
+    assert "selo_numero_novo_escolhido" not in somados
+
+
+async def test_o_banco_recusa_o_numero_novo_que_o_codigo_deixou_passar(
+    mundo: MundoSelo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A segunda barreira: uma resposta chega entre a leitura e o UPDATE (aqui, o codigo enganado por monkeypatch). O
+    banco recusa (``fichas_guarda``), a recusa e a mesma, e a confirmacao inteira volta atras."""
+    m = mundo
+    o, _, t = await _ficou_em_desconhecido(m)
+    await m.informar(o, "em_andamento")
+    monkeypatch.setattr(fila.Operacao, "original_ficou_em_desconhecido", lambda self, maximo: True)
+    somados = espiar_contadores(monkeypatch)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        await _confirmar_com_numero_novo(m, t)
+    assert recusa.value.motivo == "numero_novo_nao_cabe"
+    atual = await m.por_id(t.id)
+    assert (atual.estado, atual.ficha_decisao, atual.ficha_numero_novo) == (Estado.AGUARDANDO_FICHA, None, False)
+    assert "selo_numero_novo_escolhido" not in somados  # a soma vem so depois do UPDATE aceito
+
+
+@pytest.mark.parametrize("primeira", ["concluida", "desconhecido"])
+async def test_o_numero_novo_conta_pelo_numero_e_nao_so_pela_original(
+    mundo: MundoSelo, monkeypatch: pytest.MonkeyPatch, primeira: str
+) -> None:
+    """Defeito 2 do verificador do G4r (etapa 3r). O sai com o numero K e a consulta de O diz ``primeira``. R, pedido
+    igual de O, leva K, e a escada de R termina em ``desconhecido``. T, o pedido igual seguinte, repete R. Com
+    ``concluida`` em O, o sistema ja disse que a escrita de K foi feita: T nao oferece o numero novo, o codigo e o
+    banco o recusam e, sem a escolha, T leva K (o sistema honesto devolve o desfecho da primeira). Com
+    ``desconhecido`` em O, nada sobre K e final, e o numero novo vale."""
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    o, envio_o = await nao_confirmada(m)
+    await m.informar(o, primeira)
+    r, envio_r = await _pedido_igual_que_sai(m, o, "nao_confirmada")
+    assert envio_r.chave == envio_o.chave
+    for _ in range(maximo):
+        await m.informar(r, "desconhecido")
+    await envelhecer(m, r, minutos=60)
+    t = await m.operacao(protocolo_de(await m.agir()))
+    assert t.repete_protocolo == r.protocolo
+    assert t.original is not None
+    assert t.original.ultima_consulta == "desconhecido"  # a ultima resposta de R; o estado final e o do numero
+    if primeira == "desconhecido":
+        assert t.original.estado_final_do_numero is None
+        assert t.original_ficou_em_desconhecido(maximo)
+        liberada = await _confirmar_com_numero_novo(m, t)
+        envio_t = await m.sair_com_numero(liberada)
+        assert (envio_t.repete_operacao_id, envio_t.chave != envio_o.chave) == (None, True)
+        return
+    assert t.original.estado_final_do_numero == "concluida"
+    assert not t.original_ficou_em_desconhecido(maximo)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        await _confirmar_com_numero_novo(m, t)
+    assert recusa.value.motivo == "numero_novo_nao_cabe"
+    # A segunda barreira: com o codigo enganado, a guarda do banco recusa pelo mesmo numero.
+    with monkeypatch.context() as mp:
+        mp.setattr(fila.Operacao, "original_ficou_em_desconhecido", lambda self, maximo: True)
+        with pytest.raises(fila.DecisaoRecusada) as recusa:
+            await _confirmar_com_numero_novo(m, t)
+    assert recusa.value.motivo == "numero_novo_nao_cabe"
+    atual = await m.por_id(t.id)
+    assert (atual.estado, atual.ficha_decisao, atual.ficha_numero_novo) == (Estado.AGUARDANDO_FICHA, None, False)
+    envio_t = await m.sair_com_numero(await m.confirmar(atual))
+    assert (envio_t.chave, envio_t.repete_operacao_id) == (envio_o.chave, r.id)
+
+
+async def test_o_numero_novo_vale_com_consultas_sem_resposta_depois_do_desconhecido(mundo: MundoSelo) -> None:
+    """Defeito 3 do verificador do G4r. A original responde ``desconhecido`` uma vez e depois as consultas ficam sem
+    resposta (``sem_resposta`` e ``resposta_invalida``, que gastam a vez) ate o maximo. A ultima resposta a consulta
+    conta so pelas linhas ``respondeu``: e ``desconhecido``, e o codigo e a guarda do banco aceitam o numero novo."""
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    o, envio_o = await nao_confirmada(m)
+    await m.informar(o, "desconhecido")
+    for vez in range(maximo - 1):
+        await m.informar(o, None, desfecho="resposta_invalida" if vez % 2 else "sem_resposta")
+    await m.decidir(o, "nao_aconteceu")
+    t = await m.operacao(protocolo_de(await m.agir()))
+    assert t.repete_protocolo == o.protocolo
+    assert t.original is not None
+    assert (t.original.ultima_consulta, t.original.tentativas) == ("desconhecido", maximo)
+    assert t.original.ultimo_desfecho in ("sem_resposta", "resposta_invalida")
+    assert t.original_ficou_em_desconhecido(maximo)
+    liberada = await _confirmar_com_numero_novo(m, t)
+    assert liberada.ficha_numero_novo is True
+    envio_t = await m.sair_com_numero(liberada)
+    assert (envio_t.repete_operacao_id, envio_t.chave != envio_o.chave) == (None, True)
+
+
+async def test_o_numero_novo_pede_o_maximo_de_consultas(mundo: MundoSelo) -> None:
+    m = mundo
+    _, _, t = await _ficou_em_desconhecido(m)
+    with pytest.raises(ValueError, match="maximo_consultas"):
+        await _confirmar_com_numero_novo(m, t, maximo_consultas=None)
+    assert (await m.por_id(t.id)).estado == Estado.AGUARDANDO_FICHA
+
+
+# --- Decisao 6: o botao registra o que a pessoa viu, de um sistema que nao se contradisse -----------------------
+
+
+async def test_o_botao_recusa_quando_o_estado_mudou_depois_do_que_a_pessoa_viu(mundo: MundoSelo) -> None:
+    """A pessoa viu ``concluida``. Depois o sistema disse ``desfeita`` (passagem permitida, sem contradicao): o toque
+    com o que ela viu e recusado (``informado_mudou``) e nada e gravado; com o estado de agora, grava."""
+    m = mundo
+    op, _ = await nao_confirmada(m)
+    await m.informar(op, "concluida")
+    visto = (await m.por_id(op.id)).informado
+    assert visto is not None
+    assert visto.estado_final == "concluida"
+    await m.informar(op, "desfeita")
+    atual = await m.por_id(op.id)
+    assert atual.informado is not None
+    assert (atual.informado.estado_final, atual.informado.se_contradisse) == ("desfeita", False)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        async with m.entrada_db.begin() as c:
+            await fila.registrar_o_que_o_sistema_informou(
+                c, op.id, pessoa_id=m.pessoas["ana"], estado_visto="concluida"
+            )
+    assert recusa.value.motivo == "informado_mudou"
+    assert recusa.value.mensagem.isascii()
+    assert await decisoes(m, op) == []
+
+    outra, _ = await nao_confirmada(m, {"para": "visto@exemplo.teste", "texto": "v"})
+    await m.informar(outra, "recusada")
+    async with m.entrada_db.begin() as c:
+        depois = await fila.registrar_o_que_o_sistema_informou(
+            c, outra.id, pessoa_id=m.pessoas["ana"], estado_visto="recusada"
+        )
+    assert depois.decisao_pessoa == "nao_aconteceu"
+
+
+async def test_o_botao_recusa_quando_o_sistema_se_contradisse(mundo: MundoSelo) -> None:
+    """A pessoa ve ``concluida``; depois o sistema diz ``recusada`` (contradicao: o banco marca e retira o selo). Mesmo
+    com o estado de agora (``recusada``), o toque e recusado (``sistema_se_contradisse``) e nada e gravado."""
+    m = mundo
+    op, _ = await nao_confirmada(m)
+    await m.informar(op, "concluida")
+    contradicao = await m.informar(op, "recusada")
+    assert contradicao.contradiz
+    atual = await m.por_id(op.id)
+    assert atual.informado is not None
+    assert (atual.informado.estado_final, atual.informado.se_contradisse) == ("recusada", True)
+    for visto in ("recusada", "concluida"):
+        with pytest.raises(fila.DecisaoRecusada) as recusa:
+            async with m.entrada_db.begin() as c:
+                await fila.registrar_o_que_o_sistema_informou(c, op.id, pessoa_id=m.pessoas["ana"], estado_visto=visto)
+        assert recusa.value.motivo == "sistema_se_contradisse"
+        assert recusa.value.mensagem.isascii()
+    assert await decisoes(m, op) == []
+
+
+async def test_a_contradicao_conta_pelo_numero_e_nao_so_pela_operacao(mundo: MundoSelo) -> None:
+    """O e R (pedido igual com o numero de O) sao a mesma escrita para o sistema. O recibo de R contradiz a consulta de
+    O: as duas veem ``se_contradisse``, e uma terceira acao, com outro numero, nao."""
+    m = mundo
+    outra, _ = await nao_confirmada(m, {"para": "outra-cadeia@exemplo.teste", "texto": "o"})
+    await m.informar(outra, "concluida")
+    o, envio_o = await nao_confirmada(m)
+    await m.informar(o, "desconhecido")
+    r, envio_r = await _pedido_igual_que_sai(m, o, "nao_confirmada")
+    assert envio_r.chave == envio_o.chave
+    await m.informar(o, "concluida")
+    marcada = await m.informar(r, "recusada")  # o banco retira o selo: os envios seguintes sairiam sem numero
+    assert marcada.contradiz
+    original = await m.por_id(o.id)
+    pedido = await m.por_id(r.id)
+    sem = await m.por_id(outra.id)
+    assert original.informado is not None
+    assert pedido.informado is not None
+    assert sem.informado is not None
+    assert (original.informado.se_contradisse, pedido.informado.se_contradisse) == (True, True)
+    assert sem.informado.se_contradisse is False
+    assert original.informado.estado_final == "concluida"  # a linha de O nao contradiz; a de R, sim
+
+
+async def test_a_contradicao_na_original_vale_no_botao_do_pedido_igual(mundo: MundoSelo) -> None:
+    """Defeito 1 do verificador do G4r (a cadeia do numero SOBE). O sai com K e recebe ``desconhecido``; R repete O e
+    leva K; R recebe ``concluida`` e, depois, O recebe ``recusada`` (por exemplo, uma consulta que ja estava a
+    caminho): a linha que contradiz fica em O. R ve ``se_contradisse``, e o botao em R recusa
+    ``sistema_se_contradisse`` sem gravar nada, mesmo com o ``concluida`` que a pessoa ve em R."""
+    m = mundo
+    o, envio_o = await nao_confirmada(m)
+    await m.informar(o, "desconhecido")
+    r, envio_r = await _pedido_igual_que_sai(m, o, "nao_confirmada")
+    assert envio_r.chave == envio_o.chave
+    await m.informar(r, "concluida")
+    marcada = await m.informar(o, "recusada")
+    assert marcada.contradiz
+    pedido = await m.por_id(r.id)
+    assert pedido.informado is not None
+    assert (pedido.informado.estado_final, pedido.informado.se_contradisse) == ("concluida", True)
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        async with m.entrada_db.begin() as c:
+            await fila.registrar_o_que_o_sistema_informou(c, r.id, pessoa_id=m.pessoas["ana"], estado_visto="concluida")
+    assert recusa.value.motivo == "sistema_se_contradisse"
+    assert await decisoes(m, r) == []
+    assert await decisoes(m, o) == []

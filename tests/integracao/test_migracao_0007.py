@@ -1744,7 +1744,9 @@ async def test_pedido_igual_leva_o_mesmo_numero(dono: AsyncEngine, cena: Cena, e
         else:
             await apoio.informar(c, original.id)  # consulta sem resposta
         repetida = await _repetir(c, cena, original)
-        novo = await apoio.gravar_envio(c, repetida.id)
+        # Decisao 5 do coordenador (retoque da etapa 3): o substituto e so o envio que pode ter chegado ao sistema
+        # (fila em enviando, enviada ou nao_confirmada); aqui, a porta ja o marcou "enviando".
+        novo = await apoio.enviar(c, repetida.id, fim=None)
         substituto = (await c.execute(text("SELECT selo_substituto(:o)"), {"o": original.id})).scalar_one()
         return envio, novo, substituto
 
@@ -2697,6 +2699,68 @@ async def test_resposta_ao_aviso_so_depois_de_o_aviso_chamar_o_sistema(
         assert await num_rascunho(dono, passos) == "aviso"
     else:
         await falha(dono, passos, "A resposta ao aviso so vem depois de o aviso chamar o sistema")
+
+
+# Sequencias com a resposta ao aviso (minutos depois do envio, origem, estado): a decisao 1 do coordenador (retoque
+# da etapa 3) tira a origem 'aviso' do que e final, na tela e na escada.
+SEQUENCIAS_COM_O_AVISO: Final = {
+    "so_o_aviso": [(1, "aviso", "parada")],
+    "recibo_em_andamento_e_aviso": [(1, "recibo", "em_andamento"), (2, "aviso", "parada")],
+    "aviso_e_consulta_nao_recebida": [(1, "aviso", "nao_recebida"), (3, "consulta", "nao_recebida")],
+    "aviso_e_consulta_concluida": [(1, "aviso", "parada"), (3, "consulta", "concluida")],
+    "recibo_concluida_e_aviso": [(1, "recibo", "concluida"), (2, "aviso", "parada")],
+}
+
+
+@pytest.mark.parametrize("nome", SEQUENCIAS_COM_O_AVISO)
+async def test_resposta_ao_aviso_nunca_e_final_na_tela_nem_na_fila(
+    dono: AsyncEngine, cena: Cena, enviada: Any, nome: str
+) -> None:
+    """Decisao 1 do coordenador (D2, opcao a): ``selo_estado_final`` (a tela e o botao de um toque) e a coluna
+    ``com_resposta_do_sistema`` de ``medicoes.v_fila_agora`` so contam o recibo e a consulta, como
+    ``contrato.resposta_que_encerra``: o ``parada`` do aviso nao resolve o "estamos confirmando", e uma ``nao_recebida``
+    do aviso nao confirma a da consulta. A resposta ao aviso continua gravada."""
+    sequencia = SEQUENCIAS_COM_O_AVISO[nome]
+    contar = "SELECT coalesce(sum(com_resposta_do_sistema), 0) FROM medicoes.v_fila_agora"
+
+    async def passos(c: AsyncConnection) -> tuple[Any, ...]:
+        antes = (await c.execute(text(contar))).scalar_one()
+        aviso = await _avisar(c, await _bloquear(c, enviada), [enviada])
+        await c.execute(text("SET LOCAL ROLE mcp_claro_despachante"))
+        await c.execute(text(RESERVAR_A_VEZ), {"a": aviso})
+        ids = []
+        for _, origem, estado in sequencia:
+            ids.append(
+                (
+                    await apoio.informar(
+                        c, enviada.id, estado, origem=origem, aviso_id=aviso if origem == "aviso" else None
+                    )
+                ).id
+            )
+        await c.execute(text("RESET ROLE"))
+        for info, (minutos, _, _) in zip(ids, sequencia, strict=True):
+            await _informado_em(c, info, timedelta(minutes=minutos - 10))
+        linhas = [
+            contrato.LinhaInformada(str(x.origem), str(x.desfecho), x.estado, x.gravado_em)
+            for x in await c.execute(
+                text(
+                    "SELECT origem, desfecho, estado, gravado_em FROM informacoes_sistema WHERE operacao_id = :o"
+                    " ORDER BY gravado_em, id"
+                ),
+                {"o": enviada.id},
+            )
+        ]
+        assert [x.origem for x in linhas] == [o for _, o, _ in sequencia]
+        final = (await c.execute(text("SELECT selo_estado_final(:o)"), {"o": enviada.id})).scalar_one()
+        na_fila = (await c.execute(text(contar))).scalar_one() - antes
+        await c.execute(text("SET LOCAL ROLE grafana_leitor"))
+        pelo_grafana = (await c.execute(text(contar))).scalar_one() - antes
+        return final, contrato.resposta_que_encerra(linhas), na_fila, pelo_grafana
+
+    final, pela_escada, na_fila, pelo_grafana = await num_rascunho(dono, passos)
+    esperado = {"aviso_e_consulta_concluida": "concluida", "recibo_concluida_e_aviso": "concluida"}.get(nome)
+    assert (final, pela_escada) == (esperado, esperado)
+    assert (na_fila, pelo_grafana) == ((0, 0) if esperado is None else (1, 1))
 
 
 async def test_cada_numero_vai_uma_vez_so_nos_avisos_do_bloqueio(dono: AsyncEngine, cena: Cena, enviada: Any) -> None:

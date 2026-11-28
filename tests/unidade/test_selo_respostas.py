@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import mcp_types as types
@@ -29,8 +29,14 @@ json_qualquer = st.recursive(
     lambda filhos: st.lists(filhos, max_size=4) | st.dictionaries(st.text(max_size=10), filhos, max_size=4),
     max_leaves=20,
 )
+# Membros a mais: nunca um membro do contrato (o hypothesis tira textos das constantes do codigo testado, e um
+# "bloqueio", "operacoes", "repetida", "objetos" ou "itens" a mais trocava o que o teste montou: falhava de vez em
+# quando, etapa 3r).
+MEMBROS_DO_CONTRATO = frozenset(
+    {"contrato", "operacao", "estado", "depois", "bloqueio", "operacoes", "repetida", "objetos", "itens"}
+)
 extras = st.dictionaries(
-    st.text(min_size=1, max_size=12).filter(lambda k: k not in {"contrato", "operacao", "estado", "depois"}),
+    st.text(min_size=1, max_size=12).filter(lambda k: k not in MEMBROS_DO_CONTRATO),
     st.one_of(st.just(INSTRUCAO), json_qualquer),
     min_size=1,
     max_size=4,
@@ -383,8 +389,11 @@ def test_recibo_incoerente_do_desenho() -> None:
     )
 
 
+# Um id igual ao estado do recibo ("concluida", que o hypothesis tira das constantes do codigo) aparecia no texto do
+# recibo lido pelo proprio estado, e nao porque o id ficou guardado: o teste falhava de vez em quando (etapa 3r). A
+# igualdade com o Recibo ja prova que so a contagem fica.
 @settings(max_examples=150, deadline=None, database=None)
-@given(numeros, st.lists(st.text(min_size=1, max_size=20), max_size=30), extras)
+@given(numeros, st.lists(st.text(min_size=1, max_size=20).filter(lambda i: i != "concluida"), max_size=30), extras)
 def test_recibo_guarda_so_a_contagem_dos_objetos(numero: str, ids: list[str], a_mais: dict[str, Any]) -> None:
     dados = recibo(numero, objetos=[{"id": i, "nota": INSTRUCAO} for i in ids], repetida=True) | a_mais
     lido = respostas.conferir_recibo(dados, numero=numero, com_erro=False)
@@ -437,3 +446,58 @@ def test_recibo_pelo_resultado_lido_antes_do_meta_sair() -> None:
     assert respostas.ler_recibo(resultado(None, meta={contrato.CHAVE_RECIBO: recibo(outro)}), numero=numero) == (
         Invalida("outro_numero")
     )
+
+
+# --- Retoque da etapa 3 (G3ar) ----------------------------------------------------------------------------------
+
+
+def test_recibo_acima_do_teto_de_16_kib_e_grande_demais() -> None:
+    """D8 da conferencia da etapa 3 (mutacao N24): o recibo tambem tem o teto de ``contrato.TETO_RESPOSTA_BYTES``. Um
+    recibo certo em tudo, com objetos de ids longos, passa de 16 KiB por um byte: ``grande_demais``, antes de olhar a
+    forma (que estaria certa)."""
+    numero = str(uuid.uuid4())
+    base = recibo(numero, "concluida", objetos=[{"id": "x" * 1000} for _ in range(15)])
+    folga = contrato.TETO_RESPOSTA_BYTES - respostas.tamanho_json(base | {"x": ""})  # type: ignore[operator]
+    no_teto = base | {"x": "a" * folga}
+    assert respostas.tamanho_json(no_teto) == contrato.TETO_RESPOSTA_BYTES
+    assert respostas.conferir_recibo(no_teto, numero=numero, com_erro=False) == Recibo("concluida", False, 15)
+    acima = base | {"x": "a" * (folga + 1)}
+    assert respostas.conferir_recibo(acima, numero=numero, com_erro=False) == Invalida("grande_demais")
+    so_objetos = recibo(numero, "concluida", objetos=[{"id": "x" * 1000} for _ in range(17)])
+    assert respostas.conferir_recibo(so_objetos, numero=numero, com_erro=False) == Invalida("grande_demais")
+    assert respostas.ler_recibo(resultado(None, meta={contrato.CHAVE_RECIBO: acima}), numero=numero) == Invalida(
+        "grande_demais"
+    )
+
+
+@pytest.mark.parametrize(
+    ("em", "esperado"),
+    [
+        ("2016-12-31T23:59:60Z", datetime(2017, 1, 1, 0, 0, tzinfo=UTC)),
+        ("2016-12-31t23:59:60z", datetime(2017, 1, 1, 0, 0, tzinfo=UTC)),
+        ("2026-06-30T23:59:60.5Z", datetime(2026, 7, 1, 0, 0, 0, 500000, tzinfo=UTC)),
+        ("2026-06-30T20:59:60-03:00", datetime(2026, 6, 30, 21, 0, tzinfo=timezone(timedelta(hours=-3)))),
+        ("2026-11-28T10:00:60Z", datetime(2026, 11, 28, 10, 1, tzinfo=UTC)),
+    ],
+)
+def test_segundo_60_do_rfc_3339_vale_como_o_segundo_seguinte(em: str, esperado: datetime) -> None:
+    """Decisao do G3ar (etapa 3r, item 6): o RFC 3339 (secao 5.7) aceita o segundo 60, do segundo bissexto. Ele vale
+    e e lido como o segundo seguinte, como o PostgreSQL le: um sistema honesto nao tem a consulta dada como invalida
+    (o que contaria contra ele na retirada). A hora guardada e a do MCP-CLARO, ja convertida."""
+    assert respostas.hora_do_evento(em) == esperado
+    numero = str(uuid.uuid4())
+    lida = respostas.conferir_consulta(
+        consulta(numero, depois=[{"evento": "entregue", "em": em}]), numero=numero, nivel=3
+    )
+    assert isinstance(lida, Consulta)
+    assert [e.guardado() for e in lida.depois] == [{"evento": "entregue", "em": esperado.isoformat()}]
+
+
+@pytest.mark.parametrize(
+    "em", ["2026-11-28T10:00:61Z", "2026-11-28T10:00:99Z", "2026-11-28T10:60:00Z", "9999-12-31T23:59:60Z"]
+)
+def test_segundo_61_minuto_60_e_o_fim_do_calendario_sao_hora_fora(em: str) -> None:
+    assert respostas.hora_do_evento(em) is None
+    numero = str(uuid.uuid4())
+    dados = consulta(numero, depois=[{"evento": "entregue", "em": em}])
+    assert respostas.conferir_consulta(dados, numero=numero, nivel=3) == Invalida("hora_fora")

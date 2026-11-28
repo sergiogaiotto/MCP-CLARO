@@ -1348,10 +1348,11 @@ SQL_ENVIO = r"""
 -- Bloco ENVIO. O pedido igual a uma "nao confirmada" leva o numero dela (D16): a entrada preenche
 -- repete_operacao_id, e o banco confere. So para original "nao confirmada", sem a decisao 'aconteceu' da pessoa, com
 -- os mesmos argumentos (codigo de conferencia) e a mesma chave do pedido igual, de ate 7 dias, e que saiu com
--- numero (envios_selo, critica A1). A coluna nova entra no INSERT de tabela inteira da entrada (0005). Critica M4: com
--- desconhecido no fim da escada, a entrada so faz o pedido igual depois da confirmacao explicita da pessoa na ficha
--- ("o sistema nao sabe se o primeiro foi feito; com numero novo, pode fazer duas vezes") e sem repete_operacao_id:
--- numero novo, por escolha dela.
+-- numero (envios_selo, critica A1). A coluna nova entra no INSERT de tabela inteira da entrada (0005). Critica M4.2
+-- (decisao 4 do coordenador, retoque da etapa 3): com desconhecido no fim da escada da original, o pedido igual
+-- continua com repete_operacao_id e, sem nada marcado, sai com o mesmo numero (o lado seguro); so a escolha explicita
+-- da pessoa na ficha ("o sistema nao sabe se o primeiro foi feito; com numero novo, pode fazer duas vezes"),
+-- gravada em fichas.numero_novo na transacao da confirmacao (bloco FICHAS), da numero novo (envios_selo_nasce).
 ALTER TABLE operacoes
   ADD COLUMN repete_operacao_id uuid REFERENCES operacoes (id),
   ADD CONSTRAINT operacoes_repete_check CHECK (repete_operacao_id IS DISTINCT FROM id);
@@ -1402,12 +1403,17 @@ CREATE INDEX envios_selo_repete ON envios_selo (repete_operacao_id) WHERE repete
 -- nao sobe o nivel). A chave e do banco: o codigo manda NULL. Com o pedido igual (operacoes.repete_operacao_id), o
 -- banco copia a chave do envio original, do mesmo sistema, de ate 7 dias, salvo se o sistema ja disse sobre esse
 -- numero algo que o queima (recusada, parada ou desfeita, ou nao_recebida confirmada, criticas M4 e A3.3): ai, numero
--- novo. As respostas contam pelo numero (a original e todo pedido igual que saiu com ele). Uma nao_recebida sozinha
--- nao queima (selo_nao_recebida_confirmada): pode ser a de um sistema que registra o numero so no fim da escrita, e
--- um numero novo faria a acao duas vezes; com o mesmo numero, o sistema honesto devolve o desfecho da primeira (ou
--- nao_recebida de novo, e a segunda resposta confirma). Uma original sem envio tambem da numero novo, nunca erro
--- (critica A1). Na porta, este passo roda num SAVEPOINT (ajustes D22): um erro aqui faz a acao sair sem numero, com
--- acao_enviada_sem_numero no extrato.
+-- novo. As respostas contam pelo numero (a original e todo pedido igual que saiu com ele), e so as de origem recibo e
+-- consulta (decisao 1 do coordenador, retoque da etapa 3): a resposta ao aviso de bloqueio nunca queima o numero, como
+-- nunca encerra a escada (selo_estado_final). Um sistema que respondeu parada ao aviso e fez a escrita e pego pela
+-- consulta seguinte; o honesto recusa a chamada que chega depois com o numero (SELO-3.6), e o recibo dela queima.
+-- Uma nao_recebida sozinha nao queima (selo_nao_recebida_confirmada): pode ser a de um sistema que registra o numero
+-- so no fim da escrita, e um numero novo faria a acao duas vezes; com o mesmo numero, o sistema honesto devolve o
+-- desfecho da primeira (ou nao_recebida de novo, e a segunda resposta confirma). Uma original sem envio tambem da
+-- numero novo, nunca erro (critica A1). Com fichas.numero_novo (a pessoa escolheu na ficha, critica M4.2), numero
+-- novo, sem copiar: a guarda da ficha (fichas_guarda) conferiu, na confirmacao, que nenhuma acao com o numero da
+-- original tinha estado final e que a ultima resposta dela a consulta era desconhecido. Na porta, este passo roda num
+-- SAVEPOINT (ajustes D22): um erro aqui faz a acao sair sem numero, com acao_enviada_sem_numero no extrato.
 CREATE FUNCTION envios_selo_nasce() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
@@ -1437,16 +1443,18 @@ BEGIN
   END IF;
   NEW.repete_operacao_id := NULL;
   NEW.chave := gen_random_uuid();
-  IF o.repete_operacao_id IS NOT NULL THEN
+  IF o.repete_operacao_id IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM fichas fi WHERE fi.operacao_id = NEW.operacao_id AND fi.numero_novo) THEN
     SELECT e.sistema_id, e.chave, e.gravado_em INTO original FROM envios_selo e WHERE e.operacao_id = o.repete_operacao_id;
     IF FOUND AND original.sistema_id = NEW.sistema_id AND original.gravado_em >= now() - interval '7 days' THEN
       queimado := EXISTS (
         SELECT 1 FROM informacoes_sistema i JOIN envios_selo e ON e.operacao_id = i.operacao_id
-        WHERE e.chave = original.chave AND i.desfecho = 'respondeu'
+        WHERE e.chave = original.chave AND i.desfecho = 'respondeu' AND i.origem IN ('recibo', 'consulta')
           AND i.estado = ANY (selo_vocabulario('estados_que_queimam')) AND i.estado <> 'nao_recebida')
         OR selo_nao_recebida_confirmada(ARRAY(
           SELECT i.gravado_em FROM informacoes_sistema i JOIN envios_selo e ON e.operacao_id = i.operacao_id
-          WHERE e.chave = original.chave AND i.desfecho = 'respondeu' AND i.estado = 'nao_recebida'));
+          WHERE e.chave = original.chave AND i.desfecho = 'respondeu' AND i.origem IN ('recibo', 'consulta')
+            AND i.estado = 'nao_recebida'));
       IF NOT queimado THEN
         NEW.repete_operacao_id := o.repete_operacao_id;
         NEW.chave := original.chave;
@@ -1464,15 +1472,21 @@ CREATE TRIGGER envios_selo_sem_truncate BEFORE TRUNCATE ON envios_selo
 -- Critica M4: quando um pedido igual R saiu com o numero da original O, O para de ser consultado e o que o sistema
 -- informar aparece em R. Esta funcao segue os envios que repetem p_operacao (repete_operacao_id so fica preenchido
 -- quando o banco copiou o numero) e diz o ultimo da cadeia, ou NULL. Roda como o dono, como selo_vigente.
+-- Decisao 5 do coordenador (retoque da etapa 3): so seguem os envios cuja fila esta em 'enviando', 'enviada' ou
+-- 'nao_confirmada', as chamadas que podem ter chegado ao sistema. Um R que terminou 'nao_saiu' ou
+-- 'sistema_pediu_dados' nao substitui O: O segue na escada da consulta, e um pedido igual seguinte repete O. Entre
+-- dois no mesmo passo, vale o envio mais novo (gravado_em), e o id so desempata a mesma hora.
 CREATE FUNCTION selo_substituto(p_operacao uuid) RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = pg_catalog, public, pg_temp AS $$
-  WITH RECURSIVE cadeia (operacao_id, passo) AS (
-    SELECT p_operacao, 0
+  WITH RECURSIVE cadeia (operacao_id, passo, gravado_em) AS (
+    SELECT p_operacao, 0, NULL::timestamptz
     UNION ALL
-    SELECT e.operacao_id, c.passo + 1 FROM envios_selo e JOIN cadeia c ON e.repete_operacao_id = c.operacao_id
+    SELECT e.operacao_id, c.passo + 1, e.gravado_em FROM envios_selo e
+    JOIN cadeia c ON e.repete_operacao_id = c.operacao_id
+    JOIN fila_saida f ON f.operacao_id = e.operacao_id AND f.estado IN ('enviando', 'enviada', 'nao_confirmada')
     WHERE c.passo < 100
   )
-  SELECT operacao_id FROM cadeia WHERE passo > 0 ORDER BY passo DESC, operacao_id DESC LIMIT 1
+  SELECT operacao_id FROM cadeia WHERE passo > 0 ORDER BY passo DESC, gravado_em DESC, operacao_id DESC LIMIT 1
 $$;
 -- Fim do bloco ENVIO.
 """
@@ -1630,8 +1644,9 @@ INSERT INTO avisos_bloqueio_derivados (bloqueio_id, avisos) SELECT bloqueio_id, 
 SQL_INFORMACOES = r"""
 -- Bloco INFORMACOES. O que o sistema informou, sempre em resposta a uma pergunta do gateway (D20): o recibo da
 -- propria chamada, a consulta e a resposta ao aviso de bloqueio. So as categorias do contrato e a hora do gateway
--- (D21): nenhum texto do sistema. sistema_fora (critica A2): o sistema nao estava ativo, a porta estava fechada ou,
--- num terceiro, a revisao nao era a vigente; nada foi perguntado. So de acrescentar.
+-- (D21): nenhum texto do sistema. sistema_fora (critica A2): o sistema nao estava ativo ou, num terceiro, a revisao
+-- nao era a vigente; nada foi perguntado. Com a porta de saida fechada a consulta nao grava linha nenhuma (decisao 2 do
+-- coordenador no retoque da etapa 3). So de acrescentar.
 CREATE TABLE informacoes_sistema (
   id          bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   operacao_id uuid        NOT NULL REFERENCES envios_selo (operacao_id),
@@ -1664,6 +1679,11 @@ CREATE TABLE informacoes_sistema (
   CHECK (desfecho = 'respondeu' OR NOT contradiz)
 );
 CREATE INDEX informacoes_sistema_operacao ON informacoes_sistema (operacao_id, gravado_em DESC);
+-- A conta da retirada por nao_respondeu_consultas (selo/consulta.py, _SQL_DA_RETIRADA) procura as consultas recentes
+-- de UM sistema; sem este indice, ela le a tabela inteira (de todos os sistemas, so de acrescentar) a cada fim de
+-- escada sem resposta.
+CREATE INDEX informacoes_sistema_consultas ON informacoes_sistema (sistema_id, gravado_em DESC)
+  WHERE origem = 'consulta';
 
 -- A hora e a do banco; o sistema e o do envio; o aviso e deste sistema e leva a operacao, e ja chamou o sistema: uma
 -- vez reservada (tentativas >= 1) e fora de 'sistema_fora' e 'bloqueio_encerrado', que por definicao nunca chamam.
@@ -1771,18 +1791,22 @@ CREATE TRIGGER informacoes_sistema_sem_truncate BEFORE TRUNCATE ON informacoes_s
   FOR EACH STATEMENT EXECUTE FUNCTION extrato_recusa_mudanca();
 
 -- O estado final que o sistema informou sobre a operacao, ou NULL: resolve o "estamos confirmando" na tela, sem gravar
--- a decisao da pessoa, e e o que o botao "Registrar o que o sistema informou" registra. E o ultimo 'respondeu' fora
--- de em_andamento e desconhecido; nao_recebida so conta confirmada por duas respostas sobre a operacao, com ao menos
--- 1 minuto entre a primeira e a ultima (critica A3.3, selo_nao_recebida_confirmada). Mesma regra de
--- contrato.resposta_que_encerra, que encerra a escada da consulta.
+-- a decisao da pessoa, e e o que o botao "Registrar o que o sistema informou" registra. E o ultimo 'respondeu' do
+-- recibo ou da consulta fora de em_andamento e desconhecido; nao_recebida so conta confirmada por duas respostas assim
+-- sobre a operacao, com ao menos 1 minuto entre a primeira e a ultima (critica A3.3, selo_nao_recebida_confirmada). A
+-- resposta ao aviso de bloqueio (origem 'aviso') nunca e final: fica gravada e aparece no comprovante, mas um sistema
+-- que diz 'parada' e escreve mesmo assim e pego pela consulta seguinte, como contradicao (decisao 1 do coordenador no
+-- retoque da etapa 3, contrato.ORIGENS_DA_RESPOSTA_FINAL). Mesma regra de contrato.resposta_que_encerra, que encerra
+-- a escada da consulta.
 CREATE FUNCTION selo_estado_final(p_operacao uuid) RETURNS text LANGUAGE sql STABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT i.estado FROM informacoes_sistema i
-  WHERE i.operacao_id = p_operacao AND i.desfecho = 'respondeu'
+  WHERE i.operacao_id = p_operacao AND i.origem IN ('recibo', 'consulta') AND i.desfecho = 'respondeu'
     AND NOT (i.estado = ANY (selo_vocabulario('estados_em_aberto')))
     AND (i.estado <> 'nao_recebida' OR selo_nao_recebida_confirmada(ARRAY(
            SELECT n.gravado_em FROM informacoes_sistema n
-           WHERE n.operacao_id = p_operacao AND n.desfecho = 'respondeu' AND n.estado = 'nao_recebida')))
+           WHERE n.operacao_id = p_operacao AND n.origem IN ('recibo', 'consulta') AND n.desfecho = 'respondeu'
+             AND n.estado = 'nao_recebida')))
   ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1
 $$;
 -- Fim do bloco INFORMACOES.
@@ -1797,10 +1821,25 @@ SQL_FICHAS = r"""
 -- modo, e motivo 'nunca_testado' ou 'fase_desligada'; com teste, um teste do mesmo sistema, com as datas e o modo
 -- dele, nunca 'nunca_testado', e 'reprovado' so (e sempre, fora 'fase_desligada') com um teste reprovado, como
 -- selo_vigente diria. Depois, o selo da ficha nao muda.
+--
+-- Critica M4.2 (decisao 4 do coordenador, retoque da etapa 3): numero_novo e a escolha explicita da pessoa, na ficha
+-- do pedido igual, de mandar o pedido com numero novo quando a original terminou a consulta em desconhecido ("o
+-- sistema nao sabe se o primeiro foi feito; com numero novo, pode fazer duas vezes"). Sem a escolha, vale o mesmo
+-- numero (o lado seguro). A ficha nasce com false; a entrada grava true so na transacao que confirma a ficha (o mesmo
+-- UPDATE que grava a decisao 'confirmada'), uma vez, e so quando a operacao repete outra (operacoes.repete_operacao_id)
+-- cuja ultima resposta a consulta foi desconhecido e sobre cujo NUMERO o sistema nao deu resposta final: nenhuma acao
+-- que saiu com ele (a original, a primeira com o numero ou outro pedido igual que o copiou, pela cadeia de
+-- envios_selo.repete_operacao_id) tem selo_estado_final. Para o sistema, todas sao a mesma escrita, e um concluida
+-- dito sobre o numero em outra acao ja diz que ela foi feita (defeito 2 do verificador do G4r, etapa 3r).
+-- O banco nao conhece BADGE_LOOKUP_MAX_ATTEMPTS: a regra inteira, com a escada da original acabada (as tentativas,
+-- sistema_fora ou o tempo, contrato.escada_vencida), fica com o codigo (fila.confirmar_ficha e
+-- Operacao.original_ficou_em_desconhecido); esta guarda e a segunda barreira, com o que o banco sabe. O envio le a
+-- escolha (envios_selo_nasce, bloco ENVIO) e da numero novo, sem copiar o da original.
 ALTER TABLE fichas ADD COLUMN selo jsonb
   CONSTRAINT fichas_selo_check CHECK (selo IS NULL OR jsonb_typeof(selo) = 'object');
+ALTER TABLE fichas ADD COLUMN numero_novo boolean NOT NULL DEFAULT false;
 
--- Mesmo corpo da 0006, com a conferencia do selo no INSERT e o selo fixo depois.
+-- Mesmo corpo da 0006, com a conferencia do selo no INSERT, o selo fixo depois e a guarda de numero_novo.
 CREATE OR REPLACE FUNCTION fichas_guarda() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
@@ -1808,11 +1847,15 @@ DECLARE
   t record;
   confere boolean;
   combina boolean;
+  repete uuid;
 BEGIN
   IF TG_OP = 'INSERT' THEN
     IF NEW.decisao IS NOT NULL OR NEW.decidida_em IS NOT NULL OR NEW.decidida_por IS NOT NULL OR NEW.com_passkey
        OR NEW.confirmada_com IS NOT NULL OR NEW.segundos_ate_decidir IS NOT NULL THEN
       RAISE EXCEPTION 'Uma ficha nasce sem decisao' USING ERRCODE = 'check_violation';
+    END IF;
+    IF NEW.numero_novo THEN
+      RAISE EXCEPTION 'A escolha do numero novo so vem na confirmacao da ficha' USING ERRCODE = 'check_violation';
     END IF;
     IF NEW.selo IS NOT NULL THEN
       IF (SELECT array_agg(k ORDER BY k COLLATE "C") FROM jsonb_object_keys(NEW.selo) k)
@@ -1889,6 +1932,36 @@ BEGIN
   IF NEW.selo IS DISTINCT FROM OLD.selo THEN
     RAISE EXCEPTION 'O selo de uma ficha nao muda' USING ERRCODE = 'check_violation';
   END IF;
+  IF NEW.numero_novo IS DISTINCT FROM OLD.numero_novo THEN
+    IF OLD.numero_novo OR OLD.decisao IS NOT NULL OR OLD.expira_em <= now()
+       OR NEW.decisao IS DISTINCT FROM 'confirmada' THEN
+      RAISE EXCEPTION 'O numero novo so e escolhido uma vez, enquanto a ficha espera, junto com a confirmacao'
+        USING ERRCODE = 'check_violation';
+    END IF;
+    SELECT o.repete_operacao_id INTO repete FROM operacoes o WHERE o.id = NEW.operacao_id;
+    -- O estado final conta pelo NUMERO da original: a cadeia de envios_selo.repete_operacao_id, como a contradicao
+    -- (fila._SQL_OPERACAO): sobe ate o envio com o numero proprio e desce por todos os pedidos iguais que o copiaram.
+    IF repete IS NULL
+       OR EXISTS (
+         WITH RECURSIVE acima (operacao_id, pai, passo) AS (
+           SELECT x.operacao_id, x.repete_operacao_id, 0 FROM envios_selo x WHERE x.operacao_id = repete
+           UNION ALL
+           SELECT x.operacao_id, x.repete_operacao_id, a.passo + 1 FROM envios_selo x
+           JOIN acima a ON x.operacao_id = a.pai WHERE a.passo < 100
+         ), numero (operacao_id, passo) AS (
+           SELECT a.operacao_id, 0 FROM acima a WHERE a.pai IS NULL
+           UNION ALL
+           SELECT x.operacao_id, n.passo + 1 FROM envios_selo x
+           JOIN numero n ON x.repete_operacao_id = n.operacao_id WHERE n.passo < 100
+         )
+         SELECT 1 FROM numero n WHERE selo_estado_final(n.operacao_id) IS NOT NULL)
+       OR (SELECT i.estado FROM informacoes_sistema i
+           WHERE i.operacao_id = repete AND i.origem = 'consulta' AND i.desfecho = 'respondeu'
+           ORDER BY i.gravado_em DESC, i.id DESC LIMIT 1) IS DISTINCT FROM 'desconhecido' THEN
+      RAISE EXCEPTION 'O numero novo so vale no pedido igual a uma acao sem resposta final sobre o numero dela, cuja ultima resposta a consulta foi desconhecido'
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
   IF ROW(NEW.decisao, NEW.decidida_em, NEW.decidida_por, NEW.com_passkey, NEW.segundos_ate_decidir,
          NEW.confirmada_com)
      IS DISTINCT FROM ROW(OLD.decisao, OLD.decidida_em, OLD.decidida_por, OLD.com_passkey, OLD.segundos_ate_decidir,
@@ -1910,6 +1983,10 @@ BEGIN
   END IF;
   RETURN NEW;
 END $$;
+-- So a entrada confirma a ficha (0005: UPDATE das colunas da decisao), e so ela grava a escolha. O GRANT fica neste
+-- bloco, junto da coluna (o bloco GRANTS e dos dois grupos do retoque da etapa 3). As rotinas, que vencem fichas, e o
+-- despachante, que so le, nao mudam numero_novo.
+GRANT UPDATE (numero_novo) ON fichas TO mcp_claro_entrada;
 -- Fim do bloco FICHAS.
 """
 
@@ -1933,18 +2010,19 @@ COMMENT ON VIEW medicoes.v_consultas_sistema IS
   'Perguntas aos sistemas (recibo, consulta, aviso) por minuto, desfecho e origem.';
 
 -- Mesmo corpo da 0005, com uma coluna nova no fim: as "nao confirmadas" sem decisao da pessoa que ja tem resposta
--- final do sistema (a mesma regra de selo_estado_final, nao_recebida so confirmada, escrita aqui para a visao ler as
--- tabelas com os direitos do dono; selo_nao_recebida_confirmada e pura, com o EXECUTE padrao).
+-- final do sistema (a mesma regra de selo_estado_final: so recibo e consulta, nunca a resposta ao aviso, e
+-- nao_recebida so confirmada; escrita aqui para a visao ler as tabelas com os direitos do dono;
+-- selo_nao_recebida_confirmada e pura, com o EXECUTE padrao).
 CREATE OR REPLACE VIEW medicoes.v_fila_agora AS
   SELECT f.estado, count(*) AS acoes, min(f.mudou_em) AS desde,
          count(*) FILTER (WHERE f.estado = 'nao_confirmada' AND EXISTS (
            SELECT 1 FROM public.informacoes_sistema i
-           WHERE i.operacao_id = f.operacao_id AND i.desfecho = 'respondeu'
+           WHERE i.operacao_id = f.operacao_id AND i.origem IN ('recibo', 'consulta') AND i.desfecho = 'respondeu'
              AND i.estado NOT IN ('em_andamento', 'desconhecido')
              AND (i.estado <> 'nao_recebida' OR public.selo_nao_recebida_confirmada(ARRAY(
                     SELECT n.gravado_em FROM public.informacoes_sistema n
-                    WHERE n.operacao_id = f.operacao_id AND n.desfecho = 'respondeu'
-                      AND n.estado = 'nao_recebida'))))) AS com_resposta_do_sistema
+                    WHERE n.operacao_id = f.operacao_id AND n.origem IN ('recibo', 'consulta')
+                      AND n.desfecho = 'respondeu' AND n.estado = 'nao_recebida'))))) AS com_resposta_do_sistema
   FROM public.fila_saida f
   WHERE f.estado IN ('aguardando_ficha', 'liberada', 'enviando')
      OR (f.estado = 'nao_confirmada'

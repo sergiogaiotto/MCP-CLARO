@@ -8,6 +8,8 @@
   recibo ou de consulta, so com ``respondeu``. A linha de ``comprovantes`` nao muda.
 - As operacoes do aviso deste bloqueio que nao estao no comprovante (em andamento ha mais de 24 horas, critica B9)
   tambem entram; e so a consulta gasta a vez da escada (o recibo e a resposta ao aviso, nao).
+- Decisao 1 do coordenador (retoque da etapa 3): a resposta ao aviso nunca e final. Um ``parada`` so do aviso nao
+  resolve o "estamos confirmando" e nao queima o numero do pedido igual; pela consulta, resolve e queima.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from mcp_claro.config.settings import Parametros
 from mcp_claro.regras import bloqueios
 from mcp_claro.regras.bloqueios import Bloqueio
 from mcp_claro.saida import fila
-from tests.integracao.test_selo_g4_apoio import MundoSelo, protocolo_de, subir_mundo_selo
+from tests.integracao.test_selo_g4_apoio import MundoSelo, protocolo_de, subir_mundo_selo, textos
 
 pytestmark = [pytest.mark.integracao, pytest.mark.anyio]
 
@@ -280,3 +282,109 @@ async def test_so_a_consulta_gasta_tentativa(mundo: MundoSelo) -> None:
     assert atual.informado.tentativas == 1
     assert atual.consulta_acabou(1)
     await _encerrar(m, b)
+
+
+@pytest.mark.parametrize("origem", ["aviso", "consulta"])
+async def test_parada_so_do_aviso_nao_queima_o_numero_nem_resolve(mundo: MundoSelo, origem: str) -> None:
+    """Decisao 1 do coordenador (retoque da etapa 3): a resposta ao aviso de bloqueio aparece como o que o sistema
+    disse, mas nunca e final. Um ``parada`` so do aviso nao resolve o "estamos confirmando" (o botao de um toque recusa
+    e o aplicativo ouve que o MCP-CLARO continua perguntando) e nao queima o numero: o pedido igual depois da decisao
+    leva o mesmo numero. O mesmo ``parada`` pela consulta resolve e queima (numero novo)."""
+    m = mundo
+    op = await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA)))
+    op = await m.confirmar(op)
+    envio = await m.sair_com_numero(op, "nao_confirmada")
+    b = await _bloquear(m)
+    if origem == "aviso":
+        await _avisar(m, b, {op.id: "parada"})
+    else:
+        await m.informar(op, "parada")
+    await _encerrar(m, b)
+    atual = await m.por_id(op.id)
+    assert atual.informado is not None
+    assert (atual.informado.origem, atual.informado.estado) == (origem, "parada")
+    [texto] = textos(await m.consultar(op.protocolo))
+    if origem == "aviso":
+        assert atual.informado.estado_final is None
+        assert "informou: parada, ainda sem resposta final; o MCP-CLARO continua perguntando." in texto
+        with pytest.raises(fila.DecisaoRecusada) as recusa:
+            async with m.entrada_db.begin() as c:
+                await fila.registrar_o_que_o_sistema_informou(
+                    c, op.id, pessoa_id=m.pessoas["ana"], estado_visto="parada"
+                )
+        assert recusa.value.motivo == "sem_resposta_final"
+    else:
+        assert atual.informado.estado_final == "parada"
+        assert f"O sistema {m.sistema.nome} informou: parada." in texto
+    await m.decidir(atual, "nao_aconteceu")
+    nova = await m.confirmar(await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA))))
+    assert nova.repete_protocolo == op.protocolo
+    envio_novo = await m.sair_com_numero(nova)
+    if origem == "aviso":
+        assert (envio_novo.chave, envio_novo.repete_operacao_id) == (envio.chave, op.id)
+    else:
+        assert envio_novo.chave != envio.chave
+        assert envio_novo.repete_operacao_id is None
+
+
+ARGUMENTOS_DA_PARADA = {"para": "parada@exemplo.teste", "texto": "t"}
+
+
+async def test_nao_recebida_do_aviso_nao_confirma_a_da_consulta(mundo: MundoSelo) -> None:
+    """Decisao 1, a segunda metade da queima: ``nao_recebida`` so queima confirmada por duas respostas com intervalo, e
+    so contam as de recibo e consulta. Uma pela consulta e outra pelo aviso, dois minutos depois, nao confirmam: o
+    pedido igual leva o mesmo numero, e o "estamos confirmando" continua."""
+    m = mundo
+    op = await m.confirmar(await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA))))
+    envio = await m.sair_com_numero(op, "nao_confirmada")
+    primeira = await m.informar(op, "nao_recebida")
+    await m.recuar_informacao(primeira.id, 2)
+    b = await _bloquear(m)
+    await _avisar(m, b, {op.id: "nao_recebida"})
+    await _encerrar(m, b)
+    atual = await m.por_id(op.id)
+    assert atual.informado is not None
+    assert (atual.informado.origem, atual.informado.estado, atual.informado.estado_final) == (
+        "aviso",
+        "nao_recebida",
+        None,
+    )
+    await m.decidir(atual, "nao_aconteceu")
+    nova = await m.confirmar(await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA))))
+    envio_novo = await m.sair_com_numero(nova)
+    assert (envio_novo.chave, envio_novo.repete_operacao_id) == (envio.chave, op.id)
+
+
+async def test_a_resposta_ao_aviso_nao_conta_para_o_numero_novo(mundo: MundoSelo) -> None:
+    """Critica M4.2 com a decisao 1: o numero novo so vale com a ultima resposta A CONSULTA ``desconhecido``. A escada
+    da original acaba em ``em_andamento``, e depois o aviso de bloqueio diz ``desconhecido``: a ficha do pedido igual
+    nao oferece o numero novo, e a confirmacao com ele e recusada (pelo codigo e pelo banco)."""
+    m = mundo
+    maximo = m.p.BADGE_LOOKUP_MAX_ATTEMPTS
+    op = await m.confirmar(await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA))))
+    await m.sair_com_numero(op, "nao_confirmada")
+    for _ in range(maximo):
+        await m.informar(op, "em_andamento")
+    b = await _bloquear(m)
+    await _avisar(m, b, {op.id: "desconhecido"})
+    await _encerrar(m, b)
+    await m.decidir(await m.por_id(op.id), "nao_aconteceu")
+    t = await m.operacao(protocolo_de(await m.agir(ARGUMENTOS_DA_PARADA)))
+    assert t.repete_protocolo == op.protocolo
+    assert t.original is not None
+    assert (t.original.ultima_consulta, t.original.tentativas) == ("em_andamento", maximo)
+    assert not t.original_ficou_em_desconhecido(maximo)
+    assert t.ficha_id is not None
+    with pytest.raises(fila.DecisaoRecusada) as recusa:
+        async with m.entrada_db.begin() as c:
+            await fila.confirmar_ficha(
+                c,
+                t.ficha_id,
+                pessoa_id=m.pessoas["ana"],
+                com_passkey=True,
+                espera_segundos=0,
+                rapida_segundos=0,
+                numero_novo=True,
+                maximo_consultas=maximo,
+            )
+    assert recusa.value.motivo == "numero_novo_nao_cabe"

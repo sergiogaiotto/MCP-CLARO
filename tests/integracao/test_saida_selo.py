@@ -487,3 +487,56 @@ async def test_erro_ao_gravar_o_recibo_nao_impede_o_fim(
         assert await a.estado_da_fila(cn, op.id) == "enviada"
         assert await a.informacoes(cn, op.id) == []
         assert "acao_enviada" in [x.tipo for x in await a.extrato(cn, protocolo=op.protocolo)]
+
+
+# --- Retoque da etapa 3, G3ar ------------------------------------------------------------------------------------
+
+
+async def test_nao_saiu_com_o_selo_caido_nao_ganha_a_linha_de_nivel_menor(banco_migrado: Parametros) -> None:
+    """D11 da conferencia da etapa 3 (mutacao N15): a ficha prometeu o nivel 2, o selo caiu antes de a acao sair (o
+    sistema deixou de listar o contrato), e a acao nao saiu (sem a chave da pessoa). Nada chegou ao sistema: nem
+    ``acao_enviada_selo_menor`` nem ``acao_enviada_sem_numero``; so a linha de que nao saiu, com o retrato de agora."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        op = await a.nova_acao(cn, ficha_selo=s.retrato(await a.selo_vigente(cn)))
+        async with cn.dono.begin() as c:
+            await c.execute(
+                text("UPDATE ferramentas_vistas SET sumiu_em = now() WHERE sistema_id = :s AND nome = :n"),
+                {"s": cn.sistema.id, "n": contrato.FERRAMENTA_CONSULTAR},
+            )
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        assert (await a.selo_vigente(cn)).motivo == "contrato_sumiu"
+        await a.mandar(cn)
+        assert await a.estado_da_fila(cn, op.id) == "nao_saiu"
+        linhas = await a.extrato(cn, protocolo=op.protocolo)
+        tipos = [x.tipo for x in linhas]
+        assert "acao_enviada_selo_menor" not in tipos
+        assert "acao_enviada_sem_numero" not in tipos
+        [fim] = [x for x in linhas if x.tipo == "acao_nao_saiu"]
+        assert fim.dados["selo"]["nivel"] == 1
+        assert fim.dados["selo"]["motivo"] == "contrato_sumiu"
+
+
+@pytest.mark.parametrize("teste", [True, False], ids=["pessoa_de_teste", "pessoa_real_com_a_chave_desligada"])
+async def test_a_linha_do_fim_leva_o_retrato_do_selo(banco_migrado: Parametros, teste: bool) -> None:
+    """Pedido do G4 (desenho 7.2): ``acao_enviada`` leva ``dados.selo``, o retrato do selo com que a acao saiu
+    (``contrato.RETRATO_DO_SELO``). Pessoa de teste no nivel 2: o retrato do selo vigente; pessoa real com a chave da
+    Fase 4 desligada: o da fase desligada (nivel 1), sem ler o selo."""
+    async with a.cena(banco_migrado, selo_nivel2.criar, nivel=2) as cn:
+        pessoa = cn.pessoa_id
+        if not teste:
+            async with cn.dono.begin() as c:
+                pessoa = await s.nova_pessoa(c, teste=False)
+                from mcp_claro.despachante import chaves
+
+                await chaves.guardar(c, cn.cifra, sistema_id=cn.sistema.id, segredo=a.CHAVE_DA_PESSOA, pessoa_id=pessoa)
+        op = await a.nova_acao(cn, pessoa_id=pessoa)
+        await a.mandar(cn, cn.porta(selos_ligados=False))
+        assert await a.estado_da_fila(cn, op.id) == "enviada"
+        [fim] = [x for x in await a.extrato(cn, protocolo=op.protocolo) if x.tipo == "acao_enviada"]
+        selo = fim.dados["selo"]
+        assert set(selo) == set(contrato.RETRATO_DO_SELO)
+        if teste:
+            assert cn.teste is not None
+            assert (selo["nivel"], selo["teste_id"], selo["motivo"]) == (2, str(cn.teste.id), "vigente")
+        else:
+            assert selo == vigente.FASE_DESLIGADA.retrato()

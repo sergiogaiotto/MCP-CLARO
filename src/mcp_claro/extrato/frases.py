@@ -474,7 +474,11 @@ FRASES: Final[dict[str, Frase]] = {
         ),
         Frase(
             "aviso_bloqueio_dispensado",
-            "O bloqueio acabou antes de a porta de saida abrir; o MCP-CLARO nao avisou o sistema {sistema}.",
+            "O bloqueio acabou antes de o aviso sair; o MCP-CLARO nao avisou o sistema {sistema}.",
+        ),
+        Frase(
+            "aviso_bloqueio_ainda_nao_saiu",
+            "O MCP-CLARO ainda nao conseguiu avisar o sistema {sistema} do bloqueio: {motivo}.",
         ),
         Frase(
             "acao_enviada_mesmo_numero",

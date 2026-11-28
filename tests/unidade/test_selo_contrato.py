@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import itertools
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -696,8 +697,10 @@ def test_escada_conta_so_as_consultas_que_gastam_a_vez() -> None:
     ]
     assert contrato.tentativas_da_consulta(linhas) == 4
     assert contrato.tentativas_da_consulta(linhas[:5]) == 0
-    # A quinta tentativa vai 30 minutos (o quinto degrau) depois da ultima linha.
-    assert _proxima(linhas) == ENVIO + timedelta(minutes=8 + 30)
+    # Decisao 3 do coordenador (retoque da etapa 3): o degrau conta todas as linhas de consulta (as 4 que gastam e as
+    # 2 que nao gastam): a proxima vai 120 minutos (o setimo degrau) depois da ultima linha. Antes, 30 (o quinto).
+    assert contrato.degrau_da_consulta(linhas) == 6
+    assert _proxima(linhas) == ENVIO + timedelta(minutes=8 + 120)
 
 
 def test_escada_conta_da_ultima_linha_de_qualquer_origem_ou_do_envio() -> None:
@@ -709,7 +712,8 @@ def test_escada_conta_da_ultima_linha_de_qualquer_origem_ou_do_envio() -> None:
     assert _proxima(recibo) == ENVIO + timedelta(minutes=11)
     uma = [_linha(2)]
     assert _proxima(uma) == ENVIO + timedelta(minutes=4)
-    assert _proxima([*uma, _linha(3, desfecho="sala_fora")]) == ENVIO + timedelta(minutes=5)
+    # A sala_fora nao gasta tentativa, mas sobe o degrau (decisao 3): 5 minutos (o terceiro) depois dela. Antes, 2.
+    assert _proxima([*uma, _linha(3, desfecho="sala_fora")]) == ENVIO + timedelta(minutes=3 + 5)
 
 
 def test_primeira_consulta_so_depois_do_prazo_do_envio() -> None:
@@ -799,6 +803,98 @@ def test_escada_para_com_sistema_fora_e_no_maximo() -> None:
     assert contrato.e_a_ultima_consulta([], 1)
 
 
+def test_a_resposta_ao_aviso_nunca_encerra_a_escada() -> None:
+    """Decisao 1 do coordenador (retoque da etapa 3, D2): so recibo e consulta encerram. O ``parada`` (ou qualquer
+    estado final) do aviso, sozinho ou depois do recibo em andamento, deixa a escada seguir; duas ``nao_recebida`` do
+    aviso nao confirmam; a consulta seguinte encerra como sempre."""
+    assert contrato.ORIGENS_DA_RESPOSTA_FINAL == ("recibo", "consulta")
+    for estado in contrato.ESTADOS_FINAIS:
+        so_o_aviso = [_linha(2, "aviso", estado=estado)]
+        assert contrato.resposta_que_encerra(so_o_aviso) is None
+        assert _proxima(so_o_aviso) is not None
+    adiada = [_linha(0, "recibo", estado="em_andamento"), _linha(3, "aviso", estado="parada")]
+    assert contrato.resposta_que_encerra(adiada) is None
+    assert _proxima(adiada) == ENVIO + timedelta(minutes=3 + 1)
+    duas_do_aviso = [_linha(2, "aviso", estado="nao_recebida"), _linha(5, "aviso", estado="nao_recebida")]
+    assert contrato.resposta_que_encerra(duas_do_aviso) is None
+    # Uma do aviso e uma da consulta tambem nao confirmam: so contam as do recibo e da consulta.
+    assert (
+        contrato.resposta_que_encerra([_linha(2, "aviso", estado="nao_recebida"), _linha(5, estado="nao_recebida")])
+        is None
+    )
+    depois = [*adiada, _linha(5, estado="concluida")]
+    assert contrato.resposta_que_encerra(depois) == "concluida"
+    assert _proxima(depois) is None
+    # O ultimo estado final do recibo ou da consulta vale, mesmo com um aviso depois.
+    assert contrato.resposta_que_encerra(
+        [_linha(2, "recibo", estado="concluida"), _linha(4, "aviso", estado="parada")]
+    ) == ("concluida")
+
+
+def test_degrau_conta_todas_as_linhas_de_consulta_e_o_maximo_so_as_que_gastam() -> None:
+    """Decisao 3 do coordenador: o degrau sobe com toda linha de consulta (``sem_chave`` e ``sala_fora`` tambem); o
+    maximo conta so as que gastam. Sem linhas que nao gastam, nada muda."""
+    sem_chave = [_linha(n, desfecho="sem_chave") for n in range(9)]
+    assert (contrato.tentativas_da_consulta(sem_chave), contrato.degrau_da_consulta(sem_chave)) == (0, 9)
+    assert _proxima(sem_chave) == ENVIO + timedelta(minutes=8 + 240)
+    assert not contrato.e_a_ultima_consulta(sem_chave, 8)
+    # So as que gastam: o degrau e o de antes, linha a linha.
+    for n in range(8):
+        gastas = [_linha(m) for m in range(n)]
+        base = n - 1 if n else 0
+        assert contrato.degrau_da_consulta(gastas) == contrato.tentativas_da_consulta(gastas) == n
+        esperado = ENVIO + timedelta(minutes=base + contrato.ESCADA_DA_CONSULTA_MINUTOS[n])
+        assert _proxima(gastas) == max(esperado, ENVIO + timedelta(seconds=PRAZO + 60))
+    # Muitas que nao gastam nao acabam a escada: com 7 que gastam, ainda vai a oitava.
+    misturadas = [*[_linha(m, desfecho="sala_fora") for m in range(20)], *[_linha(20 + m) for m in range(7)]]
+    assert _proxima(misturadas) == ENVIO + timedelta(minutes=26 + 240)
+    assert _proxima([*misturadas, _linha(30)]) is None
+
+
+def test_escada_acaba_pelo_tempo_e_sem_a_chave_tem_poucas_linhas_por_dia() -> None:
+    """Decisao 3 do coordenador (a sonda SONDA_SEM_CHAVE_CONSULTA do verificador: uma linha por minuto, sem fim): com a
+    chave da pessoa apagada, cada consulta grava ``sem_chave`` e a escada segue pelos degraus, 12 no primeiro dia e 6
+    por dia depois, ate o fim pelo tempo (``REAPROVEITAR_NUMERO_DIAS`` dias depois do envio): 48 perguntas em 7 dias,
+    em vez de 1440 por dia."""
+    linhas: list[Any] = []
+    for _ in range(100):  # com teto: sem o fim pelo tempo, a escada nunca devolveria None
+        if (vez := _proxima(linhas)) is None:
+            break
+        linhas.append(contrato.LinhaInformada("consulta", "sem_chave", None, vez))
+    assert len(linhas) == 48
+    por_dia: dict[int, int] = {}
+    for x in linhas:
+        por_dia[(x.gravado_em - ENVIO).days] = por_dia.get((x.gravado_em - ENVIO).days, 0) + 1
+    assert por_dia == {0: 12, 1: 6, 2: 6, 3: 6, 4: 6, 5: 6, 6: 6}
+    assert linhas[-1].gravado_em < ENVIO + timedelta(days=contrato.REAPROVEITAR_NUMERO_DIAS)
+    assert all(b.gravado_em - a.gravado_em == timedelta(minutes=240) for a, b in itertools.pairwise(linhas[6:]))
+    # Uma escada so com respostas em aberto tambem acaba pelo tempo, sem passar do maximo.
+    em_aberto = [_linha(m, estado="em_andamento") for m in range(3)]
+    assert (
+        contrato.proxima_consulta(em_aberto, enviado_em=ENVIO - timedelta(days=7), maximo=8, prazo_envio_segundos=PRAZO)
+        is None
+    )
+
+
+def test_escada_vencida_no_limite_exato() -> None:
+    """``escada_vencida(enviado_em, agora)``: ``agora >= enviado_em + REAPROVEITAR_NUMERO_DIAS`` dias, a janela do
+    pedido igual. A assinatura e a que o G4 usa (decisao 3 do coordenador)."""
+    assert contrato.REAPROVEITAR_NUMERO_DIAS == 7
+    assert [p.name for p in inspect.signature(contrato.escada_vencida).parameters.values()] == ["enviado_em", "agora"]
+    limite = ENVIO + timedelta(days=7)
+    assert contrato.escada_vencida(ENVIO, limite)
+    assert contrato.escada_vencida(ENVIO, limite + timedelta(days=30))
+    assert not contrato.escada_vencida(ENVIO, limite - timedelta(microseconds=1))
+    assert not contrato.escada_vencida(ENVIO, ENVIO)
+    # A vez que cairia no limite exato ja nao vai; um microssegundo antes, vai.
+    perto = ENVIO + timedelta(days=7) - timedelta(minutes=240)
+    assert _proxima([contrato.LinhaInformada("consulta", "sem_chave", None, perto)] * 8) is None
+    quase = perto - timedelta(microseconds=1)
+    assert _proxima([contrato.LinhaInformada("consulta", "sem_chave", None, quase)] * 8) == quase + timedelta(
+        minutes=240
+    )
+
+
 def test_contrato_registra_as_decisoes_do_coordenador() -> None:
     """Etapa 1: o aviso so para bloqueio, a A3.3 na rota e nas rotinas, e a conta da retirada com o despachante."""
     doc = " ".join((contrato.__doc__ or "").split())
@@ -831,6 +927,15 @@ def test_contrato_registra_as_decisoes_do_coordenador() -> None:
     proxima = " ".join((contrato.proxima_consulta.__doc__ or "").split())
     assert "``now()`` do banco" in proxima
     assert "monotonico" in proxima
+    # Retoque da etapa 3: decisoes 1 a 3 do coordenador na escada e na rota.
+    assert "So as respostas de origem ``recibo`` e ``consulta`` contam" in escada
+    assert "degrau da espera e contado por TODAS as linhas de origem ``consulta``" in escada
+    assert "``escada_vencida``" in escada
+    assert '409 ``{"motivo": "porta_fechada"}``' in rota
+    assert "nada foi perguntado e nada foi gravado" in rota
+    assert "com a porta fechada, ou sem a chave da pessoa, o aviso espera" in aviso.lower()
+    assert "a chave da pessoa foi recusada na ultima tentativa" in aviso
+    assert "``aviso_bloqueio_ainda_nao_saiu``" in aviso
 
 
 # --- BADGE_WARN_DAYS na politica ------------------------------------------------------------------------------

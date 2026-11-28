@@ -9,9 +9,9 @@ funcoes. As regras:
   categorias do vocabulario do contrato, contagens e horas ja convertidas pelo MCP-CLARO, nunca texto do sistema;
 - o numero e conferido: a resposta fala do numero perguntado (e do aviso perguntado), e de nenhum outro;
 - o vocabulario e fechado. Um estado ou um evento fora dele torna a resposta invalida, inclusive um "IGNORE AS
-  REGRAS" escondido no estado. A hora de um evento e uma data e hora com fuso (RFC 3339) e, quando quem chama diz a
-  janela, fica entre o envio menos 5 minutos e agora mais 5 minutos (``contrato.MARGEM_EVENTO_MINUTOS``, a regra do
-  banco);
+  REGRAS" escondido no estado. A hora de um evento e uma data e hora com fuso (RFC 3339, com o segundo bissexto lido
+  como o segundo seguinte) e, quando quem chama diz a janela, fica entre o envio menos 5 minutos e agora mais 5 minutos
+  (``contrato.MARGEM_EVENTO_MINUTOS``, a regra do banco);
 - o teto e de 16 KiB (``contrato.TETO_RESPOSTA_BYTES``) por resposta do contrato, medido sem recursao e parando
   assim que passa (nem um JSON de muitos niveis estoura a pilha);
 - a resposta da consulta e do aviso vem em ``structuredContent``, sem ``isError``; o recibo combina com o ``isError``
@@ -183,14 +183,26 @@ def _contagem(valor: Any) -> int | None:
 
 def hora_do_evento(valor: Any) -> datetime | None:
     """A hora de um evento de ``depois``: data e hora RFC 3339 com fuso, ou ``None``. O ``t`` e o ``z`` minusculos
-    valem como no RFC 3339 (secao 5.6, nota); o ``fromisoformat`` so le o ``Z`` maiusculo, e ele vai assim."""
+    valem como no RFC 3339 (secao 5.6, nota); o ``fromisoformat`` so le o ``Z`` maiusculo, e ele vai assim.
+
+    O segundo 60 (o segundo bissexto, que o RFC 3339 aceita, secao 5.7) vale e e lido como o segundo seguinte, como o
+    PostgreSQL le (``23:59:60Z`` e ``00:00:00Z`` do dia seguinte). Um sistema honesto que segue o relogio com o segundo
+    bissexto nao tem a resposta dada como invalida (o que contaria contra ele na retirada); a hora guardada e a do
+    MCP-CLARO, ja convertida. Do 61 em diante, ``hora_fora``."""
     if not isinstance(valor, str) or len(valor) > _TETO_DA_HORA or _DATA_HORA.fullmatch(valor) is None:
         return None
+    bissexto = valor[17:19] == "60"
+    texto = valor[:17] + "59" + valor[19:] if bissexto else valor
     try:
-        hora = datetime.fromisoformat(valor[:-1] + "Z" if valor.endswith("z") else valor)
+        hora = datetime.fromisoformat(texto[:-1] + "Z" if texto.endswith("z") else texto)
     except ValueError:
         return None
-    return hora if hora.utcoffset() is not None else None
+    if hora.utcoffset() is None:
+        return None
+    try:
+        return hora + timedelta(seconds=1) if bissexto else hora
+    except OverflowError:  # 9999-12-31T23:59:60: nao ha segundo seguinte
+        return None
 
 
 def _eventos(valor: Any, *, desde: datetime | None, ate: datetime | None) -> tuple[Evento, ...] | Invalida:

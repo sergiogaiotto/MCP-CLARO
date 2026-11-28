@@ -2178,6 +2178,8 @@ RETRATO_DE_COLUNA: Final = {
     ("mcp_claro_entrada", "fichas", "decidida_em", "UPDATE"),
     ("mcp_claro_entrada", "fichas", "decidida_por", "UPDATE"),
     ("mcp_claro_entrada", "fichas", "decisao", "UPDATE"),
+    # 0007 (Fase 4, critica M4.2): a escolha do numero novo vai no UPDATE que confirma a ficha, so pela entrada.
+    ("mcp_claro_entrada", "fichas", "numero_novo", "UPDATE"),
     ("mcp_claro_entrada", "fichas", "segundos_ate_decidir", "UPDATE"),
     ("mcp_claro_entrada", "limites", "com_passkey", "UPDATE"),
     ("mcp_claro_entrada", "limites", "dia", "UPDATE"),

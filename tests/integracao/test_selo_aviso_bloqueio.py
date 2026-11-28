@@ -12,8 +12,9 @@ comprovante e os manda:
   repetido vai igual e o sistema da as mesmas respostas;
 - nada sai com a porta fechada (o aviso espera, sem gastar tentativa) nem a sistema fora de ``ativo``
   (``sistema_fora``): o duble conta zero chamadas;
-- sem a chave da pessoa (falha do MCP-CLARO, M7), o aviso espera a chave sem gastar tentativa; a chave recusada na
-  ultima tentativa deixa o aviso ``sistema_fora``, nunca ``sem_resposta``;
+- sem a chave da pessoa (falha do MCP-CLARO, M7), o aviso espera a chave sem gastar tentativa, e a dona ganha uma
+  linha ``aviso_bloqueio_ainda_nao_saiu`` por bloqueio e sistema, uma vez so (mesmo com duas partes, duas copias ou
+  varias voltas); a chave recusada na ultima tentativa deixa o aviso ``sistema_fora``, nunca ``sem_resposta``;
 - o envio em aberto do alcance fora do comprovante entra no aviso (B9); mais de 100 numeros vao em partes;
 - duas copias do despachante ao mesmo tempo: uma chamada por aviso, e um bloqueio derivado uma vez so (M8), mesmo
   com a chave lenta;
@@ -27,6 +28,7 @@ import json
 import uuid
 from typing import Any
 
+import mcp_types as types
 import pytest
 from sqlalchemy import text
 
@@ -723,3 +725,292 @@ async def test_porta_que_fecha_enquanto_a_chave_abre_segura_o_aviso(banco_migrad
         [aviso] = await avisos(cn, bloqueio)
         assert (aviso.estado, aviso.tentativas) == ("respondido", 1)
         assert cn.chamadas(contrato.FERRAMENTA_BLOQUEIO) == 1
+
+
+# --- Retoque da etapa 3, G3ar (decisao 1, aviso sem a chave, contador e provas que faltavam) --------------------
+
+
+async def _ate(condicao: Any, prazo: float = 30.0) -> None:
+    """Espera ``condicao()`` ficar verdadeira (um evento do duble, nunca o relogio da maquina), com um teto."""
+    async with asyncio.timeout(prazo):
+        while not condicao():  # noqa: ASYNC110 - espera o duble (estado em memoria dele)
+            await asyncio.sleep(0.02)
+
+
+class LigacaoQuePerdeAEscritaLenta:
+    """A ligacao de verdade; a chamada da acao vai ao sistema em segundo plano e, assim que o duble a segura (escrita
+    lenta, ``demora``), a porta recebe a resposta como perdida: a acao fica "nao confirmada", e a escrita continua do
+    lado do sistema, ate ``/soltar``."""
+
+    tarefas: list[asyncio.Task[Resposta]]
+    motor: Any
+
+    def __init__(self, sistema: Any) -> None:
+        self.ligacao = ligacao_sem_sala(sistema)
+
+    async def chamar_ferramenta(self, *args: Any, **kw: Any) -> Resposta:
+        if args[3] != a.ACAO:
+            return await self.ligacao.chamar_ferramenta(*args, **kw)
+        LigacaoQuePerdeAEscritaLenta.tarefas.append(asyncio.create_task(self.ligacao.chamar_ferramenta(*args, **kw)))
+        await _ate(lambda: bool(LigacaoQuePerdeAEscritaLenta.motor.lentas))
+        return Resposta("duvida", excecao="ReadTimeout")
+
+
+async def test_com_ignora_bloqueio_o_efeito_acontece_e_a_consulta_seguinte_contradiz(banco_migrado: Parametros) -> None:
+    """Desenho 12.1 G3 e decisao 1 do coordenador (D2, opcao a): a escrita chegou ao sistema e a resposta se perdeu
+    ("nao confirmada"). O bloqueio avisa; o sistema ``ignora_bloqueio`` responde ``parada``, mas a escrita acontece
+    (``/soltar`` termina a escrita lenta, sem esperar o relogio). A resposta ao aviso nao encerra a escada: a consulta
+    seguinte pergunta, o sistema diz ``concluida``, o banco ve a contradicao (``parada`` e depois ``concluida``), o
+    selo cai, a dona ve ``sistema_se_contradisse`` e o ADMIN e avisado. Antes, o ``parada`` do aviso encerrava a escada
+    e a consulta nunca ia (409)."""
+    async with a.cena(banco_migrado, selo_mentiroso.criar, nivel=3, modo="ignora_bloqueio") as cn:
+        LigacaoQuePerdeAEscritaLenta.tarefas, LigacaoQuePerdeAEscritaLenta.motor = [], cn.motor
+        op = await a.nova_acao(cn, argumentos=a.ARGUMENTOS | {"texto": "lento", "demora": 60})
+        await a.mandar(cn, cn.porta(ligacao=LigacaoQuePerdeAEscritaLenta))
+        assert await a.estado_da_fila(cn, op.id) == "nao_confirmada"
+        [numero] = list(cn.motor.lentas)
+        assert numero == str((await a.envio(cn, op.id)).chave)
+        bloqueio = await bloquear(cn, [op], em_conferencia=(0,))
+        perguntador = cn.perguntador()
+        await perguntador.derivar_avisos()
+        assert await perguntador.avisar_bloqueios() == 1
+        [aviso] = await avisos(cn, bloqueio)
+        assert aviso.estado == "respondido"
+        assert [(x.origem, x.estado) for x in await a.informacoes(cn, op.id)] == [("aviso", "parada")]
+        assert cn.aplicadas() == 0
+        assert cn.motor.soltar(numero)  # o sistema nao parou: a escrita termina e vale
+        await _ate(lambda: cn.aplicadas() == 1)
+        await asyncio.gather(*LigacaoQuePerdeAEscritaLenta.tarefas, return_exceptions=True)
+        await a.voltar_no_tempo(cn, [op.id])
+        lido = await perguntador.consultar(op.id)
+        assert (lido.desfecho, lido.estado) == ("respondeu", "concluida")
+        assert [(x.origem, x.estado, x.contradiz) for x in await a.informacoes(cn, op.id)] == [
+            ("aviso", "parada", False),
+            ("consulta", "concluida", True),
+        ]
+        assert (await a.selo_vigente(cn)).motivo == "retirado"
+        assert "sistema_se_contradisse" in [x.tipo for x in await a.extrato(cn, protocolo=op.protocolo)]
+        [ao_admin] = await a.avisos_ao_admin(cn, "selo_retirado")
+        assert ao_admin.corpo["motivo"] == "se_contradisse"
+
+
+class LigacaoQueContradizNoAviso:
+    """A ligacao de verdade, menos a resposta ao aviso: ``nao_recebida`` para todo numero pedido (as acoes foram
+    feitas: o recibo disse ``concluida``)."""
+
+    def __init__(self, sistema: Any) -> None:
+        self.ligacao = ligacao_sem_sala(sistema)
+
+    async def chamar_ferramenta(self, *args: Any, **kw: Any) -> Resposta:
+        if args[3] != contrato.FERRAMENTA_BLOQUEIO:
+            return await self.ligacao.chamar_ferramenta(*args, **kw)
+        pedido = args[4]
+        dados = {
+            "contrato": contrato.CONTRATO,
+            "bloqueio": pedido["bloqueio"],
+            "operacoes": [{"operacao": n, "estado": "nao_recebida"} for n in pedido["operacoes"]],
+        }
+        resultado = types.CallToolResult(content=[types.TextContent(type="text", text="x")], structured_content=dados)
+        return Resposta("resultado", resultado=resultado)
+
+
+async def test_dois_numeros_contraditos_no_mesmo_aviso_somam_uma_retirada(
+    banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D10 da conferencia da etapa 3: a resposta ao aviso contradiz dois numeros de uma vez (o recibo de cada um disse
+    ``concluida``). Uma linha ``sistema_se_contradisse`` por protocolo, mas um teste retirado so: o aviso ao ADMIN e o
+    contador ``selo_retiradas`` contam uma vez (antes, o contador somava uma vez por numero)."""
+    espia = Espia(consulta.CONTADORES)
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        ops = [await a.nova_acao(cn, argumentos=a.ARGUMENTOS | {"texto": f"feito {i}"}) for i in range(2)]
+        await a.mandar(cn)
+        for op in ops:
+            assert [(x.origem, x.estado) for x in await a.informacoes(cn, op.id)] == [("recibo", "concluida")]
+        bloqueio = await bloquear(cn, ops)
+        perguntador = cn.perguntador()
+        perguntador.ligacao = LigacaoQueContradizNoAviso  # type: ignore[assignment]
+        await perguntador.derivar_avisos()
+        [aviso] = await avisos(cn, bloqueio)
+        assert len(aviso.operacoes) == 2
+        monkeypatch.setattr(consulta, "CONTADORES", espia)
+        assert await perguntador.avisar_bloqueios() == 1
+        for op in ops:
+            assert [(x.origem, x.estado, x.contradiz) for x in await a.informacoes(cn, op.id)] == [
+                ("recibo", "concluida", False),
+                ("aviso", "nao_recebida", True),
+            ]
+            assert [x.tipo for x in await a.extrato(cn, protocolo=op.protocolo)].count("sistema_se_contradisse") == 1
+        assert (await a.selo_vigente(cn)).motivo == "retirado"
+        assert [r for n, r in espia.somados if n == "selo_retiradas"] == [{"motivo": "se_contradisse"}]
+        assert len(await a.avisos_ao_admin(cn, "selo_retirado")) == 1
+
+
+@pytest.mark.parametrize("mudanca", ["quarentena", "bloqueio_encerrado"])
+async def test_chave_lenta_e_o_aviso_que_acabou_no_meio_nao_sai(banco_migrado: Parametros, mudanca: str) -> None:
+    """D6 da conferencia da etapa 3 (mutacao N44): enquanto a chave da pessoa abre (fora de transacao), o sistema vai
+    para quarentena, ou o bloqueio acaba. A reserva confere de novo: zero chamadas de ``selo_bloqueio``, nenhuma
+    tentativa gasta, e o aviso fica ``sistema_fora`` (ou ``bloqueio_encerrado``), com a linha no extrato."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        op = await a.nova_acao(cn)
+        await a.mandar(cn)
+        bloqueio = await bloquear(cn, [op])
+        perguntador = cn.perguntador()
+        await perguntador.derivar_avisos()
+        segredo = perguntador._segredo
+
+        async def chave_lenta(*args: Any, **kw: Any) -> Any:
+            async with cn.dono.begin() as c:
+                if mudanca == "quarentena":
+                    await c.execute(
+                        text("UPDATE sistemas SET situacao = 'quarentena' WHERE id = :s"), {"s": cn.sistema.id}
+                    )
+                else:
+                    await c.execute(
+                        text("UPDATE bloqueios SET encerrado_em = now(), encerrado_por = 'teste' WHERE id = :b"),
+                        {"b": bloqueio},
+                    )
+            return await segredo(*args, **kw)
+
+        perguntador._segredo = chave_lenta  # type: ignore[method-assign]
+        assert await perguntador.avisar_bloqueios() == 1
+        [aviso] = await avisos(cn, bloqueio)
+        assert (aviso.estado, aviso.tentativas) == ("sistema_fora" if mudanca == "quarentena" else mudanca, 0)
+        assert cn.chamadas(contrato.FERRAMENTA_BLOQUEIO) == 0
+        assert [x.origem for x in await a.informacoes(cn, op.id)] == ["recibo"]
+        linhas = await a.extrato(cn, sistema=True)
+        if mudanca == "quarentena":
+            [linha] = [x for x in linhas if x.tipo == "aviso_bloqueio_sistema_fora"]
+            assert "o sistema esta em quarentena" in linha.frase
+        else:
+            [linha] = [x for x in linhas if x.tipo == "aviso_bloqueio_dispensado"]
+            assert "antes de o aviso sair" in linha.frase
+
+
+async def test_sem_a_chave_a_dona_sabe_uma_vez_e_o_fim_nao_culpa_a_porta(banco_migrado: Parametros) -> None:
+    """D5 da conferencia da etapa 3 (a sonda SONDA_SEM_CHAVE: oito voltas sem a chave e nenhuma linha; no fim, "antes
+    de a porta de saida abrir", com a porta aberta): na primeira vez que a chave da pessoa nao abre, a dona ganha
+    ``aviso_bloqueio_ainda_nao_saiu``, com o motivo nosso, uma vez so por bloqueio e sistema, mesmo com o aviso em
+    duas partes (101 numeros) e varias voltas. Quando o bloqueio acaba, ``aviso_bloqueio_dispensado`` diz que o
+    bloqueio acabou antes de o aviso sair, sem falar da porta."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        ops = []
+        async with cn.dono.begin() as c:
+            for _ in range(contrato.MAX_OPERACOES_POR_AVISO + 1):
+                op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+                await s.enviar(c, op.id, fim="enviada")
+                ops.append(op)
+        bloqueio = await bloquear(cn, ops)
+        perguntador = cn.perguntador()
+        await perguntador.derivar_avisos()
+        assert len(await avisos(cn, bloqueio)) == 2
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        for _ in range(4):
+            assert await perguntador.avisar_bloqueios() == 2
+            await de_novo_agora(cn, bloqueio)
+        assert [(x.estado, x.tentativas) for x in await avisos(cn, bloqueio)] == [("pendente", 0)] * 2
+        assert cn.chamadas(contrato.FERRAMENTA_BLOQUEIO) == 0
+        [linha] = [x for x in await a.extrato(cn, sistema=True) if x.tipo == "aviso_bloqueio_ainda_nao_saiu"]
+        assert linha.pessoa_id == cn.pessoa_id
+        assert linha.frase == (
+            f"O MCP-CLARO ainda nao conseguiu avisar o sistema {cn.sistema.nome} do bloqueio: a pessoa ainda nao"
+            " autorizou o sistema."
+        )
+        async with cn.dono.begin() as c:
+            await c.execute(
+                text("UPDATE bloqueios SET encerrado_em = now(), encerrado_por = 'teste' WHERE id = :b"),
+                {"b": bloqueio},
+            )
+        assert await perguntador.avisar_bloqueios() == 2
+        assert [x.estado for x in await avisos(cn, bloqueio)] == ["bloqueio_encerrado"] * 2
+        fim = [x.frase for x in await a.extrato(cn, sistema=True) if x.tipo == "aviso_bloqueio_dispensado"]
+        assert (
+            fim == [f"O bloqueio acabou antes de o aviso sair; o MCP-CLARO nao avisou o sistema {cn.sistema.nome}."] * 2
+        )
+
+
+async def test_duas_copias_sem_a_chave_e_duas_partes_dao_uma_linha_so(
+    banco_migrado: Parametros, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Critica M8 com o aviso em duas partes e a chave da pessoa apagada: a copia A pega a parte 1 e esta gravando a
+    linha ``aviso_bloqueio_ainda_nao_saiu``; a copia B pega a parte 2 nesse meio tempo. B espera A terminar (a trava da
+    transacao, por bloqueio, sistema e pessoa) e ve a linha de A: a dona ganha uma linha so."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        ops = []
+        async with cn.dono.begin() as c:
+            for _ in range(contrato.MAX_OPERACOES_POR_AVISO + 1):
+                op = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+                await s.enviar(c, op.id, fim="enviada")
+                ops.append(op)
+        bloqueio = await bloquear(cn, ops)
+        copia_a, copia_b = cn.perguntador(), cn.perguntador()
+        await copia_a.derivar_avisos()
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        registrar, dentro, solta = consulta.registrar, asyncio.Event(), asyncio.Event()
+
+        async def registrar_que_segura(c: Any, **kw: Any) -> int:
+            if kw.get("tipo") == "aviso_bloqueio_ainda_nao_saiu" and not dentro.is_set():
+                dentro.set()
+                await solta.wait()
+            return await registrar(c, **kw)
+
+        monkeypatch.setattr(consulta, "registrar", registrar_que_segura)
+
+        async def esperando_a_trava() -> int:
+            async with cn.dono.connect() as c:
+                return int(
+                    (
+                        await c.execute(
+                            text("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+                        )
+                    ).scalar_one()
+                )
+
+        primeira = asyncio.create_task(copia_a.avisar_bloqueios(limite=1))
+        try:
+            await asyncio.wait_for(dentro.wait(), timeout=20)
+            segunda = asyncio.create_task(copia_b.avisar_bloqueios(limite=1))
+            async with asyncio.timeout(20):
+                while not segunda.done() and await esperando_a_trava() == 0:  # noqa: ASYNC110 - espera a outra copia
+                    await asyncio.sleep(0.05)
+        finally:
+            solta.set()
+        assert await primeira == 1
+        assert await segunda == 1
+        assert [(x.estado, x.tentativas) for x in await avisos(cn, bloqueio)] == [("pendente", 0)] * 2
+        linhas = [x for x in await a.extrato(cn, sistema=True) if x.tipo == "aviso_bloqueio_ainda_nao_saiu"]
+        assert len(linhas) == 1
+
+
+async def test_dois_bloqueios_sem_a_chave_dao_uma_linha_por_bloqueio(banco_migrado: Parametros) -> None:
+    """A linha ``aviso_bloqueio_ainda_nao_saiu`` e uma por bloqueio (``dados.bloqueio``), nao uma por pessoa e sistema
+    (sonda SONDA_DOIS_BLOQUEIOS do verificador da etapa 3r, mutacao V3a). Dois bloqueios da mesma pessoa e do mesmo
+    sistema, derivados antes de o aviso tentar sair, com a chave da pessoa apagada: a linha do primeiro bloqueio e
+    gravada depois de o aviso do segundo nascer, e sem o filtro pelo bloqueio esconderia a do segundo, e a dona nao
+    saberia dele. Cada bloqueio ganha a sua linha, e a volta seguinte sem a chave nao repete nenhuma."""
+    async with a.cena(banco_migrado, selo_nivel3.criar, nivel=3) as cn:
+        async with cn.dono.begin() as c:
+            primeira = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+            await s.enviar(c, primeira.id, fim="enviada")
+            segunda = await s.criar_operacao(c, cn.sistema.acoes[0], pessoa_id=cn.pessoa_id)
+            await s.enviar(c, segunda.id, fim="enviada")
+        bloqueio_1 = await bloquear(cn, [primeira])
+        bloqueio_2 = await bloquear(cn, [segunda])
+        perguntador = cn.perguntador()
+        await perguntador.derivar_avisos()
+        assert len(await avisos(cn, bloqueio_1)) == 1
+        assert len(await avisos(cn, bloqueio_2)) == 1
+        async with cn.dono.begin() as c:
+            await c.execute(text("DELETE FROM chaves_cifradas WHERE sistema_id = :s"), {"s": cn.sistema.id})
+        assert await perguntador.avisar_bloqueios() == 2
+        await de_novo_agora(cn, bloqueio_1)
+        await de_novo_agora(cn, bloqueio_2)
+        assert await perguntador.avisar_bloqueios() == 2
+        assert [(x.estado, x.tentativas) for b in (bloqueio_1, bloqueio_2) for x in await avisos(cn, b)] == [
+            ("pendente", 0)
+        ] * 2
+        assert cn.chamadas(contrato.FERRAMENTA_BLOQUEIO) == 0
+        linhas = [x for x in await a.extrato(cn, sistema=True) if x.tipo == "aviso_bloqueio_ainda_nao_saiu"]
+        assert sorted(x.dados["bloqueio"] for x in linhas) == sorted([str(bloqueio_1), str(bloqueio_2)])
+        assert {x.pessoa_id for x in linhas} == {cn.pessoa_id}
