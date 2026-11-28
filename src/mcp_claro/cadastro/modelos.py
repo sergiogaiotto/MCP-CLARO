@@ -8,7 +8,7 @@ from typing import Any, Final, Literal
 
 from mcp_claro.cadastro.esquema import limpar_textos, nomes_neutros
 from mcp_claro.regras.estranhos import vem_de_estranhos
-from mcp_claro.selo.vigente import NIVEL_1_SEM_TESTE, SeloVigente
+from mcp_claro.selo.vigente import SELO_NAO_LIDO, SeloNaoLido, SeloVigente, foi_lido
 
 Classe = Literal["le", "muda", "tem_volta"]
 Origem = Literal["proprio", "terceiro"]
@@ -60,10 +60,11 @@ class Sistema:
 
     ``selo`` e a coluna antiga ``sistemas.selo``, presa em 1 pela 0007 (D8): fica para o codigo de antes da Fase 4
     (critica B1). O selo de agora e ``selo_vigente``, lido de ``selo_vigente()`` pelo cadastro
-    (``cadastro.repositorio``: a vitrine, ``ferramenta_na_vitrine``, ``ferramenta_da_ordem`` e
-    ``sistema_por_id(..., com_selo=True)``); o padrao, nivel 1 sem teste, fica para quem monta o ``Sistema`` a mao e
-    para ``sistema_por_id`` sem ``com_selo`` (os caminhos do despachante que nao usam o selo). O que vai a uma pessoa e
-    o selo efetivo (``selo.vigente.efetivo``), nunca nenhum dos dois direto."""
+    (``cadastro.repositorio``: a vitrine, ``ferramenta_na_vitrine``, ``ferramenta_da_ordem(..., com_selo=True)`` e
+    ``sistema_por_id(..., com_selo=True)``). O padrao, ``SELO_NAO_LIDO``, fica para quem monta o ``Sistema`` a mao e
+    para os caminhos que nao leem o selo (``sistema_por_id`` e ``ferramenta_da_ordem`` sem ``com_selo``): tem nivel 1,
+    mas o retrato, o efetivo e os textos dele levantam ``SeloNaoLido``. O que vai a uma pessoa e o selo efetivo
+    (``selo.vigente.efetivo``), nunca nenhum dos dois direto."""
 
     id: uuid.UUID
     nome: str
@@ -75,7 +76,7 @@ class Sistema:
     versao_mcp: str | None
     revisao_servidor_id: uuid.UUID | None = None
     sondagem_desfecho: str | None = None
-    selo_vigente: SeloVigente = NIVEL_1_SEM_TESTE
+    selo_vigente: SeloVigente = SELO_NAO_LIDO
 
     @property
     def de_terceiro(self) -> bool:
@@ -114,7 +115,9 @@ class FerramentaVitrine:
         ``selo_efetivo``: o nivel do selo efetivo da pessoa que ve a vitrine (``selo.vigente.efetivo`` sobre
         ``sistema.selo_vigente``), que vai no ``_meta``. Sem ele, vai a coluna antiga ``sistema.selo`` (presa em 1),
         como antes da Fase 4. O efetivo nunca passa do vigente: um nivel acima de ``sistema.selo_vigente.nivel``, ou
-        fora de 1 a 3, levanta ``ValueError`` (um defeito de quem chama nunca sobe o selo no aplicativo).
+        fora de 1 a 3, levanta ``ValueError`` (um defeito de quem chama nunca sobe o selo no aplicativo), e um
+        ``selo_efetivo`` com o selo do sistema nao lido (``SELO_NAO_LIDO``) levanta ``SeloNaoLido``: o efetivo so sai
+        de um selo lido.
 
         Num terceiro, nada do fornecedor: o esquema de entrada sai limpo de novo (so as descricoes de campo do
         primeiro nivel ficam: a revisao gravou as do ADMIN), sem o ``$schema`` da raiz e com nomes neutros nas
@@ -124,6 +127,8 @@ class FerramentaVitrine:
         """
         if selo_efetivo is None:
             selo = self.sistema.selo
+        elif not foi_lido(self.sistema.selo_vigente):
+            raise SeloNaoLido("o selo efetivo pede o selo do sistema lido do banco")
         elif isinstance(selo_efetivo, bool) or selo_efetivo not in (1, 2, 3):
             raise ValueError(f"selo efetivo fora de 1 a 3: {selo_efetivo!r}")
         elif selo_efetivo > self.sistema.selo_vigente.nivel:

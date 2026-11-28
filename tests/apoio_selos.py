@@ -5,7 +5,8 @@ Tudo aqui usa a conexao do DONO do esquema (o usuario das migracoes, nos testes)
 bateria nem pelas telas. Os gatilhos da migracao 0007 valem do mesmo jeito:
 
 - a declaracao e a versao seguinte, de um ADMIN ativo, com o alvo de teste diferente da producao de todo sistema do
-  cadastro (normalizado; de novo no pedido e no teste). Por isso nenhum teste grava (confirma) um sistema cuja
+  cadastro (na forma normalizada e na forma de conexao, que junta localhost, todo loopback e o IP escrito de outro
+  jeito; de novo no pedido, em rodando e no teste). Por isso nenhum teste grava (confirma) um sistema cuja
   producao seja ``ENDERECO_TESTE``: as declaracoes de todos os outros testes seriam recusadas. Quem precisar disso usa
   uma transacao que volta atras;
 - o teste so nasce de um pedido ``rodando`` (com a porta de saida aberta), com o retrato do sistema de agora, as
@@ -19,8 +20,8 @@ banco da sessao, de qualquer situacao, inclusive os que testes anteriores deixar
 ``127.0.0.1`` numa porta efemera, que o sistema operacional reaproveita na mesma sessao: um sistema antigo com
 producao ``http://127.0.0.1:P/mcp`` faria a declaracao de um teste seguinte, cujo alvo caia na mesma porta P, ser
 recusada. Por isso todo endereco de duble (producao e alvo) sai de ``endereco_de_duble``, com um trecho de caminho
-unico (``caminho_unico``), e o duble serve nesse caminho. A forma normalizada guarda o caminho, entao dois enderecos
-na mesma porta nunca colidem. Quem nao puder servir num caminho unico roda o teste numa transacao que volta atras.
+unico (``caminho_unico``), e o duble serve nesse caminho. As duas formas guardam o caminho, entao dois enderecos na
+mesma porta nunca colidem. Quem nao puder servir num caminho unico roda o teste numa transacao que volta atras.
 
 A conexao ``c`` e uma ``AsyncConnection`` do dono; quem chama faz o commit (``engine.begin()``).
 """

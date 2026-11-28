@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from mcp_claro.cadastro import repositorio
 from mcp_claro.config.settings import Parametros
 from mcp_claro.selo import contrato, vigente
-from mcp_claro.selo.vigente import FASE_DESLIGADA, NIVEL_1_SEM_TESTE, SeloVigente, efetivo
+from mcp_claro.selo.vigente import FASE_DESLIGADA, SELO_NAO_LIDO, SeloNaoLido, SeloVigente, efetivo
+from mcp_claro.versao import VERSAO_MCP
 from tests import apoio_selos as apoio
 from tests.apoio_terceiros import cadastrar_terceiro, definicao, gravar_revisao_do_servidor, revisar_ferramenta
 from tests.integracao.test_migracao_0006 import DESPACHANTE, ENTRADA, ROTINAS, como, dono
@@ -101,8 +102,13 @@ async def test_ler_devolve_o_que_a_funcao_do_banco_devolve(dono: AsyncEngine, ce
     assert sistema.selo_vigente == selo
     assert sistema.selo == 1  # a coluna antiga fica presa em 1 (D8)
     assert sem_selo is not None
-    assert sem_selo.selo_vigente is NIVEL_1_SEM_TESTE  # nao lido: o nivel 1, que nao promete nada
+    assert sem_selo.selo_vigente is SELO_NAO_LIDO  # nao lido: o nivel 1, que nao promete nada
     assert dataclasses.replace(sem_selo, selo_vigente=selo) == sistema  # o resto e o mesmo
+    # O selo nao lido nunca vira retrato nem efetivo: um sistema testado nunca aparece como "nunca testado".
+    with pytest.raises(SeloNaoLido):
+        sem_selo.selo_vigente.retrato()
+    with pytest.raises(SeloNaoLido):
+        efetivo(sem_selo.selo_vigente, ligada=False, pessoa_teste=False)
 
 
 async def test_ler_todos_traz_cada_sistema_do_cadastro(dono: AsyncEngine, cena: Cena) -> None:
@@ -178,8 +184,96 @@ async def test_sistema_por_id_sem_selo_nem_chama_a_funcao_do_selo(dono: AsyncEng
 
     sistema, erro = await num_rascunho(dono, passos)
     assert sistema.id == cena.sistema.id
-    assert sistema.selo_vigente is NIVEL_1_SEM_TESTE
+    assert sistema.selo_vigente is SELO_NAO_LIDO
     assert "selo_vigente chamada" in erro
+
+
+async def _uma_ordem_de(c: AsyncConnection, cena: Cena) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Uma pessoa com ordem de servico para a acao do sistema: (pessoa, aplicativo, ordem)."""
+    pessoa = await apoio.nova_pessoa(c, teste=True)
+    aplicativo = await apoio.novo_aplicativo(c)
+    modelo = await repositorio.criar_modelo_ordem(
+        c,
+        nome=f"modelo-{uuid.uuid4().hex[:8]}",
+        descricao="Lembretes",
+        ferramentas=[(cena.sistema.id, a.nome_original) for a in cena.sistema.acoes],
+        validade_dias=30,
+        criado_por="admin-teste",
+    )
+    ordem = await repositorio.conceder_ordem(
+        c, pessoa_id=pessoa, aplicativo_id=aplicativo, modelo_id=modelo, dias=7, max_dias=30
+    )
+    return pessoa, aplicativo, ordem
+
+
+@pytest.mark.parametrize("papel", [DESPACHANTE, ENTRADA])
+async def test_ferramenta_da_ordem_sem_selo_nem_chama_a_funcao_do_selo(
+    dono: AsyncEngine, cena: Cena, papel: str
+) -> None:
+    """Item 3 do retoque G02r: a reconferencia da porta de saida, a leitura e a releitura do terceiro
+    (``ferramenta_da_ordem`` sem ``com_selo``) respondem com ``selo_vigente()`` trocada por uma que falha; com
+    ``com_selo`` (e ``ferramenta_na_vitrine``, que mostra o selo), a funcao e chamada."""
+    await no_dono(dono, lambda c: apoio.gravar_teste(c, cena.sistema.id, nivel=2, admin_id=cena.admin_id))
+    pessoa, aplicativo, ordem = await no_dono(dono, lambda c: _uma_ordem_de(c, cena))
+    acao = cena.sistema.acoes[0]
+
+    async def passos(c: AsyncConnection) -> tuple[Any, Any, list[str]]:
+        await c.execute(text(_SELO_VIGENTE_QUE_FALHA))
+        await como(c, papel)
+        argumentos = {
+            "pessoa_id": pessoa,
+            "aplicativo_id": aplicativo,
+            "ordem_id": ordem,
+            "ferramenta_id": acao.id,
+            "versao": VERSAO_MCP,
+        }
+        sem_selo = await repositorio.ferramenta_da_ordem(c, **argumentos)
+        so_a_classe = await repositorio.ferramenta_na_vitrine(
+            c, pessoa, aplicativo, acao.nome_vitrine, VERSAO_MCP, com_selo=False
+        )
+        erros = []
+        for chamar in (
+            lambda: repositorio.ferramenta_da_ordem(c, **argumentos, com_selo=True),
+            lambda: repositorio.ferramenta_na_vitrine(c, pessoa, aplicativo, acao.nome_vitrine, VERSAO_MCP),
+            lambda: repositorio.vitrine(c, pessoa, aplicativo, VERSAO_MCP),
+        ):
+            await c.execute(text("SAVEPOINT com_selo"))
+            with pytest.raises(DBAPIError) as erro:
+                await chamar()
+            await c.execute(text("ROLLBACK TO SAVEPOINT com_selo"))
+            erros.append(str(erro.value))
+        return sem_selo, so_a_classe, erros
+
+    sem_selo, so_a_classe, erros = await num_rascunho(dono, passos)
+    assert sem_selo is not None
+    assert so_a_classe is not None
+    assert sem_selo.id == so_a_classe.id == acao.id
+    assert sem_selo.sistema.selo_vigente is SELO_NAO_LIDO
+    assert so_a_classe.sistema.selo_vigente is SELO_NAO_LIDO
+    assert all("selo_vigente chamada" in e for e in erros)
+    # Sem o selo lido, o _meta com o selo efetivo nunca sai: so a coluna antiga.
+    with pytest.raises(SeloNaoLido):
+        sem_selo.como_tool(selo_efetivo=1)
+    assert sem_selo.como_tool()["_meta"]["br.com.claro.mcp-claro/selo"] == 1
+
+
+async def test_ferramenta_da_ordem_com_selo_traz_o_selo_vigente(dono: AsyncEngine, cena: Cena) -> None:
+    teste = await no_dono(dono, lambda c: apoio.gravar_teste(c, cena.sistema.id, nivel=3, admin_id=cena.admin_id))
+    pessoa, aplicativo, ordem = await no_dono(dono, lambda c: _uma_ordem_de(c, cena))
+    async with dono.connect() as c:
+        com = await repositorio.ferramenta_da_ordem(
+            c,
+            pessoa_id=pessoa,
+            aplicativo_id=aplicativo,
+            ordem_id=ordem,
+            ferramenta_id=cena.sistema.acoes[0].id,
+            versao=VERSAO_MCP,
+            com_selo=True,
+        )
+        selo = await vigente.ler(c, cena.sistema.id)
+    assert com is not None
+    assert com.sistema.selo_vigente == selo
+    assert (selo.nivel, selo.teste_id) == (3, teste.id)
 
 
 ESQUEMA_QUE_EXPLODE: Final = {
@@ -197,6 +291,7 @@ async def test_sistema_por_id_do_despachante_responde_com_o_esquema_que_explode(
     ``selo_esquema_essencial``."""
 
     async def montar(c: AsyncConnection) -> None:
+        await c.execute(text("SET LOCAL statement_timeout = '3s'"))  # a gravacao calcula contrato_confere
         await apoio.gravar_teste(c, cena.sistema.id, nivel=2, admin_id=cena.admin_id)
         explode = dict(apoio.definicao_do_contrato(contrato.FERRAMENTA_CONSULTAR), inputSchema=ESQUEMA_QUE_EXPLODE)
         await apoio.listar_contrato(c, cena.sistema.id, 2, definicoes={contrato.FERRAMENTA_CONSULTAR: explode})

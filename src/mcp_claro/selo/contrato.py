@@ -6,9 +6,13 @@ pela versao 2026-07-28 do MCP, sem extensao nem capacidade anunciada: tres ferra
 (``versao.PREFIXO_META``): o numero da operacao no pedido, o recibo na resposta e a marca de alvo de teste.
 
 Este modulo e a fonte do contrato no codigo. A migracao 0007 tem as mesmas listas no banco (``selo_casos``,
-``selo_esquemas``, ``selo_vocabulario``, ``selo_passagem_permitida``, ``selo_esquema_essencial``,
-``selo_endereco_normalizado``, ``selo_nao_testados``), e ``tests/integracao/test_migracao_0007.py`` confere que
-o SQL e o codigo dizem o mesmo. ``docs/contrato.md`` (G8) publica as mesmas tabelas.
+``selo_esquemas``, ``selo_vocabulario``, ``selo_passagem_permitida``, ``selo_esquema_essencial`` com o orcamento de
+nos de ``selo_esquema_teto`` e ``selo_esquema_peso``, ``selo_endereco_normalizado``, ``selo_nao_testados``), e
+``tests/integracao/test_migracao_0007.py`` e ``tests/integracao/test_selo_custo_do_banco.py`` conferem que o SQL e
+o codigo dizem o mesmo. O alvo de teste tem mais tres funcoes no banco com a regra de ``selo/declaracao.py``, que
+``tests/integracao/test_selo_declaracao_banco.py`` confere: ``selo_alvo_bem_escrito`` (``_nome_do_alvo``),
+``selo_ipv4_escrito`` (``_ip_escrito``) e ``selo_endereco_conexao`` (``forma_de_conexao``, menos o nome fora de
+ASCII). ``docs/contrato.md`` (G8) publica as mesmas tabelas.
 
 Sobre o rascunho independente de escrita segura (commit ``7b952151dddd84260d057cdb506081820003fe56``,
 ``spec/mws.md``): os IDs dele aparecem so em ``Requisito.adaptado_de`` e ``Requisito.parte_de`` e nas
@@ -31,15 +35,34 @@ Decisoes do coordenador na etapa 1 (os grupos seguintes seguem estas):
   libera o botao "Registrar o que o sistema informou" e nao da numero novo ao pedido igual.
 - Quantas operacoes seguidas sem resposta retiram o selo (``BADGE_LOOKUP_FAILS_TO_WITHDRAW``) e conta do
   despachante, pelo banco; o banco so exige a prova da retirada na mesma transacao (``ROTA_CONSULTAR``).
+
+Decisoes do coordenador no retoque da etapa 2:
+
+- Decisao 1, ``compara_token`` (critica A3.4), opcao (b): a bateria nao testa se o sistema reconhece a mesma
+  identidade com outra chave. O cadastro guarda uma chave de teste por sistema (``TIPO_CHAVE_TESTE``), e a bateria
+  nao tem uma segunda chave da mesma identidade para mostrar que o sistema responde pela pessoa, e nao pelo texto
+  da chave. Por isso nenhum caso de ``CASOS`` cobre o ponto, e o modo ``compara_token`` do duble mentiroso
+  (``exemplos/selo_mentiroso.py``) fica sem caso que o reprove, com a razao escrita la. O que o contrato pede fica
+  na recomendacao (``RECOMENDACOES``: responder pela mesma identidade, nao pelo mesmo texto de chave), que nao conta
+  para o selo. O G9 prova pelo gateway, com a chave renovada, que a pessoa nunca le "nao chegou" como final por uma
+  resposta so e que a ficha do pedido igual com numero novo leva o aviso da A3.3; o G8 escreve em
+  ``docs/selos.md`` que este ponto e declarado pela equipe do sistema e nao testado pelo MCP-CLARO, e o poe em
+  "Mudancas deliberadas da Fase 4".
+- Decisao 3: o selo nunca para a porta de saida nem a leitura (A1). Os caminhos que nao mostram o selo nao chamam
+  ``selo_vigente()``: ``repositorio.sistema_por_id`` e ``repositorio.ferramenta_da_ordem`` sem ``com_selo``, que
+  devolvem o sistema com ``vigente.SELO_NAO_LIDO`` (o retrato e o efetivo dele levantam ``SeloNaoLido``). E a forma
+  essencial dos esquemas tem orcamento de nos (``TETO_NOS_DO_ESQUEMA``), com os mesmos numeros no banco: um esquema
+  que explode vira ``GRANDE_DEMAIS`` depressa, nos dois lados.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 
 from mcp_claro.versao import PREFIXO_META
@@ -423,18 +446,128 @@ falhar. ``type`` ao lado de ``const`` ou ``enum`` tambem nao conta: os valores j
 FUNDO_MAXIMO_DO_ESQUEMA: Final = 32
 _REF_LOCAL: Final = re.compile(r"#/(\$defs|definitions)/([^/]+)")
 
+TETO_NOS_DO_ESQUEMA: Final = 2000
+"""Orcamento de nos de uma chamada de ``forma_essencial`` (e de ``selo_esquema_essencial`` no banco, com o mesmo
+numero em ``selo_esquema_teto('nos')``, que o teste confere). Passou dele, a forma e ``GRANDE_DEMAIS``, que nunca
+confere com o contrato.
+
+A conta: cada parte que a forma visita gasta o seu peso inteiro, com tudo o que esta dentro dela (``peso_do_json``), e
+cada ``$ref`` seguido gasta, de novo, o peso inteiro da definicao que ele acha. Assim um esquema pequeno cujas
+referencias se repetem (``a -> {x: a, y: a}``, em ciclo ou numa cadeia sem ciclo de 32 definicoes) para depois de
+uns 2000 nos, em vez de crescer em exponencial. E o banco, que copia cada parte que visita (a parte recebida, a
+definicao, a juncao com o ``$ref``, os filhos, a forma de saida), so copia o que o orcamento ja pagou. O peso nao
+depende da ordem das chaves: o banco e o codigo, que andam em ordens diferentes, passam do teto nos mesmos esquemas.
+
+Folga: o mais caro dos esquemas que o kit gera para as ferramentas do contrato (com ``title`` e ``$defs``) gasta
+``CUSTO_DO_KIT_MEDIDO`` nos; o teto da mais de dez vezes isso (o teste mede)."""
+
+BYTES_POR_NO: Final = 64
+"""Um texto (valor ou nome de campo) pesa 1 no e mais 1 a cada 64 bytes em UTF-8; um numero, 1 e mais 1 a cada 64
+letras do jeito que o banco o escreve. Um texto longo, que o banco copia a cada visita, paga o que custa."""
+
+CUSTO_DO_KIT_MEDIDO: Final = 185
+"""O custo, em nos, do esquema mais caro que o kit gera para as ferramentas do contrato (a saida de
+``selo_consultar``, com ``$defs``). O teste ``test_custo_dos_esquemas_do_kit_cabe_com_folga`` confere o numero."""
+
+GRANDE_DEMAIS: Final = "grande_demais"
+"""A forma essencial de um esquema que passou de ``TETO_NOS_DO_ESQUEMA``: um texto, que nunca confere."""
+
+
+class _GrandeDemais(Exception):
+    """O orcamento de nos acabou (interno a ``forma_essencial``)."""
+
+
+def _peso_do_texto(texto: str) -> int:
+    return 1 + len(texto.encode("utf-8", "surrogatepass")) // BYTES_POR_NO
+
+
+def texto_do_numero_no_banco(numero: int | float) -> str:
+    """O numero JSON como o banco o escreve (``numeric_out`` do jsonb): o inteiro como e; o real, que o JSON do
+    Python escreve na forma curta (``1e+16``, ``1.5e-07``), por extenso (``10000000000000000``, ``0.00000015``), e
+    sem o zero negativo, que o banco nao guarda."""
+    if isinstance(numero, int):
+        try:
+            return str(numero)
+        except ValueError:  # mais digitos do que str(int) escreve
+            return format(Decimal(numero), "f")
+    texto = format(Decimal(repr(numero)), "f")
+    if texto.startswith("-") and Decimal(texto) == 0:
+        return texto[1:]
+    return texto
+
+
+def _peso_de_um(valor: Any) -> int:
+    if isinstance(valor, str):
+        return _peso_do_texto(valor)
+    if isinstance(valor, int | float) and not isinstance(valor, bool):
+        return 1 + len(texto_do_numero_no_banco(valor)) // BYTES_POR_NO
+    return 1
+
+
+def _pesos(valor: Any) -> Iterator[int]:
+    """O peso de cada valor e de cada nome de campo de ``valor``, um por vez, sem recursao."""
+    pilha = [valor]
+    while pilha:
+        atual = pilha.pop()
+        yield _peso_de_um(atual)
+        if isinstance(atual, dict):
+            for chave, filho in atual.items():
+                yield _peso_do_texto(chave) if isinstance(chave, str) else 1
+                pilha.append(filho)
+        elif isinstance(atual, list | tuple):
+            pilha.extend(atual)
+
+
+def peso_do_json(valor: Any) -> int:
+    """O peso de um valor JSON na conta de ``TETO_NOS_DO_ESQUEMA``: 1 por valor (objeto, lista, texto, numero,
+    booleano ou nulo, em qualquer nivel) e 1 por nome de campo, e cada texto (valor ou nome) e cada numero mais 1 a
+    cada ``BYTES_POR_NO``. Mesma regra de ``selo_esquema_peso`` no banco (o teste confere)."""
+    return sum(_pesos(valor))
+
+
+class _Orcamento:
+    """Os nos ja gastos numa chamada de ``forma_essencial``."""
+
+    __slots__ = ("gasto",)
+
+    def __init__(self) -> None:
+        self.gasto = 0
+
+    def gastar_peso(self, valor: Any) -> None:
+        """Gasta o peso de ``valor`` e para assim que o orcamento acaba (``_GrandeDemais``)."""
+        for peso in _pesos(valor):
+            self.gasto += peso
+            if self.gasto > TETO_NOS_DO_ESQUEMA:
+                raise _GrandeDemais
+
+
+def custo_da_forma_essencial(esquema: Any) -> int | None:
+    """Os nos que ``forma_essencial`` gasta com ``esquema``, ou ``None`` se passa de ``TETO_NOS_DO_ESQUEMA``. Mesma
+    conta de ``selo_esquema_no`` no banco (o teste compara o que sobra do orcamento la)."""
+    orcamento = _Orcamento()
+    try:
+        _essencial(esquema, esquema, 0, orcamento)
+    except _GrandeDemais:
+        return None
+    return orcamento.gasto
+
 
 def forma_essencial(esquema: Any) -> Any:
     """A forma do esquema que a conferencia compara: sem ``ANOTACOES_DO_ESQUEMA``, com as referencias locais
     (``#/$defs/X`` e ``#/definitions/X``) resolvidas e ``required`` e ``enum`` de textos em ordem.
 
     E a mesma regra de ``selo_esquema_essencial`` no banco (o teste confere). Uma referencia que nao e local, sem
-    alvo, em ciclo ou fundo demais vira um texto que nunca confere com o contrato.
+    alvo, em ciclo ou fundo demais vira um texto que nunca confere com o contrato; um esquema que passa do orcamento
+    de nos (``TETO_NOS_DO_ESQUEMA``) vira ``GRANDE_DEMAIS``, inteiro.
     """
-    return _essencial(esquema, esquema, 0)
+    try:
+        return _essencial(esquema, esquema, 0, _Orcamento())
+    except _GrandeDemais:
+        return GRANDE_DEMAIS
 
 
-def _essencial(no: Any, raiz: Any, fundo: int) -> Any:
+def _essencial(no: Any, raiz: Any, fundo: int, orcamento: _Orcamento) -> Any:
+    orcamento.gastar_peso(no)
     if fundo > FUNDO_MAXIMO_DO_ESQUEMA:
         return "fundo_demais"
     if not isinstance(no, dict):
@@ -452,6 +585,7 @@ def _essencial(no: Any, raiz: Any, fundo: int) -> Any:
         alvo = grupo.get(achou.group(2)) if isinstance(grupo, dict) else None
         if not isinstance(alvo, dict):
             return "ref_sem_alvo"
+        orcamento.gastar_peso(alvo)
         no = {k: v for k, v in no.items() if k != "$ref"} | alvo
     fixo = "const" in no or "enum" in no
     saida: dict[str, Any] = {}
@@ -459,9 +593,9 @@ def _essencial(no: Any, raiz: Any, fundo: int) -> Any:
         if chave in ANOTACOES_DO_ESQUEMA or (chave == "type" and fixo):
             continue
         if chave == "properties" and isinstance(valor, dict):
-            saida[chave] = {k: _essencial(v, raiz, fundo + 1) for k, v in valor.items()}
+            saida[chave] = {k: _essencial(v, raiz, fundo + 1, orcamento) for k, v in valor.items()}
         elif chave == "items" and isinstance(valor, dict):
-            saida[chave] = _essencial(valor, raiz, fundo + 1)
+            saida[chave] = _essencial(valor, raiz, fundo + 1, orcamento)
         elif chave in ("required", "enum") and isinstance(valor, list) and all(isinstance(x, str) for x in valor):
             saida[chave] = sorted(valor)
         else:

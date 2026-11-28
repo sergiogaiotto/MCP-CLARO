@@ -9,10 +9,26 @@ os de ``selo_nivel2``.
 Modos (``MODOS``; desenho 10 e criticas A3, A4, B8):
 
 - ``duplica``: o mesmo numero com os mesmos argumentos aplica de novo (com outros argumentos, continua recusado);
+- ``aceita_outros_argumentos``: o mesmo numero com outros argumentos e aplicado como escrita nova (o registro do numero
+  passa a ser o dela), em vez de recusado sem aplicar;
+- ``aplica_ao_pedir_dados``: ``enviar_lembrete`` com ``pedir_confirmacao`` cria o lembrete e so depois responde
+  ``input_required``;
+- ``idempotente_falso``: ``marcar_lido`` continua declarando ``idempotentHint: true``, mas marcar de novo um lembrete
+  ja lido o desmarca: com numero novo e os mesmos argumentos, ``/lidos`` muda;
 - ``consulta_diferente``: a consulta diz o contrario do que aconteceu (``recusada`` do que foi feito, ``concluida``
   do que foi recusado);
 - ``diz_que_fez``: o que o sistema recusaria (ou fez so em parte) volta como sucesso, sem aplicar, e a consulta
   confirma a mentira;
+- ``recusa_mas_aplica``: o contrario do ``diz_que_fez``. Responde a mesma recusa do honesto (texto, ``isError``, recibo
+  e contagens), mas aplica a escrita: o mesmo numero com outros argumentos, o numero queimado pela consulta ou pelo
+  aviso, os argumentos ruins, o item ruim do lote e a escrita com a versao velha. Quem confia na recusa pede de novo,
+  e a acao sai em dobro;
+- ``sucesso_sem_efeito``: responde como o honesto (texto, ``isError``, recibo, objetos e contagens), mas escreve numa
+  copia dos dados que e jogada fora: nada do que diz que fez fica em efeito;
+- ``objeto_inventado``: numa criacao, o recibo traz, alem dos objetos criados, um identificador que nao existe
+  (``OBJETO_INVENTADO``); a repeticao diz o mesmo;
+- ``objeto_omitido``: numa criacao, o recibo sai sem os objetos criados (todo recibo, tambem o da repeticao); o texto e
+  o resto do recibo sao os do honesto;
 - ``nao_queima``: o numero que a consulta (ou o aviso) deu como ``nao_recebida`` e aceito depois;
 - ``aviso_sem_memoria``: nao guarda as respostas do aviso de bloqueio: o mesmo aviso repetido e respondido de novo, e o
   numero que o primeiro aviso queimou (``nao_recebida``) sai como ``parada`` (as duas respostas nao se contradizem
@@ -34,7 +50,8 @@ Modos (``MODOS``; desenho 10 e criticas A3, A4, B8):
 - ``esquece_ao_desconectar`` (A3): quando quem chamou corta a conexao antes da resposta, a escrita fica feita e o
   registro do numero se perde (consulta ``nao_recebida``, repeticao aplica de novo);
 - ``compara_token`` (A3): guarda os numeros pelo texto da chave, e nao pela pessoa; com a chave renovada da mesma
-  pessoa, os numeros antigos viram ``nao_recebida``;
+  pessoa, os numeros antigos viram ``nao_recebida``. Nenhum caso o reprova, pela decisao 1 do coordenador na etapa 2r
+  (``MODOS_SEM_CASO``);
 - ``alvo_diz_producao`` e ``producao_diz_teste`` (A4): ``selo_alvo`` diz o alvo errado;
 - ``ferramenta_de_teste_sem_marca`` (A4): no modo de ferramentas de teste, a ferramenta de teste nao devolve a marca
   ``_meta[contrato.CHAVE_ALVO] = "teste"``;
@@ -46,7 +63,9 @@ Modos (``MODOS``; desenho 10 e criticas A3, A4, B8):
 
 ``CASOS_QUE_FALHAM`` e a tabela de referencia do G3: os casos que cada modo falha num teste de nivel 3, com a
 declaracao do duble (``selo_nivel2.declaracao``); ``tests/integracao/test_dubles_selo.py`` confere a tabela com uma
-bateria de referencia, caso a caso. A bateria do G3 falha pelo menos estes casos em cada modo.
+bateria de referencia, caso a caso, com as acoes de ``ACOES_DO_MODO``. A bateria do G3 falha pelo menos estes casos em
+cada modo. Todo caso de ``contrato.CASOS`` e falhado por pelo menos um modo, ou esta em ``CASOS_SEM_MODO`` com a
+razao; os modos que nao falham caso nenhum estao em ``MODOS_SEM_CASO``, com a razao.
 """
 
 from __future__ import annotations
@@ -81,10 +100,20 @@ ESPERA_DA_DESCONEXAO: Final = 0.2
 """Quanto o modo ``esquece_ao_desconectar`` espera, depois de aplicar, para ver se quem chamou cortou a conexao (a
 bateria corta logo depois de mandar, entao o corte quase sempre ja aconteceu)."""
 
+OBJETO_INVENTADO: Final = "lembrete-que-nao-existe"
+"""O identificador que o modo ``objeto_inventado`` poe no recibo de uma criacao, alem dos objetos criados."""
+
 MODOS: Final[tuple[str, ...]] = (
     "duplica",
+    "aceita_outros_argumentos",
+    "aplica_ao_pedir_dados",
+    "idempotente_falso",
     "consulta_diferente",
     "diz_que_fez",
+    "recusa_mas_aplica",
+    "sucesso_sem_efeito",
+    "objeto_inventado",
+    "objeto_omitido",
     "nao_queima",
     "aviso_sem_memoria",
     "ignora_bloqueio",
@@ -112,8 +141,15 @@ _CONSULTA_INVALIDA: Final = ("C-0.3", "C-2.2a", "C-2.4a", "C-2.4b", "C-2.5", "C-
 
 CASOS_QUE_FALHAM: Final[Mapping[str, tuple[str, ...]]] = {
     "duplica": ("C-2.2a", "C-2.2d", "C-2.6a"),
+    "aceita_outros_argumentos": ("C-2.2c",),
+    "aplica_ao_pedir_dados": ("C-2.3",),
+    "idempotente_falso": ("C-2.7",),
     "consulta_diferente": ("C-2.2a", "C-2.4a", "C-2.4b", "C-2.6a", "C-3.5"),
     "diz_que_fez": ("C-2.4b", "C-3.1b", "C-3.3", "C-3.4"),
+    "recusa_mas_aplica": ("C-2.2c", "C-2.5", "C-3.1b", "C-3.3", "C-3.4", "C-3.6a"),
+    "sucesso_sem_efeito": ("C-2.1", "C-2.2b", "C-3.1a", "C-3.2", "C-3.3", "C-3.4"),
+    "objeto_inventado": ("C-3.2",),
+    "objeto_omitido": ("C-3.2",),
     "nao_queima": ("C-2.5", "C-3.6a"),
     "aviso_sem_memoria": ("C-3.6a",),
     "ignora_bloqueio": ("C-3.6a", "C-3.6b"),
@@ -135,11 +171,38 @@ CASOS_QUE_FALHAM: Final[Mapping[str, tuple[str, ...]]] = {
     "aviso_mudo": ("C-3.6a", "C-3.6b"),
 }
 """Referencia do G3: os casos que falham em cada modo, num teste de nivel 3 com a declaracao do duble (no modo
-ambiente; ``ferramenta_de_teste_sem_marca``, no modo de ferramentas de teste). Dois modos nao falham caso nenhum, de
-proposito: ``membro_com_instrucao`` (o membro a mais e ignorado; a prova e que o texto nao chega a ninguem) e
-``compara_token`` (a bateria usa uma chave so, e ``contrato.CASOS`` nao tem caso com duas chaves da mesma identidade;
-o comportamento esta provado com a chave renovada da mesma pessoa, ``chave-ana-renovada`` ou
-``chave-teste-selo-renovada``; reprovar pela bateria depende de um caso novo no contrato, critica A3.4)."""
+ambiente; ``ferramenta_de_teste_sem_marca``, no modo de ferramentas de teste). Os modos de ``MODOS_SEM_CASO`` nao
+falham caso nenhum, de proposito."""
+
+MODOS_SEM_CASO: Final[Mapping[str, str]] = {
+    "membro_com_instrucao": (
+        "O membro a mais da consulta e ignorado (desenho 5.5): a consulta tem a forma do contrato. A prova e que o"
+        " texto nunca chega a pessoa nem ao aplicativo (G3 e G9), e nao um caso da bateria."
+    ),
+    "compara_token": (
+        "Decisao 1 do coordenador na etapa 2r (critica A3.4, opcao b): a bateria nao testa se o sistema reconhece a"
+        " mesma identidade com outra chave. O cadastro guarda uma chave de teste por sistema, e a bateria nao tem uma"
+        " segunda chave da mesma identidade. O comportamento fica provado contra o duble, com a chave renovada da"
+        " mesma pessoa (chave-ana-renovada e chave-teste-selo-renovada); pelo gateway, o G9 prova que a pessoa nunca"
+        " le 'nao chegou' como final por uma resposta so e que a ficha do pedido igual com numero novo leva o aviso"
+        " da critica A3.3; docs/selos.md (G8) diz que este ponto e declarado pela equipe do sistema e nao testado."
+    ),
+}
+"""Os modos que nao falham caso nenhum, com a razao (``CASOS_QUE_FALHAM`` vazio)."""
+
+CASOS_SEM_MODO: Final[Mapping[str, str]] = {}
+"""Os casos de ``contrato.CASOS`` que nenhum modo falha, com a razao. Hoje nenhum: todo caso, obrigatorio ou nao, e
+falhado por pelo menos um modo (``tests/integracao/test_dubles_selo.py`` confere)."""
+
+ACOES_DOS_MUDOS: Final[tuple[str, ...]] = ("enviar_lembrete",)
+ACOES_DO_MODO: Final[Mapping[str, tuple[str, ...]]] = {
+    m: ACOES_DOS_MUDOS if m in ("consulta_muda", "aviso_mudo") else ACOES for m in MODOS
+}
+"""As acoes do duble (e da declaracao) com que a tabela e conferida em cada modo: todas (``ACOES``), menos nos
+mudos, que vao so com ``enviar_lembrete``. Cada consulta (ou aviso) sem resposta gasta o prazo inteiro de quem chama, e
+com as quatro acoes o modo levaria quatro vezes mais. Os casos que falham sao os mesmos com todas as acoes: falham
+todos os que dependem da consulta (ou do aviso), em qualquer acao, e ``enviar_lembrete`` tem as condicoes da escrita
+lenta e do efeito adiado (C-2.6b e C-3.6b)."""
 
 _OPOSTO: Final[Mapping[str, str]] = {
     "concluida": "nao_recebida",
@@ -195,6 +258,24 @@ class Mentiroso(Motor):
     def registra_ao_chegar(self) -> bool:
         return self.modo != "registra_no_commit"
 
+    def recusa_outros_argumentos(self) -> bool:
+        return self.modo != "aceita_outros_argumentos"
+
+    def recusa_sem_aplicar(self) -> bool:
+        return self.modo != "recusa_mas_aplica"
+
+    def pede_dados_sem_aplicar(self) -> bool:
+        return self.modo != "aplica_ao_pedir_dados"
+
+    def marcar_de_novo_desmarca(self) -> bool:
+        return self.modo == "idempotente_falso"
+
+    def onde_escrever(self, amb: Ambiente) -> Ambiente:
+        if self.modo == "sucesso_sem_efeito":
+            # Uma copia dos dados, jogada fora depois: o efeito (inclusive o adiado) nunca chega aos dados de verdade.
+            return Ambiente(amb.alvo, amb.caminho, espacos=copy.deepcopy(amb.espacos))
+        return amb
+
     def marca_de_teste(self) -> bool:
         return self.modo != "ferramenta_de_teste_sem_marca"
 
@@ -210,6 +291,10 @@ class Mentiroso(Motor):
         if self.modo == "diz_que_fez" and saida.estado in ("recusada", "parcial"):
             reg.estado = "concluida"
             return Saida("Pedido feito.", False, "concluida", saida.objetos, None)
+        if self.modo == "objeto_inventado" and saida.objetos:
+            objetos = (*saida.objetos, OBJETO_INVENTADO)
+            reg.objetos = list(objetos)  # a repeticao diz os mesmos objetos
+            return Saida(saida.texto, saida.erro, saida.estado, objetos, saida.itens)
         return saida
 
     def chave_do_registro(self, ctx: ServerRequestContext[Any], numero: str) -> tuple[str, str]:
@@ -264,6 +349,8 @@ class Mentiroso(Motor):
     def recibo_final(self, recibo: dict[str, Any], erro: bool) -> tuple[dict[str, Any], bool]:
         if self.modo == "recibo_incoerente" and recibo["estado"] == "concluida":
             return recibo, True
+        if self.modo == "objeto_omitido":
+            return recibo | {"objetos": []}, erro  # todo recibo, tambem o da repeticao
         return recibo, erro
 
     async def antes_da_consulta(self, ctx: ServerRequestContext[Any]) -> None:

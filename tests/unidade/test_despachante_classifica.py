@@ -49,7 +49,7 @@ SISTEMA = Sistema(
     endereco="http://127.0.0.1:9/mcp",
     origem="proprio",
     tipo_chave="por_pessoa",
-    selo=0,
+    selo=1,
     situacao="ativo",
     versao_mcp="2026-07-28",
 )

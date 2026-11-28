@@ -4,7 +4,10 @@ B8 e B9). Esta e a referencia do G3:
 - o duble de nivel 2 cumpre os casos do nivel 2 e, num teste de nivel 3, falha exatamente
   ``selo_nivel2.FALHA_NO_NIVEL_3``; o de nivel 3 cumpre todos (tambem no modo de ferramentas de teste e com os
   esquemas gerados pelo kit);
-- cada modo de ``selo_mentiroso`` falha exatamente os casos de ``selo_mentiroso.CASOS_QUE_FALHAM``.
+- cada modo de ``selo_mentiroso`` falha exatamente os casos de ``selo_mentiroso.CASOS_QUE_FALHAM`` (com as acoes de
+  ``selo_mentiroso.ACOES_DO_MODO``), e todo caso de ``contrato.CASOS`` e falhado por pelo menos um modo (ou esta em
+  ``selo_mentiroso.CASOS_SEM_MODO``, com a razao); o ``recusa_mas_aplica`` aplica em cada caminho em que o honesto
+  recusa (``CAMINHOS_DA_RECUSA``).
 
 A bateria daqui e pequena e so de caixa-preta, como a do desenho: chama o duble pelo cliente fixado do MCP-CLARO
 (``cliente.chamar_ferramenta`` com ``chave_operacao``), le o rastro pela leitura declarada e julga cada caso pelo
@@ -32,6 +35,7 @@ import anyio
 import httpx2
 import mcp_types as types
 import pytest
+from mcp.shared.exceptions import MCPError
 from starlette.applications import Starlette
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -631,14 +635,22 @@ def aprova(itens: Sequence[Mapping[str, Any]], nivel: int, ferramentas: Sequence
     return contrato.casos_aprovam(itens, list(ferramentas), nivel)
 
 
-async def _testar(duble: Duble, nivel: int, *, modo: str = "ambiente_de_teste") -> list[dict[str, Any]]:
+async def _testar(
+    duble: Duble, nivel: int, *, modo: str = "ambiente_de_teste", acoes: Sequence[str] = selo_nivel2.ACOES
+) -> list[dict[str, Any]]:
     """A bateria de referencia no duble: no modo ambiente, o alvo e o endereco de teste; no modo de ferramentas de
-    teste, o endereco de producao, com as ferramentas de teste. Nos dois, com a chave da bateria."""
+    teste, o endereco de producao, com as ferramentas de teste. Nos dois, com a chave da bateria. ``acoes``: as do
+    duble, que a declaracao cobre."""
     alvo = duble.teste if modo == "ambiente_de_teste" else Lado(duble.producao.url, CHAVE)
     assert alvo is not None
     endereco = alvo.url if modo == "ambiente_de_teste" else None
     lado = "teste" if modo == "ambiente_de_teste" else "producao"
-    dados = selo_nivel2.declaracao(endereco_teste=endereco, modo=modo, segundos=SEGUNDOS_DECLARADOS)  # type: ignore[arg-type]
+    dados = selo_nivel2.declaracao(
+        endereco_teste=endereco,
+        modo=modo,  # type: ignore[arg-type]
+        acoes=acoes,
+        segundos=SEGUNDOS_DECLARADOS,
+    )
 
     async def chegadas(nome: str) -> int:
         return await duble.chamadas(lado, nome)
@@ -751,17 +763,121 @@ def test_a_tabela_do_mentiroso_cobre_todo_modo_com_casos_do_contrato() -> None:
     assert set(selo_mentiroso.CASOS_QUE_FALHAM) == set(selo_mentiroso.MODOS)
     for casos in selo_mentiroso.CASOS_QUE_FALHAM.values():
         assert set(casos) <= set(contrato.CASOS_POR_NOME)
+        assert len(set(casos)) == len(casos)
     assert set(selo_nivel2.FALHA_NO_NIVEL_3) <= set(contrato.CASOS_POR_NOME)
+    assert set(selo_mentiroso.ACOES_DO_MODO) == set(selo_mentiroso.MODOS)
+    for acoes in selo_mentiroso.ACOES_DO_MODO.values():
+        assert acoes
+        assert set(acoes) <= set(selo_nivel2.ACOES)
+
+
+def test_todo_caso_do_contrato_tem_um_modo_que_o_falha() -> None:
+    """Completude da tabela: todo caso de ``contrato.CASOS`` (os obrigatorios dos niveis 2 e 3 e tambem o C-2.2d,
+    que nao pode falhar) e falhado por pelo menos um modo do mentiroso, ou esta em ``CASOS_SEM_MODO`` com a razao. Sem
+    isso, uma bateria que pulasse a conferencia de um caso casaria com a tabela (mutacoes Z1, Z2 e Y14 do
+    verificador). O mesmo vale para cada parte de um caso: o ``recusa_mas_aplica`` obriga a ler o rastro depois de
+    cada recusa, e o ``objeto_omitido`` obriga a conferir que todo objeto criado esta no recibo (mutacoes P1 a P6).
+    Os modos sem caso sao exatamente os de ``MODOS_SEM_CASO``, cada um com a razao (o ``compara_token`` pela decisao 1
+    do coordenador)."""
+    falhados = {c for casos in selo_mentiroso.CASOS_QUE_FALHAM.values() for c in casos}
+    obrigatorios = {c.caso for c in contrato.CASOS if c.obrigatorio and c.nivel in contrato.NIVEIS}
+    assert obrigatorios
+    sem_modo = set(selo_mentiroso.CASOS_SEM_MODO)
+    assert obrigatorios - sem_modo <= falhados
+    assert set(contrato.CASOS_POR_NOME) - sem_modo <= falhados
+    assert not sem_modo & falhados  # uma excecao que um modo ja falha nao e excecao
+    assert sem_modo <= set(contrato.CASOS_POR_NOME)
+    assert all(r.strip() for r in selo_mentiroso.CASOS_SEM_MODO.values())
+    vazios = {m for m, casos in selo_mentiroso.CASOS_QUE_FALHAM.items() if not casos}
+    assert vazios == set(selo_mentiroso.MODOS_SEM_CASO) == {"membro_com_instrucao", "compara_token"}
+    assert all(r.strip() for r in selo_mentiroso.MODOS_SEM_CASO.values())
+    assert "Decisao 1 do coordenador" in selo_mentiroso.MODOS_SEM_CASO["compara_token"]
 
 
 @pytest.mark.parametrize("modo", selo_mentiroso.MODOS)
 async def test_cada_modo_do_mentiroso_falha_os_casos_da_tabela(modo: str) -> None:
     de_teste = modo == "ferramenta_de_teste_sem_marca"
-    async with no_ar(selo_mentiroso.criar, modo=modo, ferramentas_de_teste=de_teste) as duble:
-        itens = await _testar(duble, 3, modo="ferramentas_de_teste" if de_teste else "ambiente_de_teste")
+    acoes = selo_mentiroso.ACOES_DO_MODO[modo]
+    async with no_ar(selo_mentiroso.criar, modo=modo, ferramentas_de_teste=de_teste, acoes=acoes) as duble:
+        itens = await _testar(duble, 3, modo="ferramentas_de_teste" if de_teste else "ambiente_de_teste", acoes=acoes)
     esperado = set(selo_mentiroso.CASOS_QUE_FALHAM[modo])
     assert falhas(itens) == esperado
-    assert aprova(itens, 3, selo_nivel2.ACOES) == (not esperado)
+    assert aprova(itens, 3, acoes) == (not esperado)
+
+
+def _contexto(pessoa: str = "bateria") -> Any:
+    """Um contexto de chamada so com a pessoa da chave, para chamar o motor direto, sem servidor."""
+    return cast(Any, SimpleNamespace(request=SimpleNamespace(state=SimpleNamespace(pessoa=pessoa))))
+
+
+CAMINHOS_DA_RECUSA: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
+    "argumentos_recusados/enviar_lembrete": ((0, 0, 0), (1, 0, 0)),
+    "argumentos_recusados/enviar_lote": ((0, 0, 0), (1, 0, 0)),
+    "argumentos_recusados/marcar_lido": ((0, 0, 0), (0, 1, 0)),
+    "argumentos_recusados/trocar_perfil": ((0, 0, 0), (0, 0, 1)),
+    "lote_com_item_ruim": ((2, 0, 0), (3, 0, 0)),
+    "versao_velha": ((0, 0, 0), (0, 0, 1)),
+    "outros_argumentos": ((0, 0, 0), (1, 0, 0)),
+    "queimado_pela_consulta": ((0, 0, 0), (1, 0, 0)),
+    "queimado_pelo_aviso": ((0, 0, 0), (1, 0, 0)),
+}
+"""Cada caminho em que o honesto recusa sem aplicar, com o quanto os dados mudam (lembretes, marcacoes de lido e
+mudancas do perfil) no honesto e no ``recusa_mas_aplica``."""
+
+
+async def _recusa(motor: selo_nivel2.Motor, caminho: str) -> tuple[Any, tuple[int, int, int]]:
+    """Prepara o caminho num motor novo e faz a chamada recusada: o que o motor respondeu e quanto os dados mudaram."""
+    amb, ctx = motor.ambientes["teste"], _contexto()
+    dados = amb.espacos[selo_nivel2.ESPACO_REAL]
+    entrada = {a: selo_nivel2.entrada_da_declaracao(a, de_teste=False) for a in selo_nivel2.ACOES}
+    numero, outro = str(uuid.UUID(int=1)), str(uuid.UUID(int=2))
+
+    async def acao(nome: str, args: Mapping[str, Any], k: str) -> Any:
+        return await motor._acao(amb, ctx, nome, selo_nivel2.ESPACO_REAL, dict(args), k)
+
+    pedido: tuple[str, Mapping[str, Any]] = ("enviar_lembrete", entrada["enviar_lembrete"]["argumentos"])
+    if caminho == "outros_argumentos":
+        await acao(*pedido, numero)
+        pedido = ("enviar_lembrete", entrada["enviar_lembrete"]["argumentos_outros"])
+    elif caminho == "queimado_pela_consulta":
+        motor._consultar(amb, ctx, {"operacao": numero})
+    elif caminho == "queimado_pelo_aviso":
+        motor._bloqueio(amb, ctx, {"bloqueio": outro, "operacoes": [numero]})
+    elif caminho == "versao_velha":
+        await acao("trocar_perfil", {"nome": "Escritor A"}, outro)  # o perfil passa da versao 0 para a 1
+        pedido = ("trocar_perfil", {"telefone": "0000-0000", "versao": 0})
+    elif caminho == "lote_com_item_ruim":
+        pedido = ("enviar_lote", entrada["enviar_lote"]["varios_itens"]["argumentos"])
+    else:
+        nome = caminho.removeprefix("argumentos_recusados/")
+        pedido = (nome, entrada[nome]["argumentos_recusados"])
+
+    def medida() -> tuple[int, int, int]:
+        return (len(dados.lembretes), dados.aplicacoes_lidos, dados.mudancas)
+
+    antes = medida()
+    try:
+        r = await acao(*pedido, numero)
+    except MCPError as erro:
+        resposta: Any = ("erro_rpc", erro.code, erro.message)
+    else:
+        assert isinstance(r, types.CallToolResult)
+        assert r.is_error
+        resposta = (r.content, r.is_error, r.meta)
+    depois = medida()
+    return resposta, (depois[0] - antes[0], depois[1] - antes[1], depois[2] - antes[2])
+
+
+@pytest.mark.parametrize("caminho", list(CAMINHOS_DA_RECUSA))
+async def test_recusa_mas_aplica_responde_a_recusa_do_honesto_e_aplica(caminho: str) -> None:
+    """O ``recusa_mas_aplica``, caminho a caminho, contra o honesto (o motor chamado direto): a resposta e a mesma
+    recusa (texto, ``isError`` e recibo, ou o mesmo erro JSON-RPC), e so ele muda os dados. A tabela do mentiroso ve os
+    casos pelo nome, e varios caminhos levam ao mesmo caso (o C-3.1b, nas quatro acoes): esta prova pega o caminho que
+    deixasse de aplicar."""
+    honesto, mudou_no_honesto = await _recusa(selo_nivel2.Motor(nivel=3), caminho)
+    mentiroso, mudou_no_mentiroso = await _recusa(selo_mentiroso.Mentiroso(modo="recusa_mas_aplica", nivel=3), caminho)
+    assert mentiroso == honesto
+    assert (mudou_no_honesto, mudou_no_mentiroso) == CAMINHOS_DA_RECUSA[caminho]
 
 
 # --- Comportamentos que a bateria nao cobre sozinha ----------------------------------------------------------
@@ -826,7 +942,8 @@ async def test_ignora_bloqueio_contradiz_pelo_contrato() -> None:
 async def test_numeros_pela_pessoa_e_nao_pelo_texto_da_chave() -> None:
     """Critica A3.3: o honesto guarda os numeros pela pessoa; com a chave renovada da mesma pessoa (``ana`` ou a
     ``bateria``), a consulta diz o que houve. O ``compara_token`` (o defeito) diz ``nao_recebida`` de uma escrita
-    feita. A bateria nao o reprova sozinha (``contrato.CASOS`` nao tem caso com duas chaves da mesma identidade)."""
+    feita. Nenhum caso da bateria o reprova, pela decisao 1 do coordenador (``selo_mentiroso.MODOS_SEM_CASO``): esta
+    prova fica aqui, contra o duble, e a do gateway e do G9."""
     for fabrica, esperado in ((selo_nivel3.criar, "concluida"), (selo_mentiroso.criar, "nao_recebida")):
         kw = {"modo": "compara_token"} if fabrica is selo_mentiroso.criar else {}
         async with no_ar(fabrica, **kw) as duble:
@@ -978,7 +1095,8 @@ async def test_a_repeticao_usa_o_texto_do_estado_de_agora_quando_ele_mudou() -> 
 async def test_o_mesmo_aviso_repetido_da_as_mesmas_respostas_mesmo_depois_de_o_estado_mudar() -> None:
     """SELO-3.6: o aviso repetido com o mesmo ``bloqueio`` da as mesmas respostas (guardadas), mesmo que o estado de um
     numero mude depois (aqui, o sistema desfaz o que o numero fez); um aviso novo diz o estado de agora. O modo
-    ``aviso_sem_memoria`` do mentiroso e o defeito, e a bateria o reprova no C-3.6a."""
+    ``aviso_sem_memoria`` do mentiroso e o defeito, e a bateria o reprova no C-3.6a. As respostas guardadas sao por
+    pessoa: o mesmo pedido mandado por outra pessoa diz o que houve para ela."""
     async with no_ar(selo_nivel3.criar) as duble:
         alvo = duble.teste
         assert alvo is not None
@@ -990,7 +1108,17 @@ async def test_o_mesmo_aviso_repetido_da_as_mesmas_respostas_mesmo_depois_de_o_e
         assert (await duble.controle("/operacao", {"operacao": k1, "acao": "desfazer", "alvo": "teste"}))["ok"]
         segunda = await alvo.chamar(contrato.FERRAMENTA_BLOQUEIO, pedido)
         novo = await alvo.chamar(contrato.FERRAMENTA_BLOQUEIO, {"bloqueio": _novo(), "operacoes": [k1, k5]})
-    assert [_sucesso(r) for r in (primeira, segunda, novo)] == [True, True, True]
+        # O aviso e guardado por pessoa (mutacao Y9 do verificador): o mesmo pedido, mandado por outra pessoa, nao
+        # recebe as respostas guardadas para a bateria; k1 nunca chegou para bia. E a resposta a bia nao muda a da
+        # bateria.
+        pela_bia = await Lado(alvo.url, "chave-bia").chamar(contrato.FERRAMENTA_BLOQUEIO, pedido)
+        terceira = await alvo.chamar(contrato.FERRAMENTA_BLOQUEIO, pedido)
+    assert [_sucesso(r) for r in (primeira, segunda, novo, pela_bia, terceira)] == [True] * 5
+    assert pela_bia.resultado.structured_content["operacoes"] == [  # type: ignore[union-attr]
+        {"operacao": k1, "estado": "nao_recebida"},
+        {"operacao": k5, "estado": "nao_recebida"},
+    ]
+    assert terceira.resultado.structured_content == primeira.resultado.structured_content  # type: ignore[union-attr]
     dados = [r.resultado.structured_content for r in (primeira, segunda, novo)]  # type: ignore[union-attr]
     assert dados[0]["operacoes"] == [  # type: ignore[index]
         {"operacao": k1, "estado": "concluida"},
@@ -1027,8 +1155,7 @@ async def test_a_escrita_lenta_termina_mesmo_se_a_chamada_for_cancelada() -> Non
     lenta cortada mostra o caminho pelo fio; aqui o motor e chamado direto, com um prazo que vence no meio da
     escrita."""
     motor = selo_nivel2.Motor(nivel=3)
-    amb = motor.ambientes["teste"]
-    ctx = cast(Any, SimpleNamespace(request=SimpleNamespace(state=SimpleNamespace(pessoa="bateria"))))
+    amb, ctx = motor.ambientes["teste"], _contexto()
     lenta = selo_nivel2.entrada_da_declaracao("enviar_lembrete", de_teste=False)["escrita_lenta"]
     numero = _novo()
     with anyio.move_on_after(float(lenta["segundos"]) / 5) as prazo:

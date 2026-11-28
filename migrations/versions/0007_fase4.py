@@ -2,15 +2,16 @@
 
 Blocos, nesta ordem (cada um com comentario de abertura e "Fim do bloco"):
 
-- CONTRATO: as listas do contrato ``selo/1`` no banco (vocabulario, casos, esquemas, forma essencial dos esquemas,
-  endereco normalizado, passagens e criterio de aprovacao), iguais as de ``mcp_claro.selo.contrato`` (o teste
-  confere);
+- CONTRATO: as listas do contrato ``selo/1`` no banco (vocabulario, casos, esquemas, forma essencial dos esquemas
+  com orcamento de nos, endereco normalizado, nome do alvo bem escrito, passagens e criterio de aprovacao), iguais
+  as de ``mcp_claro.selo.contrato`` e ``mcp_claro.selo.declaracao`` (o teste confere);
 - DECLARACOES: ``declaracoes_selo`` e a chave de teste (``chaves_cifradas.tipo = 'teste_selo'``, que nunca vira a
   chave de producao, criticas A4 e M11);
 - TESTES: ``pedidos_teste_selo`` e ``testes_selo``, com a guarda que so deixa nascer teste aprovado com todos os
   casos obrigatorios, num sistema igual ao de agora;
 - VIGENTE: ``selos_retirados``, ``selo_vigente()`` (calculado na leitura, D8), a visao ``selos_vigentes``, a marca
-  de ferramenta sumida em ``ferramentas_vistas`` (critica M1) e ``sistemas.selo`` preso em 1;
+  de ferramenta sumida em ``ferramentas_vistas`` (critica M1), a conferencia das ferramentas do contrato calculada ao
+  gravar a definicao (``ferramentas_vistas.contrato_confere``) e ``sistemas.selo`` preso em 1;
 - RESERVADAS: os nomes das ferramentas do contrato nao sao revisados;
 - ENVIO: ``operacoes.repete_operacao_id`` e ``envios_selo`` (o numero e do banco; a falta do envio original nunca
   e erro, critica A1);
@@ -142,40 +143,141 @@ $esquemas$;
 -- os limites que o MCP-CLARO confere sozinho na resposta; referencias locais (#/$defs/X, #/definitions/X)
 -- resolvidas; required e enum de textos em ordem (por byte); type ao lado de const ou enum fora. O que sobra conta.
 -- Uma referencia de fora, sem alvo, em ciclo ou fundo demais vira um texto que nunca confere com o contrato.
-CREATE FUNCTION selo_esquema_no(p_no jsonb, p_raiz jsonb, p_fundo integer) RETURNS jsonb
+--
+-- Orcamento de nos (mesma regra de contrato.TETO_NOS_DO_ESQUEMA, o teste confere): cada parte visitada gasta o seu
+-- peso inteiro (selo_esquema_peso, com tudo o que esta dentro dela) e cada $ref seguido gasta de novo o peso inteiro
+-- da definicao achada. Passou de selo_esquema_teto('nos'), a forma e o texto 'grande_demais', que nunca confere.
+-- Sem o orcamento, 129 bytes ({"$defs": {"a": {"properties": {"x": a, "y": a}}}}, ou uma cadeia sem ciclo de 32
+-- definicoes) davam uma forma de 2^33 partes, e selo_vigente() (a vitrine, a leitura e a porta de saida) nao
+-- terminava. Cada copia que a funcao faz (a parte recebida, a definicao, a juncao com o $ref, os filhos, a forma de
+-- saida) e de algo que o orcamento ja pagou: o trabalho de uma chamada fica em algumas vezes o teto, qualquer que seja
+-- o tamanho do esquema guardado. Os numeros do orcamento (2000 nos, 64 bytes por no, 32 niveis) sao os de
+-- selo_esquema_teto e os de contrato.py; o teste confere os tres.
+CREATE FUNCTION selo_esquema_teto(p_nome text) RETURNS integer LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT CASE p_nome WHEN 'nos' THEN 2000 WHEN 'bytes_por_no' THEN 64 WHEN 'fundo' THEN 32 END
+$$;
+
+-- O peso de p_valor na conta do orcamento (contrato.peso_do_json): 1 por valor, em qualquer nivel, e 1 por nome de
+-- campo; cada texto (valor ou nome) mais 1 a cada 64 bytes, e cada numero mais 1 a cada 64 letras de como o banco o
+-- escreve. Para assim que passa de p_resta (devolve um numero acima dele), sem recursao. Antes de abrir uma lista ou
+-- um objeto, o corte pelo tamanho guardado: cada no pesa ao menos 1 e ocupa no maximo 67 bytes no jsonb (um texto de
+-- 63 bytes com a entrada de 4; um numero, um objeto e uma lista, menos), mais 8 na raiz; um valor maior que 68 bytes
+-- por no que resta passa do que resta, e nao precisa ser aberto (o teste confere a conta contra pg_column_size).
+CREATE FUNCTION selo_esquema_peso(p_valor jsonb, p_resta integer) RETURNS integer
 LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
+  pilha jsonb[] := ARRAY[p_valor];
+  topo integer := 1;
+  total integer := 0;
+  atual jsonb;
+  filho record;
+BEGIN
+  WHILE topo > 0 LOOP
+    atual := pilha[topo];
+    pilha[topo] := NULL;
+    topo := topo - 1;
+    CASE jsonb_typeof(atual)
+      WHEN 'string' THEN
+        total := total + 1 + octet_length(atual #>> '{}') / 64;
+      WHEN 'number' THEN
+        total := total + 1 + length(atual::text) / 64;
+      WHEN 'object' THEN
+        total := total + 1;
+        IF pg_column_size(atual) > 68::bigint * (p_resta - total + 1) + 8 THEN
+          RETURN p_resta + 1;
+        END IF;
+        FOR filho IN SELECT e.key, e.value FROM jsonb_each(atual) e LOOP
+          total := total + 1 + octet_length(filho.key) / 64;
+          IF total > p_resta THEN
+            RETURN total;
+          END IF;
+          topo := topo + 1;
+          pilha[topo] := filho.value;
+        END LOOP;
+      WHEN 'array' THEN
+        total := total + 1;
+        IF pg_column_size(atual) > 68::bigint * (p_resta - total + 1) + 8 THEN
+          RETURN p_resta + 1;
+        END IF;
+        IF total::bigint + jsonb_array_length(atual) > p_resta THEN
+          RETURN p_resta + 1;
+        END IF;
+        FOR filho IN SELECT e.value FROM jsonb_array_elements(atual) e LOOP
+          topo := topo + 1;
+          pilha[topo] := filho.value;
+        END LOOP;
+      ELSE
+        total := total + 1;
+    END CASE;
+    IF total > p_resta THEN
+      RETURN total;
+    END IF;
+  END LOOP;
+  RETURN total;
+END $$;
+
+-- Um passo da forma essencial: a forma de p_no (raiz p_raiz, no nivel p_fundo) e o gasto do orcamento ate aqui. Com
+-- o gasto acima do teto, a forma volta nula e quem chamou para na hora.
+CREATE FUNCTION selo_esquema_no(p_no jsonb, p_raiz jsonb, p_fundo integer, INOUT gasto integer, OUT forma jsonb)
+LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  teto constant integer := selo_esquema_teto('nos');
   no jsonb := p_no;
-  saida jsonb := '{}'::jsonb;
   passos integer := 0;
   partes text[];
   alvo jsonb;
   fixo boolean;
   chave text;
   valor jsonb;
+  filho record;
+  nomes text[];
+  formas jsonb[];
+  chaves text[] := '{}';
+  valores jsonb[] := '{}';
+  dentro jsonb;
 BEGIN
+  gasto := gasto + selo_esquema_peso(no, teto - gasto);
+  IF gasto > teto THEN
+    RETURN;
+  END IF;
   IF p_fundo > 32 THEN
-    RETURN to_jsonb('fundo_demais'::text);
+    forma := to_jsonb('fundo_demais'::text);
+    RETURN;
   END IF;
   IF jsonb_typeof(no) <> 'object' THEN
-    RETURN no;
+    forma := no;
+    RETURN;
   END IF;
   WHILE no ? '$ref' LOOP
     passos := passos + 1;
     IF passos > 32 THEN
-      RETURN to_jsonb('ref_demais'::text);
+      forma := to_jsonb('ref_demais'::text);
+      RETURN;
     END IF;
     IF jsonb_typeof(no -> '$ref') <> 'string' THEN
-      RETURN to_jsonb('ref_de_fora'::text);
+      forma := to_jsonb('ref_de_fora'::text);
+      RETURN;
     END IF;
     partes := regexp_match(no ->> '$ref', '^#/(\$defs|definitions)/([^/]+)$');
     IF partes IS NULL THEN
-      RETURN to_jsonb('ref_de_fora'::text);
+      forma := to_jsonb('ref_de_fora'::text);
+      RETURN;
     END IF;
-    alvo := CASE WHEN jsonb_typeof(p_raiz) = 'object' AND jsonb_typeof(p_raiz -> partes[1]) = 'object'
-                 THEN p_raiz -> partes[1] -> partes[2] END;
+    -- O grupo ($defs ou definitions) e conferido por caminho, sem copiar as definicoes; so a achada e copiada.
+    alvo := CASE WHEN jsonb_typeof(p_raiz) = 'object'
+                      AND CASE partes[1]
+                            WHEN '$defs' THEN jsonb_path_exists(p_raiz, 'strict $ ? (@."$defs".type() == "object")')
+                            ELSE jsonb_path_exists(p_raiz, 'strict $ ? (@."definitions".type() == "object")')
+                          END
+                 THEN p_raiz #> partes END;
     IF alvo IS NULL OR jsonb_typeof(alvo) <> 'object' THEN
-      RETURN to_jsonb('ref_sem_alvo'::text);
+      forma := to_jsonb('ref_sem_alvo'::text);
+      RETURN;
+    END IF;
+    gasto := gasto + selo_esquema_peso(alvo, teto - gasto);
+    IF gasto > teto THEN
+      RETURN;
     END IF;
     no := (no - '$ref') || alvo;
   END LOOP;
@@ -188,30 +290,47 @@ BEGIN
       CONTINUE;
     END IF;
     IF chave = 'properties' AND jsonb_typeof(valor) = 'object' THEN
-      valor := (SELECT coalesce(jsonb_object_agg(p.key, selo_esquema_no(p.value, p_raiz, p_fundo + 1)), '{}'::jsonb)
-                FROM jsonb_each(valor) p);
+      nomes := '{}';
+      formas := '{}';
+      FOR filho IN SELECT p.key, p.value FROM jsonb_each(valor) p LOOP
+        SELECT r.gasto, r.forma INTO gasto, dentro FROM selo_esquema_no(filho.value, p_raiz, p_fundo + 1, gasto) r;
+        IF gasto > teto THEN
+          RETURN;
+        END IF;
+        nomes := nomes || filho.key;
+        formas := formas || dentro;
+      END LOOP;
+      valor := coalesce((SELECT jsonb_object_agg(u.n, u.f) FROM unnest(nomes, formas) AS u(n, f)), '{}'::jsonb);
     ELSIF chave = 'items' AND jsonb_typeof(valor) = 'object' THEN
-      valor := selo_esquema_no(valor, p_raiz, p_fundo + 1);
+      SELECT r.gasto, r.forma INTO gasto, dentro FROM selo_esquema_no(valor, p_raiz, p_fundo + 1, gasto) r;
+      IF gasto > teto THEN
+        RETURN;
+      END IF;
+      valor := dentro;
     ELSIF chave IN ('required', 'enum') AND jsonb_typeof(valor) = 'array'
           AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(valor) x WHERE jsonb_typeof(x) <> 'string') THEN
       valor := (SELECT coalesce(jsonb_agg(x ORDER BY x #>> '{}' COLLATE "C"), '[]'::jsonb)
                 FROM jsonb_array_elements(valor) x);
     END IF;
-    saida := saida || jsonb_build_object(chave, valor);
+    chaves := chaves || chave;
+    valores := valores || valor;
   END LOOP;
-  RETURN saida;
+  forma := coalesce((SELECT jsonb_object_agg(u.c, u.v) FROM unnest(chaves, valores) AS u(c, v)), '{}'::jsonb);
 END $$;
 
 CREATE FUNCTION selo_esquema_essencial(p_esquema jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE STRICT
 SET search_path = pg_catalog, public, pg_temp AS $$
-  SELECT selo_esquema_no(p_esquema, p_esquema, 0)
+  SELECT CASE WHEN r.gasto > selo_esquema_teto('nos') THEN to_jsonb('grande_demais'::text) ELSE r.forma END
+  FROM selo_esquema_no(p_esquema, p_esquema, 0, 0) r
 $$;
 
 -- Endereco na forma da comparacao entre o alvo de teste e a producao (critica A4): esquema e nome em minusculas
 -- (so ASCII), sem usuario, sem porta padrao nem zeros a esquerda, sem ponto no fim do nome, caminho em minusculas
 -- com %XX de letras sem reserva decodificados, sem . nem .., sem barras repetidas nem barra no fim, sem consulta nem
 -- fragmento. De proposito mais largo que a igualdade de URL: dois enderecos que podem ser o mesmo servico ficam
--- iguais. Mesma regra de mcp_claro.selo.contrato.endereco_normalizado.
+-- iguais. Mesma regra de mcp_claro.selo.contrato.endereco_normalizado. Custo linear no tamanho do endereco: o %XX sai
+-- de uma expressao so (antes, letra por letra, com substr, que no UTF-8 conta do comeco a cada letra: 32 mil letras
+-- levavam 4 segundos), e o caminho e uma pilha com topo, sem copiar a lista a cada "..".
 CREATE FUNCTION selo_endereco_normalizado(p_endereco text) RETURNS text
 LANGUAGE plpgsql IMMUTABLE STRICT SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
@@ -224,12 +343,10 @@ DECLARE
   hospedeiro text;
   porta text := '';
   com_porta text[];
-  bruto text;
-  caminho text := '';
-  i integer := 1;
-  codigo integer;
+  caminho text;
   parte text;
   partes text[] := '{}';
+  topo integer := 0;
 BEGIN
   url := regexp_match(texto, '^([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]*)([^?#]*)(?:\?[^#]*)?(?:#.*)?$');
   IF url IS NULL THEN
@@ -250,36 +367,227 @@ BEGIN
     porta := '';
   END IF;
   hospedeiro := rtrim(hospedeiro, '.');
-  bruto := url[3];
-  WHILE i <= length(bruto) LOOP
-    IF substr(bruto, i, 1) = '%' AND substr(bruto, i + 1, 2) ~ '^[0-9A-Fa-f]{2}$' THEN
-      codigo := ('x' || substr(bruto, i + 1, 2))::bit(8)::integer;
-      IF codigo BETWEEN 48 AND 57 OR codigo BETWEEN 65 AND 90 OR codigo BETWEEN 97 AND 122
-         OR codigo IN (45, 46, 95, 126) THEN
-        caminho := caminho || chr(codigo);
-      ELSE
-        caminho := caminho || substr(bruto, i, 3);
-      END IF;
-      i := i + 3;
-    ELSE
-      caminho := caminho || substr(bruto, i, 1);
-      i := i + 1;
-    END IF;
-  END LOOP;
+  -- Cada pedaco e um %XX, um trecho sem % ou um % sozinho; o %XX de letra sem reserva vira a letra.
+  caminho := coalesce((
+    SELECT string_agg(CASE
+             WHEN m[1] IS NULL THEN m[2]
+             WHEN ('x' || substr(m[1], 2, 2))::bit(8)::integer BETWEEN 48 AND 57
+                  OR ('x' || substr(m[1], 2, 2))::bit(8)::integer BETWEEN 65 AND 90
+                  OR ('x' || substr(m[1], 2, 2))::bit(8)::integer BETWEEN 97 AND 122
+                  OR ('x' || substr(m[1], 2, 2))::bit(8)::integer IN (45, 46, 95, 126)
+               THEN chr(('x' || substr(m[1], 2, 2))::bit(8)::integer)
+             ELSE m[1]
+           END, '' ORDER BY n)
+    FROM regexp_matches(url[3], '(%[0-9A-Fa-f]{2})|([^%]+|%)', 'g') WITH ORDINALITY AS t(m, n)), '');
   FOREACH parte IN ARRAY string_to_array(translate(caminho, maiusculas, minusculas), '/') LOOP
     IF parte IN ('', '.') THEN
       CONTINUE;
     END IF;
     IF parte = '..' THEN
-      IF cardinality(partes) > 0 THEN
-        partes := partes[1:cardinality(partes) - 1];
-      END IF;
+      topo := greatest(topo - 1, 0);
       CONTINUE;
     END IF;
-    partes := partes || parte;
+    topo := topo + 1;
+    partes[topo] := parte;
   END LOOP;
   RETURN esquema || '://' || hospedeiro || CASE WHEN porta <> '' THEN ':' || porta ELSE '' END
-         || CASE WHEN cardinality(partes) > 0 THEN '/' || array_to_string(partes, '/') ELSE '' END;
+         || CASE WHEN topo > 0 THEN '/' || array_to_string(partes[1:topo], '/') ELSE '' END;
+END $$;
+
+-- O IPv4 que o nome escreve, na forma que o resolvedor do sistema aceita (socket.inet_aton; mesma regra de
+-- selo/declaracao.py, _ip_escrito): de uma a quatro partes separadas por ponto, cada uma decimal, octal (com 0 na
+-- frente) ou hexadecimal (0x); cada parte antes da ultima vai ate 255, e a ultima enche os bytes que faltam. Assim
+-- 127.1, 2130706433, 0x7f.0.0.1 e 0177.0.0.1 sao 127.0.0.1. Nulo para o nome que nao e um IPv4. p_nome ja vem em
+-- minusculas e sem ponto no fim (selo_endereco_conexao); o regexp de entrada limita o texto a 4 partes curtas.
+CREATE FUNCTION selo_ipv4_escrito(p_nome text) RETURNS inet LANGUAGE plpgsql IMMUTABLE STRICT
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  partes text[];
+  digitos text;
+  valor bigint;
+  total bigint := 0;
+  n integer;
+BEGIN
+  IF p_nome !~ '^(0x[0-9a-f]*|[0-9]+)(\.(0x[0-9a-f]*|[0-9]+)){0,3}$' THEN
+    RETURN NULL;
+  END IF;
+  partes := string_to_array(p_nome, '.');
+  n := cardinality(partes);
+  FOR i IN 1 .. n LOOP
+    IF partes[i] LIKE '0x%' THEN
+      digitos := ltrim(substr(partes[i], 3), '0');
+      IF partes[i] = '0x' OR length(digitos) > 8 THEN
+        RETURN NULL;
+      END IF;
+      valor := ('x' || lpad(digitos, 8, '0'))::bit(32)::bigint;
+    ELSIF partes[i] LIKE '0%' THEN
+      digitos := ltrim(partes[i], '0');
+      IF digitos ~ '[89]' OR length(digitos) > 11 THEN
+        RETURN NULL;
+      END IF;
+      valor := 0;
+      FOR j IN 1 .. length(digitos) LOOP
+        valor := valor * 8 + (ascii(substr(digitos, j, 1)) - 48);
+      END LOOP;
+    ELSIF length(partes[i]) > 10 THEN
+      RETURN NULL;
+    ELSE
+      valor := partes[i]::bigint;
+    END IF;
+    IF i < n THEN
+      IF valor > 255 THEN
+        RETURN NULL;
+      END IF;
+      total := total + (valor << (8 * (4 - i)));
+    ELSIF valor >= (1::bigint << (8 * (5 - n))) THEN
+      RETURN NULL;
+    ELSE
+      total := total + valor;
+    END IF;
+  END LOOP;
+  RETURN '0.0.0.0'::inet + total;
+END $$;
+
+-- Onde o cliente conecta (critica A4; mesma regra de selo/declaracao.py, forma_de_conexao): o nome, a porta efetiva
+-- (80 no http e 443 no https sem porta) e o caminho de selo_endereco_normalizado. O esquema nao entra: o mesmo nome
+-- na mesma porta e o mesmo servico. O nome vai em minusculas e sem ponto no fim; os pontos de outros alfabetos
+-- (U+3002, U+FF0E, U+FF61), que o leitor do cliente troca, viram pontos comuns; um IPv4 escrito de qualquer jeito
+-- vai na forma comum (selo_ipv4_escrito), o IPv6 na forma do banco (host), e o IPv4 dentro de um IPv6 mapeado
+-- (::ffff:a.b.c.d) vale pelo IPv4. localhost, os nomes .localhost, todo IP de loopback (127.0.0.0/8, ::1) e o IP
+-- nao especificado (0.0.0.0, ::) chegam a mesma maquina: viram o nome localhost. Nulo quando o cliente nao conecta no
+-- endereco: IPv4 de quatro numeros fora da forma comum, IPv6 que o cliente nao le, porta que nao e numero, nome
+-- vazio, caractere de controle. Fica de fora o nome fora de ASCII (depois de trocar os pontos): o leitor do cliente
+-- o escreve na forma xn-- (IDNA), que o banco nao calcula. Esse nome nunca e igual ao de um alvo, que e so ASCII
+-- (selo_alvo_bem_escrito); a producao assim escrita, com o alvo na forma xn--, fica so com a tela
+-- (declaracao.alvo_na_producao). Com os pontos trocados, o banco e de proposito mais largo que o leitor do cliente,
+-- que recusa alguns desses nomes (IDNA).
+CREATE FUNCTION selo_endereco_conexao(p_endereco text) RETURNS text[] LANGUAGE plpgsql IMMUTABLE STRICT
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  ipv4 constant text := '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}';
+  autoridade text;
+  partes text[];
+  nome text;
+  porta text;
+  ip inet;
+BEGIN
+  IF p_endereco ~ E'[\\x01-\\x1f\\x7f]' THEN
+    RETURN NULL;
+  END IF;
+  autoridade := regexp_replace(substring(p_endereco FROM '^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]*)'), '^.*@', '');
+  IF autoridade IS NULL THEN
+    RETURN NULL;
+  END IF;
+  IF left(autoridade, 1) = '[' THEN
+    partes := regexp_match(autoridade, '^\[([^\]]*)\](?::(.*))?$');
+    IF partes IS NULL THEN
+      RETURN NULL;
+    END IF;
+    nome := translate(partes[1], 'ABCDEF', 'abcdef');
+    IF nome !~ '^[0-9a-f:.]+$' OR NOT pg_input_is_valid(nome, 'inet')
+       OR (strpos(nome, '.') > 0 AND nome !~ (':' || ipv4 || '$')) THEN
+      RETURN NULL;
+    END IF;
+    ip := nome::inet;
+    IF family(ip) <> 6 THEN
+      RETURN NULL;
+    END IF;
+    IF ip <<= '::ffff:0.0.0.0/96'::inet THEN
+      ip := '0.0.0.0'::inet + (ip - '::ffff:0.0.0.0'::inet);
+    END IF;
+  ELSE
+    partes := regexp_match(autoridade, '^([^:]*)(?::(.*))?$');
+    IF partes IS NULL THEN
+      RETURN NULL;
+    END IF;
+    nome := partes[1];
+    -- O leitor do cliente recusa o nome de quatro numeros fora da forma comum (010.0.0.1, 256.0.0.1).
+    IF nome ~ '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' AND nome !~ ('^' || ipv4 || '$') THEN
+      RETURN NULL;
+    END IF;
+    nome := rtrim(translate(translate(nome, U&'\3002\FF0E\FF61', '...'), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+                            'abcdefghijklmnopqrstuvwxyz'), '.');
+    IF nome = '' THEN
+      RETURN NULL;
+    END IF;
+    ip := selo_ipv4_escrito(nome);
+  END IF;
+  porta := coalesce(partes[2], '');
+  IF porta !~ '^[0-9]*$' THEN
+    RETURN NULL;
+  END IF;
+  porta := CASE
+    WHEN porta = '' THEN CASE WHEN p_endereco ~* '^https:' THEN '443' WHEN p_endereco ~* '^http:' THEN '80' END
+    WHEN porta ~ '^0+$' THEN '0'
+    ELSE ltrim(porta, '0')
+  END;
+  IF porta IS NULL THEN
+    RETURN NULL;
+  END IF;
+  IF nome = 'localhost' OR nome LIKE '%.localhost'
+     OR (family(ip) = 4 AND (ip <<= '127.0.0.0/8'::inet OR ip = '0.0.0.0'::inet))
+     OR (family(ip) = 6 AND (ip = '::1'::inet OR ip = '::'::inet)) THEN
+    nome := 'localhost';
+  ELSIF ip IS NOT NULL THEN
+    nome := host(ip);
+  END IF;
+  RETURN ARRAY[nome, porta, substring(selo_endereco_normalizado(p_endereco) FROM '^[^/]*//[^/]*(.*)$')];
+END $$;
+
+-- O nome do alvo de teste escrito de um jeito so (critica A4; mesma regra de selo/declaracao.py, _nome_do_alvo, que
+-- o teste confere numa lista de formas): o nome que o cliente conecta e o proprio texto. Sem isso, um alvo que e a
+-- producao escrita de outro jeito passava pela comparacao de texto (selo_alvo_na_producao): pontos de outros alfabetos
+-- (U+3002, U+FF0E, U+FF61), que o leitor do cliente troca por pontos comuns, e um IPv4 curto, decimal ou hexadecimal
+-- (127.1, 2130706433, 0x7f.0.0.1), que o resolvedor le como o IP inteiro. Vale:
+-- * um nome so de letras ASCII (minusculas depois de trocar as maiusculas ASCII), numeros, _ e -, em pedacos
+--   separados por ponto, com um ponto no fim ou nao; um nome com acento vai na forma xn--;
+-- * e, se o nome tem cara de IPv4 (numeros ou 0x... separados por ate tres pontos), so o IPv4 com os quatro numeros,
+--   de 0 a 255 e sem zero a esquerda;
+-- * ou um IPv6 entre colchetes, na forma curta que o banco escreve (host(inet)), sem zona nem mascara e sem um IPv4
+--   dentro: nem o mapeado ::ffff:a.b.c.d, que o cliente conecta no proprio IPv4 (a producao 10.0.0.5, ou a maquina
+--   local, escrita de outro jeito), nem a forma antiga ::a.b.c.d (compativel com IPv4), que o banco e o Python
+--   escrevem de jeitos diferentes.
+-- O nome e o de urllib.parse.urlsplit: depois do ultimo @ e, sem colchete, antes do primeiro ':'. Endereco nulo (o
+-- modo ferramentas_de_teste nao tem alvo) vale.
+CREATE FUNCTION selo_alvo_mal_escrito() RETURNS text LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT 'O nome do alvo de teste vai escrito de um jeito so: letras sem acento, numeros, ponto e hifen (a forma xn--'
+         ' para nomes com acento), um IPv4 com os quatro numeros ou um IPv6 entre colchetes, na forma curta e sem um'
+         ' IPv4 dentro'::text
+$$;
+
+CREATE FUNCTION selo_alvo_bem_escrito(p_endereco text) RETURNS boolean LANGUAGE plpgsql IMMUTABLE
+SET search_path = pg_catalog, public, pg_temp AS $$
+DECLARE
+  hospedeiro text;
+  colchetes text[];
+  nome text;
+BEGIN
+  IF p_endereco IS NULL THEN
+    RETURN true;
+  END IF;
+  hospedeiro := regexp_replace(substring(p_endereco FROM '^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]*)'), '^.*@', '');
+  IF hospedeiro IS NULL THEN
+    RETURN false;
+  END IF;
+  IF strpos(hospedeiro, '[') > 0 THEN
+    colchetes := regexp_match(hospedeiro, '^\[([^\]]*)\](:[^:]*)?$');
+    IF colchetes IS NULL THEN
+      RETURN false;
+    END IF;
+    nome := translate(colchetes[1], 'ABCDEF', 'abcdef');
+    RETURN nome ~ '^[0-9a-f:.]+$' AND pg_input_is_valid(nome, 'inet')
+       AND family(nome::inet) = 6 AND host(nome::inet) = nome
+       AND NOT (host(nome::inet) ~ '^::[0-9]+\.' ) AND NOT (nome::inet <<= '::ffff:0.0.0.0/96'::inet);
+  END IF;
+  nome := translate(split_part(hospedeiro, ':', 1), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
+  IF nome !~ '^[a-z0-9_-]+(\.[a-z0-9_-]+)*\.?$' THEN
+    RETURN false;
+  END IF;
+  IF nome ~ '^(0x[0-9a-f]*|[0-9]+)(\.(0x[0-9a-f]*|[0-9]+)){0,3}\.?$' THEN
+    RETURN nome ~ '^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}$';
+  END IF;
+  RETURN true;
 END $$;
 
 -- A coluna "Conta como" do vocabulario, e as passagens permitidas entre duas respostas sobre o mesmo numero
@@ -426,9 +734,10 @@ $$;
 SQL_DECLARACOES = r"""
 -- Bloco DECLARACOES. A declaracao de teste que a equipe do sistema escreve e o ADMIN salva (com a caixa marcada e o
 -- login refeito, pela tela). So de acrescentar e versionada: cada salvamento e uma versao nova. O banco confere o
--- que da para conferir sem o codigo: a versao seguinte, o ADMIN ativo, o JSON igual as colunas e o alvo de teste
--- diferente do endereco de producao do sistema e de todo outro sistema do cadastro, comparados na forma normalizada
--- (critica A4; de novo no pedido e no teste). https fora de desenvolvimento
+-- que da para conferir sem o codigo: a versao seguinte, o ADMIN ativo, o JSON igual as colunas, o alvo de teste com o
+-- nome escrito de um jeito so (selo_alvo_bem_escrito, ate 2048 letras) e diferente do endereco de producao do
+-- sistema e de todo outro sistema do cadastro, comparados na forma normalizada e na forma de conexao
+-- (selo_alvo_na_producao; critica A4; de novo no pedido, em 'rodando' e no teste). https fora de desenvolvimento
 -- e teste e o resto da forma da declaracao ficam com o modelo (selo/declaracao.py). O teto do texto e o do modelo
 -- (64 KiB); o banco guarda a forma jsonb, mais larga, e aceita ate o dobro.
 CREATE TABLE declaracoes_selo (
@@ -437,7 +746,8 @@ CREATE TABLE declaracoes_selo (
   versao         integer     NOT NULL CHECK (versao >= 1),
   contrato       text        NOT NULL CHECK (contrato = 'selo/1'),
   modo           text        NOT NULL CHECK (modo = ANY (selo_vocabulario('modos'))),
-  endereco_teste text        CHECK (endereco_teste IS NULL OR endereco_teste ~ '^https?://'),
+  endereco_teste text        CHECK (endereco_teste IS NULL OR (endereco_teste ~ '^https?://'
+                                                                AND length(endereco_teste) <= 2048)),
   declaracao     jsonb       NOT NULL CHECK (jsonb_typeof(declaracao) = 'object'
                                              AND octet_length(declaracao::text) <= 131072),
   responsavel    text        NOT NULL CHECK (length(btrim(responsavel)) BETWEEN 3 AND 200),
@@ -450,14 +760,21 @@ CREATE TABLE declaracoes_selo (
   CHECK ((modo = 'ambiente_de_teste') = (endereco_teste IS NOT NULL))
 );
 
--- O alvo de teste e o endereco de producao de algum sistema do cadastro, na forma normalizada (critica A4): o
--- proprio sistema ou outro, de qualquer situacao. Conferido ao salvar a declaracao, ao pedir o teste, na passagem
--- para 'rodando' (antes das escritas da bateria) e ao gravar o teste, porque a producao pode mudar (ou outro sistema
--- ser cadastrado) depois de a declaracao ser salva. Roda como quem chama: a entrada e o despachante leem sistemas.
+-- O alvo de teste e o endereco de producao de algum sistema do cadastro (critica A4): o proprio sistema ou outro, de
+-- qualquer situacao. Duas comparacoes, como a tela (declaracao.alvo_na_producao): a forma normalizada
+-- (selo_endereco_normalizado) e a forma de conexao (selo_endereco_conexao), que pega a producao escrita de outro
+-- jeito, como 127.0.0.1 e localhost, [::1] ou 127.0.0.2, localhost e x.localhost, 127.1, ou 10.0.0.5 e
+-- [::ffff:10.0.0.5] na producao. Fica so com a tela a producao com o nome fora de ASCII e o alvo na forma xn--
+-- (selo_endereco_conexao). Conferido ao salvar a declaracao, ao pedir o teste, na passagem para 'rodando' (antes das
+-- escritas da bateria) e ao gravar o teste, porque a producao pode mudar (ou outro sistema ser cadastrado) depois de
+-- a declaracao ser salva. Cada forma do alvo e calculada uma vez (subconsulta), e cada producao uma vez por forma.
+-- Roda como quem chama: a entrada e o despachante leem sistemas.
 CREATE FUNCTION selo_alvo_na_producao(p_alvo text) RETURNS boolean LANGUAGE sql STABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT p_alvo IS NOT NULL AND EXISTS (
-    SELECT 1 FROM sistemas s WHERE selo_endereco_normalizado(s.endereco) = selo_endereco_normalizado(p_alvo))
+    SELECT 1 FROM sistemas s
+    WHERE selo_endereco_normalizado(s.endereco) = (SELECT selo_endereco_normalizado(p_alvo))
+       OR selo_endereco_conexao(s.endereco) = (SELECT selo_endereco_conexao(p_alvo)))
 $$;
 
 CREATE FUNCTION declaracoes_selo_nasce() RETURNS trigger LANGUAGE plpgsql
@@ -466,6 +783,10 @@ DECLARE
   ultima integer;
 BEGIN
   NEW.salva_em := now();
+  -- O teto do alvo antes das conferencias que leem o texto (o CHECK da tabela so roda depois deste gatilho).
+  IF length(NEW.endereco_teste) > 2048 THEN
+    RAISE EXCEPTION 'O alvo de teste tem ate 2048 letras' USING ERRCODE = 'check_violation';
+  END IF;
   SELECT coalesce(max(versao), 0) INTO ultima FROM declaracoes_selo WHERE sistema_id = NEW.sistema_id;
   IF NEW.versao <> ultima + 1 THEN
     RAISE EXCEPTION 'A declaracao de teste deveria ser a versao %, nao %', ultima + 1, NEW.versao
@@ -480,6 +801,9 @@ BEGIN
      OR (NEW.declaracao ->> 'responsavel') IS DISTINCT FROM NEW.responsavel THEN
     RAISE EXCEPTION 'O contrato, o modo, o alvo e o responsavel da declaracao sao os do proprio JSON'
       USING ERRCODE = 'check_violation';
+  END IF;
+  IF NOT selo_alvo_bem_escrito(NEW.endereco_teste) THEN
+    RAISE EXCEPTION '%', selo_alvo_mal_escrito() USING ERRCODE = 'check_violation';
   END IF;
   IF selo_alvo_na_producao(NEW.endereco_teste) THEN
     RAISE EXCEPTION 'O alvo de teste declarado e o endereco de producao de um sistema do cadastro; a bateria nao escreve na producao'
@@ -540,12 +864,14 @@ CREATE UNIQUE INDEX pedidos_teste_selo_um_por_vez ON pedidos_teste_selo (sistema
 
 -- O pedido nasce 'pedido', com a hora do banco, a declaracao mais recente do sistema e um ADMIN ativo. Selo de nivel
 -- 2 ou 3 so para sistema ativo, na 2026-07-28, com chave por pessoa (critica B7), e com o alvo de teste da
--- declaracao ainda fora da producao de todo sistema do cadastro (critica A4). A recusa de terceiro ate o G7 e da tela
+-- declaracao bem escrito e ainda fora da producao de todo sistema do cadastro (critica A4). A recusa de terceiro ate
+-- o G7 e da tela
 -- (selo/declaracao.py), nao do banco.
 CREATE FUNCTION pedidos_teste_selo_nasce() RETURNS trigger LANGUAGE plpgsql
 SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   s record;
+  alvo text;
 BEGIN
   IF NEW.estado IS DISTINCT FROM 'pedido' OR NEW.motivo IS NOT NULL THEN
     RAISE EXCEPTION 'Um pedido de teste do selo nasce pedido' USING ERRCODE = 'check_violation';
@@ -567,7 +893,11 @@ BEGIN
   IF s.tipo_chave IS DISTINCT FROM 'por_pessoa' THEN
     RAISE EXCEPTION 'O selo de nivel 2 ou 3 e so para sistema com chave por pessoa' USING ERRCODE = 'check_violation';
   END IF;
-  IF selo_alvo_na_producao((SELECT d.endereco_teste FROM declaracoes_selo d WHERE d.id = NEW.declaracao_id)) THEN
+  alvo := (SELECT d.endereco_teste FROM declaracoes_selo d WHERE d.id = NEW.declaracao_id);
+  IF NOT selo_alvo_bem_escrito(alvo) THEN
+    RAISE EXCEPTION '%', selo_alvo_mal_escrito() USING ERRCODE = 'check_violation';
+  END IF;
+  IF selo_alvo_na_producao(alvo) THEN
     RAISE EXCEPTION 'O alvo de teste declarado e o endereco de producao de um sistema do cadastro; a bateria nao escreve na producao'
       USING ERRCODE = 'check_violation';
   END IF;
@@ -581,7 +911,7 @@ CREATE TRIGGER pedidos_teste_selo_nasce BEFORE INSERT ON pedidos_teste_selo
 -- a do banco. O resto da linha nao muda. A bateria faz as escritas reais entre 'rodando' e o fim, entao 'rodando' so
 -- com a porta de saida aberta e com o pedido ainda valendo agora: a declaracao do pedido ainda e a mais recente do
 -- sistema (o ADMIN pode ter salvo uma correcao do alvo ou do modo depois do pedido), sistema ativo na 2026-07-28, com
--- chave por pessoa, e o alvo de teste da declaracao fora da producao de todo sistema do cadastro (critica A4: a
+-- chave por pessoa, e o alvo de teste da declaracao bem escrito e fora da producao de todo sistema do cadastro (A4: a
 -- producao pode mudar, ou outro sistema ser cadastrado no alvo, entre o pedido e a vez do despachante). Recusado, o
 -- despachante marca o pedido 'interrompido' com 'sistema_mudou'.
 CREATE FUNCTION pedidos_teste_selo_guarda() RETURNS trigger LANGUAGE plpgsql
@@ -589,6 +919,7 @@ SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
   dono text := (SELECT relowner::regrole::text FROM pg_class WHERE oid = TG_RELID);
   s record;
+  alvo text;
 BEGIN
   IF current_user NOT IN ('mcp_claro_despachante', dono) THEN
     RAISE EXCEPTION 'So o despachante muda um pedido de teste do selo' USING ERRCODE = 'insufficient_privilege';
@@ -622,7 +953,11 @@ BEGIN
     IF s.tipo_chave IS DISTINCT FROM 'por_pessoa' THEN
       RAISE EXCEPTION 'O selo de nivel 2 ou 3 e so para sistema com chave por pessoa' USING ERRCODE = 'check_violation';
     END IF;
-    IF selo_alvo_na_producao((SELECT d.endereco_teste FROM declaracoes_selo d WHERE d.id = NEW.declaracao_id)) THEN
+    alvo := (SELECT d.endereco_teste FROM declaracoes_selo d WHERE d.id = NEW.declaracao_id);
+    IF NOT selo_alvo_bem_escrito(alvo) THEN
+      RAISE EXCEPTION '%', selo_alvo_mal_escrito() USING ERRCODE = 'check_violation';
+    END IF;
+    IF selo_alvo_na_producao(alvo) THEN
       RAISE EXCEPTION 'O alvo de teste declarado e o endereco de producao de um sistema do cadastro; a bateria nao escreve na producao'
         USING ERRCODE = 'check_violation';
     END IF;
@@ -686,7 +1021,7 @@ CREATE INDEX testes_selo_sistema ON testes_selo (sistema_id, testado_em DESC);
 -- nasce de um pedido 'rodando' do mesmo sistema, nivel e declaracao, com a declaracao ainda a mais recente do sistema
 -- (uma declaracao nova salva durante a bateria vence a antiga), num sistema ativo na 2026-07-28 com chave por pessoa,
 -- com o retrato (endereco, tipo de chave, revisao do servidor e ferramentas de acao) igual ao de agora; o
--- alvo de teste da declaracao ainda fora da producao de todo sistema do cadastro (critica A4: a producao pode ter
+-- alvo de teste da declaracao bem escrito e ainda fora da producao de todo sistema do cadastro (A4: a producao pode ter
 -- mudado durante o teste); os casos na forma do contrato; o que nao foi testado igual a lista fixa; ao menos uma
 -- chamada por tentativa (critica B3); e, aprovado, com todos os casos obrigatorios (selo_casos_aprovam). O banco
 -- confere a forma dos casos, nao que a bateria chamou o sistema.
@@ -697,6 +1032,7 @@ DECLARE
   s record;
   problema text;
   validade integer;
+  alvo text;
 BEGIN
   SELECT * INTO p FROM pedidos_teste_selo WHERE id = NEW.pedido_id;
   IF p.estado IS DISTINCT FROM 'rodando' OR p.sistema_id IS DISTINCT FROM NEW.sistema_id
@@ -724,7 +1060,11 @@ BEGIN
     RAISE EXCEPTION 'O retrato do sistema no teste do selo nao bate com o sistema de agora (endereco, chave ou revisao)'
       USING ERRCODE = 'check_violation';
   END IF;
-  IF selo_alvo_na_producao((SELECT d.endereco_teste FROM declaracoes_selo d WHERE d.id = NEW.declaracao_id)) THEN
+  alvo := (SELECT d.endereco_teste FROM declaracoes_selo d WHERE d.id = NEW.declaracao_id);
+  IF NOT selo_alvo_bem_escrito(alvo) THEN
+    RAISE EXCEPTION '%', selo_alvo_mal_escrito() USING ERRCODE = 'check_violation';
+  END IF;
+  IF selo_alvo_na_producao(alvo) THEN
     RAISE EXCEPTION 'O alvo de teste declarado e o endereco de producao de um sistema do cadastro; a bateria nao escreve na producao'
       USING ERRCODE = 'check_violation';
   END IF;
@@ -769,6 +1109,21 @@ SQL_VIGENTE = r"""
 -- de listar (sumiu_em; nula quando a ferramenta volta). O UPDATE de tabela inteira do despachante em
 -- ferramentas_vistas (0002) cobre a coluna nova. Linhas antigas ficam NULL.
 ALTER TABLE ferramentas_vistas ADD COLUMN sumiu_em timestamptz;
+
+-- As ferramentas do contrato conferem com os esquemas publicados (forma essencial, critica B4), calculado quando a
+-- definicao e gravada, e nao a cada leitura do selo: a vitrine chama selo_vigente() por sistema, e a conferencia
+-- copiava e lia a definicao guardada (ate o teto da resposta do tools/list, 8 MiB por pagina) a cada leitura. Coluna
+-- gerada: ninguem a escreve, nem o despachante, que tem UPDATE na tabela inteira (0002); o banco a recalcula a cada
+-- INSERT e a cada UPDATE de nome ou definicao, e calculou as linhas antigas ao criar a coluna. Nula fora das
+-- ferramentas do contrato. Uma migracao que mude selo_esquema_essencial ou selo_esquemas recalcula a coluna
+-- (UPDATE ferramentas_vistas SET definicao = definicao WHERE contrato_confere IS NOT NULL).
+ALTER TABLE ferramentas_vistas ADD COLUMN contrato_confere boolean GENERATED ALWAYS AS (
+  CASE WHEN nome = ANY (selo_vocabulario('ferramentas')) THEN
+    coalesce(selo_esquema_essencial(definicao -> 'inputSchema')
+               = selo_esquema_essencial(selo_esquemas(nome) -> 'inputSchema')
+             AND selo_esquema_essencial(definicao -> 'outputSchema')
+               = selo_esquema_essencial(selo_esquemas(nome) -> 'outputSchema'), false)
+  END) STORED;
 
 CREATE TABLE selos_retirados (
   id           uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -852,7 +1207,7 @@ CREATE TRIGGER selos_retirados_sem_truncate BEFORE TRUNCATE ON selos_retirados
 
 -- As ferramentas do contrato do nivel continuam listadas na producao: lidas ha menos de 48 horas (duas vezes o maior
 -- TOOL_DRIFT_CHECK_SECONDS), sem sumir (critica M1), com a forma essencial dos esquemas igual a do contrato (critica
--- B4). A descricao e livre. Roda como o dono.
+-- B4; ferramentas_vistas.contrato_confere, calculada ao gravar). A descricao e livre. Roda como o dono.
 CREATE FUNCTION selo_contrato_listado(p_sistema uuid, p_nivel smallint, p_agora timestamptz) RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT p_nivel IN (2, 3) AND NOT EXISTS (
@@ -864,10 +1219,7 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
       WHERE v.sistema_id = p_sistema AND v.nome = n.nome
         AND (v.sumiu_em IS NULL OR v.sumiu_em > p_agora)
         AND v.vista_em > p_agora - interval '48 hours'
-        AND selo_esquema_essencial(v.definicao -> 'inputSchema')
-            = selo_esquema_essencial(selo_esquemas(n.nome) -> 'inputSchema')
-        AND selo_esquema_essencial(v.definicao -> 'outputSchema')
-            = selo_esquema_essencial(selo_esquemas(n.nome) -> 'outputSchema')))
+        AND v.contrato_confere))
 $$;
 
 -- O selo de agora. Vale o ultimo teste do sistema (por testado_em e id). O motivo sai na primeira regra que valer,
@@ -1252,8 +1604,13 @@ CREATE TABLE informacoes_sistema (
   estado      text        CHECK (estado IS NULL OR estado = ANY (selo_vocabulario('estados'))),
   repetida    boolean     NOT NULL DEFAULT false,
   objetos     smallint    CHECK (objetos IS NULL OR objetos BETWEEN 0 AND 1000),
+  -- O que aconteceu depois, como o sistema informou na consulta: ate 20 eventos e ate o teto de uma resposta do
+  -- contrato (16 KiB, contrato.TETO_RESPOSTA_BYTES), para o gatilho abaixo, que confere evento por evento, ter custo
+  -- com teto mesmo diante de um defeito de quem grava.
   depois      jsonb       NOT NULL DEFAULT '[]'::jsonb
-              CHECK (CASE WHEN jsonb_typeof(depois) = 'array' THEN jsonb_array_length(depois) <= 20 ELSE false END),
+              CHECK (CASE WHEN jsonb_typeof(depois) = 'array'
+                          THEN jsonb_array_length(depois) <= 20 AND pg_column_size(depois) <= 16384
+                          ELSE false END),
   -- Forcada pelo gatilho: a resposta nao combina com uma anterior sobre o mesmo numero (envios_selo.chave): a propria
   -- operacao e o pedido igual que saiu com o numero dela (critica M2).
   contradiz   boolean     NOT NULL DEFAULT false,
@@ -1309,8 +1666,10 @@ BEGIN
         USING ERRCODE = 'check_violation';
     END IF;
   END IF;
-  IF jsonb_typeof(NEW.depois) IS DISTINCT FROM 'array' THEN
-    RAISE EXCEPTION 'depois e uma lista de eventos' USING ERRCODE = 'check_violation';
+  -- Os tetos de depois antes do laco (o CHECK da tabela so roda depois deste gatilho): ate 20 eventos e 16 KiB.
+  IF jsonb_typeof(NEW.depois) IS DISTINCT FROM 'array' OR jsonb_array_length(NEW.depois) > 20
+     OR pg_column_size(NEW.depois) > 16384 THEN
+    RAISE EXCEPTION 'depois e uma lista de eventos (ate 20, com ate 16 KiB)' USING ERRCODE = 'check_violation';
   END IF;
   FOR item IN SELECT x FROM jsonb_array_elements(NEW.depois) x LOOP
     IF jsonb_typeof(item) <> 'object'

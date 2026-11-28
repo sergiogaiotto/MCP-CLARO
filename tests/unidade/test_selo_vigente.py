@@ -297,3 +297,64 @@ def test_motivo_desconhecido_e_recusado() -> None:
 
     with pytest.raises(ValueError, match="fora do vocabulario"):
         vigente.motivo_legivel(Torto())
+
+
+# --- O selo nao lido (retoque G02r, item 3) ---------------------------------------------------------------------
+
+
+def test_o_selo_nao_lido_nao_e_o_nunca_testado() -> None:
+    """``SELO_NAO_LIDO`` tem o nivel 1 (quem so compara o nivel nao promete nada), mas e outro valor que o nunca
+    testado lido do banco, e ``foi_lido`` os separa."""
+    assert vigente.SELO_NAO_LIDO.nivel == 1
+    assert vigente.SELO_NAO_LIDO != NIVEL_1_SEM_TESTE
+    assert not vigente.foi_lido(vigente.SELO_NAO_LIDO)
+    assert vigente.foi_lido(NIVEL_1_SEM_TESTE)
+    assert vigente.foi_lido(vigente_de(3))
+    assert vigente.foi_lido(FASE_DESLIGADA)
+    assert (
+        SeloVigente.de_linha(
+            type(
+                "L",
+                (),
+                {
+                    "nivel": 1,
+                    "teste_id": None,
+                    "testado_em": None,
+                    "vale_ate": None,
+                    "modo": None,
+                    "motivo": "nunca_testado",
+                },
+            )()
+        )
+        == NIVEL_1_SEM_TESTE
+    )
+
+
+@pytest.mark.parametrize(("ligada", "pessoa_teste"), [(False, False), (True, False), (False, True), (True, True)])
+def test_o_selo_nao_lido_nunca_vira_retrato_efetivo_nem_texto(ligada: bool, pessoa_teste: bool) -> None:
+    """O retrato de "nunca testado" so sai de um selo lido: o nao lido levanta no retrato, no efetivo (com a chave
+    ligada ou nao) e nos textos da tela."""
+    with pytest.raises(vigente.SeloNaoLido):
+        vigente.SELO_NAO_LIDO.retrato()
+    with pytest.raises(vigente.SeloNaoLido):
+        efetivo(vigente.SELO_NAO_LIDO, ligada=ligada, pessoa_teste=pessoa_teste)
+    with pytest.raises(vigente.SeloNaoLido):
+        vigente.motivo_legivel(vigente.SELO_NAO_LIDO)
+    with pytest.raises(vigente.SeloNaoLido):
+        vigente.selo_agora_legivel(vigente.SELO_NAO_LIDO)
+    # O lido de verdade continua indo: o nunca testado do banco vira retrato e efetivo.
+    assert NIVEL_1_SEM_TESTE.retrato()["motivo"] == "nunca_testado"
+    assert efetivo(NIVEL_1_SEM_TESTE, ligada=ligada, pessoa_teste=pessoa_teste).nivel == 1
+
+
+def test_o_sistema_montado_a_mao_vem_com_o_selo_nao_lido() -> None:
+    from mcp_claro.cadastro.modelos import FerramentaVitrine, Sistema
+
+    sistema = Sistema(uuid.uuid4(), "s", "https://s.exemplo/mcp", "proprio", "por_pessoa", 1, "ativo", "2026-07-28")
+    assert sistema.selo_vigente is vigente.SELO_NAO_LIDO
+    f = FerramentaVitrine(
+        uuid.uuid4(), sistema, "ler", 1, "ler", None, "Le.", {"type": "object"}, None, {}, "le", "baixo"
+    )
+    assert f.como_tool()["_meta"]["br.com.claro.mcp-claro/selo"] == 1  # a coluna antiga, como antes da Fase 4
+    with pytest.raises(vigente.SeloNaoLido):
+        f.como_tool(selo_efetivo=1)

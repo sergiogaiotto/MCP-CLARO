@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Final, Literal
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -274,10 +275,169 @@ def test_forma_essencial_resolve_referencias_e_marca_o_que_nao_resolve() -> None
     assert contrato.forma_essencial({"$ref": "https://fora"}) == "ref_de_fora"
     assert contrato.forma_essencial({"$ref": "#/$defs/B", "$defs": {}}) == "ref_sem_alvo"
     assert contrato.forma_essencial({"$ref": "#/$defs/A", "$defs": {"A": {"$ref": "#/$defs/A"}}}) == "ref_demais"
+    # 34 niveis de items cabem no orcamento: o nivel 33 passa do fundo e vira o texto que nunca confere.
     fundo: dict[str, Any] = {"type": "string"}
+    for _ in range(34):
+        fundo = {"items": fundo}
+    forma = contrato.forma_essencial(fundo)
+    for _ in range(contrato.FUNDO_MAXIMO_DO_ESQUEMA):
+        forma = forma["items"]
+    assert forma == {"items": "fundo_demais"}
+    # 40 niveis de properties passam do orcamento antes do fundo: o esquema inteiro vira grande_demais.
+    largo: dict[str, Any] = {"type": "string"}
     for _ in range(40):
-        fundo = {"properties": {"x": fundo}}
-    assert "fundo_demais" in str(contrato.forma_essencial(fundo))
+        largo = {"properties": {"x": largo}}
+    assert contrato.forma_essencial(largo) == contrato.GRANDE_DEMAIS
+
+
+# --- Orcamento de nos da forma essencial (retoque G02r) ------------------------------------------------------
+
+CICLO_QUE_EXPLODE: Final = {
+    "$defs": {"a": {"type": "object", "properties": {"x": {"$ref": "#/$defs/a"}, "y": {"$ref": "#/$defs/a"}}}},
+    "$ref": "#/$defs/a",
+}
+"""129 bytes cuja forma essencial, sem orcamento, tem 2^33 partes (achado do verificador do G2)."""
+
+
+def cadeia_que_explode(n: int = 32) -> dict[str, Any]:
+    """A mesma explosao sem ciclo: a0 -> {x: a1, y: a1} -> ... -> a32."""
+    defs: dict[str, Any] = {
+        f"a{i}": {
+            "type": "object",
+            "properties": {"x": {"$ref": f"#/$defs/a{i + 1}"}, "y": {"$ref": f"#/$defs/a{i + 1}"}},
+        }
+        for i in range(n)
+    }
+    defs[f"a{n}"] = {"type": "string"}
+    return {"$defs": defs, "$ref": "#/$defs/a0"}
+
+
+def no_teto(base: dict[str, Any], *, a_mais: int = 0) -> dict[str, Any]:
+    """``base`` com uma descricao na raiz que leva o custo a exatamente ``TETO_NOS_DO_ESQUEMA + a_mais`` nos (a
+    descricao e anotacao: a forma nao muda, so o custo)."""
+    custo = contrato.custo_da_forma_essencial(base)
+    assert custo is not None
+    # A chave "description" (1) e o texto (1 + bytes // 64) entram no peso da raiz, visitada uma vez.
+    falta = contrato.TETO_NOS_DO_ESQUEMA + a_mais - custo - 2
+    assert falta >= 0
+    return {**base, "description": "d" * (falta * contrato.BYTES_POR_NO)}
+
+
+@pytest.mark.parametrize("esquema", [CICLO_QUE_EXPLODE, cadeia_que_explode()], ids=["ciclo", "cadeia"])
+def test_esquema_que_explode_vira_grande_demais_depressa(esquema: dict[str, Any]) -> None:
+    inicio = time.monotonic()
+    assert contrato.forma_essencial(esquema) == contrato.GRANDE_DEMAIS
+    assert contrato.custo_da_forma_essencial(esquema) is None
+    assert time.monotonic() - inicio < 1
+    assert not contrato.esquema_confere("selo_consultar", "inputSchema", esquema)
+
+
+def test_orcamento_vale_ate_o_teto_e_para_um_no_depois() -> None:
+    base = contrato.ESQUEMAS["selo_consultar"]["outputSchema"]
+    no = no_teto(base)
+    assert contrato.custo_da_forma_essencial(no) == contrato.TETO_NOS_DO_ESQUEMA
+    assert contrato.forma_essencial(no) == contrato.forma_essencial(base)
+    assert contrato.esquema_confere("selo_consultar", "outputSchema", no)
+    passou = no_teto(base, a_mais=1)
+    assert contrato.custo_da_forma_essencial(passou) is None
+    assert contrato.forma_essencial(passou) == contrato.GRANDE_DEMAIS
+    assert not contrato.esquema_confere("selo_consultar", "outputSchema", passou)
+
+
+def test_cada_ref_seguido_gasta_de_novo_a_definicao() -> None:
+    """Duas referencias a mesma definicao gastam o peso dela duas vezes, e a definicao conta tambem dentro da raiz."""
+    definicao = {"type": "string", "description": "x" * 640}
+    uma = {"type": "object", "properties": {"a": {"$ref": "#/$defs/d"}}, "$defs": {"d": definicao}}
+    duas = {
+        "type": "object",
+        "properties": {"a": {"$ref": "#/$defs/d"}, "b": {"$ref": "#/$defs/d"}},
+        "$defs": {"d": definicao},
+    }
+    custo_uma, custo_duas = contrato.custo_da_forma_essencial(uma), contrato.custo_da_forma_essencial(duas)
+    assert custo_uma is not None
+    assert custo_duas is not None
+    peso_ref = contrato.peso_do_json({"$ref": "#/$defs/d"})
+    # b: o nome (1) e o {"$ref"} na raiz, o {"$ref"} recebido e a definicao seguida.
+    assert custo_duas - custo_uma == 1 + 2 * peso_ref + contrato.peso_do_json(definicao)
+
+
+@pytest.mark.parametrize(
+    ("valor", "peso"),
+    [
+        (None, 1),
+        (True, 1),
+        (0, 1),
+        ("", 1),
+        ("a" * 63, 1),
+        ("a" * 64, 2),
+        ("ç" * 32, 2),  # 64 bytes em UTF-8
+        ("ç" * 31, 1),
+        (1e16, 1),  # o banco escreve 10000000000000000
+        (1e70, 2),  # o banco escreve 71 letras
+        (5e-324, 6),  # o banco escreve 0. e 324 casas
+        (-0.0, 1),
+        (int("9" * 64), 2),
+        ([], 1),
+        ({}, 1),
+        ({"a": 1}, 3),
+        ({"k" * 64: [1, "x"]}, 6),
+        ([[[]]], 3),
+    ],
+)
+def test_peso_do_json(valor: Any, peso: int) -> None:
+    assert contrato.peso_do_json(valor) == peso
+
+
+@pytest.mark.parametrize(
+    ("numero", "texto"),
+    [
+        (1e16, "10000000000000000"),
+        (1.5e-07, "0.00000015"),
+        (100.0, "100.0"),
+        (-0.0, "0.0"),
+        (0.1, "0.1"),
+        (-12, "-12"),
+    ],
+)
+def test_numero_como_o_banco_escreve(numero: float, texto: str) -> None:
+    assert contrato.texto_do_numero_no_banco(numero) == texto
+
+
+def test_inteiro_alem_do_teto_de_str_tambem_tem_texto() -> None:
+    """str(int) recusa mais de 4300 digitos; o peso continua sem erro."""
+    assert contrato.texto_do_numero_no_banco(10**5000) == "1" + "0" * 5000
+    assert contrato.peso_do_json(10**5000) == 1 + 5001 // contrato.BYTES_POR_NO
+
+
+def test_custo_dos_esquemas_do_kit_cabe_com_folga() -> None:
+    """O mais caro dos esquemas que o kit gera para as ferramentas do contrato custa ``CUSTO_DO_KIT_MEDIDO`` nos, e o
+    teto da mais de dez vezes isso. Os publicados custam menos."""
+    custos = [
+        contrato.custo_da_forma_essencial(definicao[campo])
+        for definicao in _kit().values()
+        for campo in ("inputSchema", "outputSchema")
+    ]
+    publicados = [contrato.custo_da_forma_essencial(e) for f in contrato.ESQUEMAS.values() for e in f.values()]
+    assert None not in custos
+    assert None not in publicados
+    assert max(c for c in custos if c is not None) == contrato.CUSTO_DO_KIT_MEDIDO
+    assert max(c for c in publicados if c is not None) <= contrato.CUSTO_DO_KIT_MEDIDO
+    assert contrato.TETO_NOS_DO_ESQUEMA > 10 * contrato.CUSTO_DO_KIT_MEDIDO
+
+
+def test_custo_nao_depende_da_ordem_das_chaves() -> None:
+    """O banco anda nas chaves em outra ordem (jsonb: por tamanho, depois por byte); o custo e a forma sao os mesmos."""
+    esquema = _kit()["selo_consultar"]["outputSchema"]
+
+    def invertido(valor: Any) -> Any:
+        if isinstance(valor, dict):
+            return {k: invertido(valor[k]) for k in reversed(list(valor))}
+        if isinstance(valor, list):
+            return [invertido(v) for v in valor]
+        return valor
+
+    assert contrato.custo_da_forma_essencial(invertido(esquema)) == contrato.custo_da_forma_essencial(esquema)
+    assert contrato.forma_essencial(invertido(esquema)) == contrato.forma_essencial(esquema)
 
 
 # --- Endereco --------------------------------------------------------------------------------------------------

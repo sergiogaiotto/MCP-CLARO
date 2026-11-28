@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
 from collections.abc import Callable
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 import httpx2
@@ -197,6 +199,18 @@ PONTOS_DE_OUTROS_ALFABETOS = ("\u3002", "\uff0e", "\uff61")
         "http://127%2e0.0.1:8123/mcp",
         "https://cobranca.exemplo.teste%2e/mcp",
         "https://cobranca!exemplo.teste/mcp",
+        # Retoque G02r: a mesma regra do banco (selo_alvo_bem_escrito). O sinal de kelvin vira "k" nas minusculas de
+        # urlsplit; o IPv6 da forma antiga ::a.b.c.d, o Python e o banco escrevem de jeitos diferentes.
+        "https://\u212a.exemplo.teste/mcp",
+        "https://\u212aobranca.exemplo.teste:8443/mcp",
+        "http://[::a00:5]:8123/mcp",
+        "http://[::10.0.0.5]:8123/mcp",
+        "http://[::1:0]:8123/mcp",
+        # Retoque 2 do G02r: o IPv6 mapeado leva um IPv4 dentro, e o cliente conecta no proprio IPv4 (a producao
+        # 10.0.0.5, ou a maquina local, escrita de outro jeito). O banco comparava o texto e o guardava.
+        "http://[::ffff:10.0.0.5]/mcp",
+        "http://[::ffff:127.0.0.1]:8123/mcp",
+        "http://[::ffff:0.0.0.0]:8123/mcp",
     ],
 )
 def test_alvo_com_o_nome_escrito_de_outro_jeito_e_recusado_na_forma(alvo: str) -> None:
@@ -219,7 +233,10 @@ def test_alvo_com_o_nome_escrito_de_outro_jeito_e_recusado_na_forma(alvo: str) -
         "http://10.0.0.5/mcp",
         "http://[::1]:8124/mcp",
         "http://[2001:db8::1]:8124/mcp",
-        "http://[::ffff:10.0.0.5]/mcp",
+        "http://[::ffff]/mcp",
+        "http://[::ffff:0:a00:5]/mcp",
+        "http://[::100]/mcp",
+        "http://[::]:8124/mcp",
     ],
 )
 def test_alvo_com_o_nome_escrito_de_um_jeito_so_passa(alvo: str) -> None:
@@ -232,34 +249,51 @@ def test_alvo_com_o_nome_escrito_de_um_jeito_so_passa(alvo: str) -> None:
     assert httpx2.URL(alvo).raw_host.decode("ascii").lower() == urlsplit(alvo).hostname
 
 
-@pytest.mark.parametrize(
-    ("producao", "alvo"),
-    [
-        # A producao escrita de outro jeito no cadastro (a tela do cadastro aceita nome com acento num proprio) e o
-        # alvo na forma que o cliente conecta: a comparacao de texto nao pega, a forma de conexao pega.
-        ("https://cobran\u00e7a.exemplo.teste/mcp", "https://xn--cobrana-zxa.exemplo.teste/mcp"),
-        ("https://cobranca\u3002exemplo\u3002teste/mcp", PRODUCAO),
-        ("https://cobranca\uff0eexemplo\uff0eteste/mcp/", PRODUCAO),
-        ("http://127.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
-        ("http://2130706433:8123/mcp", "http://127.0.0.1:8123/mcp"),
-        ("http://0x7f.0.0.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
-        ("https://10.5/mcp", "https://10.0.0.5/mcp"),
-        ("https://0x0a000005:443/mcp", "https://10.0.0.5/mcp"),
-        ("http://[0:0:0:0:0:0:0:1]:8123/mcp", "http://[::1]:8123/mcp"),
-        ("http://[::ffff:10.0.0.5]:8123/mcp", "http://10.0.0.5:8123/mcp"),
-        # A mesma maquina: localhost, todo loopback e o IP nao especificado.
-        ("http://127.0.0.1:8123/mcp", "http://localhost:8123/mcp"),
-        ("http://127.0.0.1:8123/mcp", "http://api.localhost:8123/mcp"),
-        ("http://127.0.0.1:8123/mcp", "http://127.0.0.2:8123/mcp"),
-        ("http://127.0.0.1:8123/mcp", "http://[::1]:8123/mcp"),
-        ("http://127.0.0.1:8123/mcp", "http://0.0.0.0:8123/mcp"),
-        ("http://127.0.0.1:8123/mcp", "http://[::]:8123/mcp"),
-        ("http://localhost:8123/mcp", "http://[::ffff:127.0.0.1]:8123/mcp"),
-        # O mesmo nome na mesma porta, com o outro esquema: o mesmo servico.
-        ("https://cobranca.exemplo.teste/mcp", "http://cobranca.exemplo.teste:443/mcp"),
-        ("http://127.0.0.1:8123/mcp", "https://127.0.0.1:8123/mcp"),
-    ],
+NO_MESMO_LUGAR: Final = (
+    # A producao escrita de outro jeito no cadastro (a tela do cadastro aceita nome com acento num proprio) e o
+    # alvo na forma que o cliente conecta: a comparacao de texto nao pega, a forma de conexao pega.
+    ("https://cobran\u00e7a.exemplo.teste/mcp", "https://xn--cobrana-zxa.exemplo.teste/mcp"),
+    ("https://cobranca\u3002exemplo\u3002teste/mcp", PRODUCAO),
+    ("https://cobranca\uff0eexemplo\uff0eteste/mcp/", PRODUCAO),
+    ("http://127.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
+    ("http://2130706433:8123/mcp", "http://127.0.0.1:8123/mcp"),
+    ("http://0x7f.0.0.1:8123/mcp", "http://127.0.0.1:8123/mcp"),
+    ("https://10.5/mcp", "https://10.0.0.5/mcp"),
+    ("https://0x0a000005:443/mcp", "https://10.0.0.5/mcp"),
+    ("http://[0:0:0:0:0:0:0:1]:8123/mcp", "http://[::1]:8123/mcp"),
+    ("http://[::ffff:10.0.0.5]:8123/mcp", "http://10.0.0.5:8123/mcp"),
+    # A mesma maquina: localhost, todo loopback e o IP nao especificado.
+    ("http://127.0.0.1:8123/mcp", "http://localhost:8123/mcp"),
+    ("http://127.0.0.1:8123/mcp", "http://api.localhost:8123/mcp"),
+    ("http://127.0.0.1:8123/mcp", "http://127.0.0.2:8123/mcp"),
+    ("http://127.0.0.1:8123/mcp", "http://[::1]:8123/mcp"),
+    ("http://127.0.0.1:8123/mcp", "http://0.0.0.0:8123/mcp"),
+    ("http://127.0.0.1:8123/mcp", "http://[::]:8123/mcp"),
+    ("http://[::ffff:127.0.0.1]:8123/mcp", "http://localhost:8123/mcp"),
+    ("http://localhost:8123/mcp", "http://x.localhost:8123/mcp"),
+    ("http://0x7f000001:8123/mcp", "http://127.0.0.1:8123/mcp"),
+    # O mesmo nome na mesma porta, com o outro esquema: o mesmo servico.
+    ("https://cobranca.exemplo.teste/mcp", "http://cobranca.exemplo.teste:443/mcp"),
+    ("http://127.0.0.1:8123/mcp", "https://127.0.0.1:8123/mcp"),
 )
+"""Producao e alvo (escrito de um jeito so) que chegam ao mesmo servico. O banco confere a mesma lista
+(``test_selo_declaracao_banco.py``): ele pega todos, menos o primeiro (o nome fora de ASCII, que so a tela le)."""
+
+EM_OUTRO_LUGAR: Final = (
+    ("http://127.0.0.1:8123/mcp", "http://127.0.0.1:8124/mcp"),
+    ("http://127.0.0.1:8123/selo-x/mcp", "http://127.0.0.1:8123/selo-x/teste/mcp"),
+    ("http://localhost:8123/mcp", "http://10.0.0.5:8123/mcp"),
+    ("https://cobranca.exemplo.teste/mcp", "https://cobranca.exemplo.teste:8443/mcp"),
+    ("https://10.0.0.5/mcp", "https://10.0.0.6/mcp"),
+    ("https://cobranca.exemplo.teste/mcp", "http://cobranca.exemplo.teste/mcp"),
+    ("http://localhost:8123/mcp", "http://localhost.exemplo.teste:8123/mcp"),
+    ("http://10.0.0.5:8123/mcp", "http://[::ffff]:8123/mcp"),
+    ("http://10.0.0.5:8123/mcp", "http://[::ffff:0:a00:5]:8123/mcp"),
+)
+"""Producao e alvo em lugares diferentes: a tela e o banco deixam passar."""
+
+
+@pytest.mark.parametrize(("producao", "alvo"), NO_MESMO_LUGAR)
 def test_alvo_que_conecta_na_producao_e_recusado(producao: str, alvo: str) -> None:
     assert not contrato.mesmo_endereco(producao, alvo)  # a comparacao de texto, sozinha, deixava passar
     erro = recusa(
@@ -269,17 +303,7 @@ def test_alvo_que_conecta_na_producao_e_recusado(producao: str, alvo: str) -> No
     assert d.alvo_na_producao(alvo, [producao])
 
 
-@pytest.mark.parametrize(
-    ("producao", "alvo"),
-    [
-        ("http://127.0.0.1:8123/mcp", "http://127.0.0.1:8124/mcp"),
-        ("http://127.0.0.1:8123/selo-x/mcp", "http://127.0.0.1:8123/selo-x/teste/mcp"),
-        ("http://localhost:8123/mcp", "http://10.0.0.5:8123/mcp"),
-        ("https://cobranca.exemplo.teste/mcp", "https://cobranca.exemplo.teste:8443/mcp"),
-        ("https://10.0.0.5/mcp", "https://10.0.0.6/mcp"),
-        ("https://cobranca.exemplo.teste/mcp", "http://cobranca.exemplo.teste/mcp"),
-    ],
-)
+@pytest.mark.parametrize(("producao", "alvo"), EM_OUTRO_LUGAR)
 def test_alvo_em_outro_lugar_passa(producao: str, alvo: str) -> None:
     assert not d.alvo_na_producao(alvo, [producao])
     d.conferir(d.validar(dados(endereco_teste=alvo)), cadastro(producoes=(producao,)), ambiente=Ambiente.TESTE)
@@ -684,25 +708,74 @@ def test_barra_invertida_seguida_de_u0000_nao_e_o_caractere_nulo() -> None:
     assert d.ler_texto(texto).ferramentas["enviar_lembrete"].argumentos["texto"] == "\\u0000"
 
 
-def _com_fundo(niveis: int) -> dict[str, Any]:
+FORMAS_DE_FUNDO: Final = ("listas", "objetos", "misto")
+"""Como os niveis se aninham: so listas, so objetos ({"k": ...}) ou objetos e listas alternados."""
+
+
+def _aninhado(forma: str, niveis: int) -> Any:
+    """``niveis`` niveis de lista e objeto, um dentro do outro, em volta de um texto, sem recursao."""
+    valor: Any = "x"
+    for i in range(niveis):
+        valor = [valor] if forma == "listas" or (forma == "misto" and i % 2) else {"k": valor}
+    return valor
+
+
+def _texto_aninhado(forma: str, niveis: int) -> str:
+    """O JSON de ``_aninhado`` escrito a mao (o json.dumps do Python tem o proprio teto de niveis)."""
+    abre, fecha = [], []
+    for i in reversed(range(niveis)):
+        if forma == "listas" or (forma == "misto" and i % 2):
+            abre.append("[")
+            fecha.append("]")
+        else:
+            abre.append('{"k":')
+            fecha.append("}")
+    return "".join(abre) + '"x"' + "".join(reversed(fecha))
+
+
+def _com_fundo(niveis: int, forma: str = "listas") -> dict[str, Any]:
     """A declaracao com ``niveis`` niveis de objeto e lista, contando a raiz (os argumentos estao no nivel 4)."""
-    aninhado: Any = "x"
-    for _ in range(niveis - 4):
-        aninhado = [aninhado]
-    return mudar_ferramenta(dados(), "enviar_lembrete", lambda f: f["argumentos"].update(texto=aninhado))
+    return mudar_ferramenta(
+        dados(), "enviar_lembrete", lambda f: f["argumentos"].update(texto=_aninhado(forma, niveis - 4))
+    )
 
 
-def test_niveis_demais_sao_recusados_e_o_que_passa_e_guardado() -> None:
-    """Sem teto, argumentos de centenas de niveis passavam por ``validar`` e ``conferir`` e ``guardada`` (a
-    gravacao) levantava ``ValueError`` do pydantic, fora de ``DeclaracaoRecusada``."""
-    no_teto = d.validar(_com_fundo(d.FUNDO_MAXIMO))
+def _texto_com_fundo(niveis: int, forma: str) -> str:
+    marca = "MARCA-DO-FUNDO"
+    base = json.dumps(mudar_ferramenta(dados(), "enviar_lembrete", lambda f: f["argumentos"].update(texto=marca)))
+    return base.replace(json.dumps(marca), _texto_aninhado(forma, niveis - 4))
+
+
+def test_o_aninhado_tem_os_niveis_pedidos() -> None:
+    for forma in FORMAS_DE_FUNDO:
+        assert json.loads(_texto_aninhado(forma, 7)) == _aninhado(forma, 7)
+        assert d._problema_no_json(_com_fundo(d.FUNDO_MAXIMO, forma)) is None
+        assert d._problema_no_json(_com_fundo(d.FUNDO_MAXIMO + 1, forma)) == "fundo"
+
+
+@pytest.mark.parametrize("forma", FORMAS_DE_FUNDO)
+def test_niveis_ate_o_teto_passam_e_sao_guardados(forma: str) -> None:
+    """No teto (64 niveis), com listas, objetos ou os dois: ``validar``, ``ler_texto``, ``guardada`` e a leitura do
+    que foi guardado passam, e o guardado e o mesmo."""
+    no_teto = d.validar(_com_fundo(d.FUNDO_MAXIMO, forma))
     d.conferir(no_teto, cadastro(), ambiente=Ambiente.PRODUCAO)
-    assert d.validar(no_teto.guardada()) == no_teto
-    for niveis in (d.FUNDO_MAXIMO + 1, 300, 3000):
-        for ler in (d.validar, lambda x: d.ler_texto(json.dumps(x))):
-            with pytest.raises(d.DeclaracaoRecusada) as erro:
-                ler(_com_fundo(niveis))
-            assert (erro.value.motivo, erro.value.mensagem) == ("json_invalido", d.FUNDO_DEMAIS)
+    assert d.ler_texto(_texto_com_fundo(d.FUNDO_MAXIMO, forma)) == no_teto
+    guardado = no_teto.guardada()
+    assert d.validar(guardado) == no_teto
+    salva = d.DeclaracaoSalva(uuid.uuid4(), uuid.uuid4(), 1, guardado, "admin", uuid.uuid4(), datetime.now(UTC))
+    assert salva.modelo() == no_teto
+
+
+@pytest.mark.parametrize("niveis", [d.FUNDO_MAXIMO + 1, 300, 3000])
+@pytest.mark.parametrize("forma", FORMAS_DE_FUNDO)
+def test_niveis_demais_sao_recusados_so_com_declaracao_recusada(forma: str, niveis: int) -> None:
+    """Acima do teto (65, 300, 3000), com listas, objetos (a mutacao W01 tirava o teto do ramo dos objetos) ou os
+    dois: ``validar`` e ``ler_texto`` recusam com ``DeclaracaoRecusada`` e a frase do fundo, e nada levanta fora dela
+    (sem o teto, ``guardada`` levantava ``ValueError`` do pydantic, que nao serializa mais de 255 niveis)."""
+    for ler in (lambda: d.validar(_com_fundo(niveis, forma)), lambda: d.ler_texto(_texto_com_fundo(niveis, forma))):
+        with pytest.raises(d.DeclaracaoRecusada) as erro:
+            ler()
+        assert (erro.value.motivo, erro.value.mensagem) == ("json_invalido", d.FUNDO_DEMAIS)
 
 
 def test_metade_de_par_unicode_e_recusada() -> None:

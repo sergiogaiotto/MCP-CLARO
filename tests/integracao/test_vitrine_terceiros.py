@@ -633,7 +633,8 @@ async def test_proprio_confere_com_o_esquema_revisado_inteiro(dono: AsyncEngine)
     achada = await _na_vitrine(dono, cena, proprio, terceiros=True)
     assert achada is not None
     assert achada.esquema_entrada == declarada["inputSchema"]
-    assert await _da_ordem(dono, cena, proprio) == achada
+    # A reconferencia le sem o selo (retoque G02r, item 3); com o selo, e a mesma ferramenta que a vitrine da.
+    assert await _da_ordem(dono, cena, proprio, com_selo=True) == achada
 
 
 async def test_revisao_de_terceiro_recusa_referencia_para_texto_do_fornecedor(dono: AsyncEngine) -> None:

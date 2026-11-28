@@ -21,6 +21,8 @@ O que o duble honesto faz (desenho 2.2 e 3.3; criticas A3, M2, M4, M6, B4, B8 e 
 - ``selo_alvo`` diz ``teste`` no alvo de teste e ``producao`` na producao; no modo de ferramentas de teste, cada
   ferramenta de teste (``<acao>_teste``) escreve so no espaco de teste e devolve ``_meta[contrato.CHAVE_ALVO] =
   "teste"``;
+- o que ele recusa fica sem efeito: o numero com outros argumentos ou queimado, os argumentos ruins, o item ruim do
+  lote e a escrita com a versao velha (``recusa_sem_aplicar``);
 - a escrita termina mesmo se quem chamou cortar a conexao (a resposta perdida da critica A3 nao vira
   ``nao_recebida``).
 
@@ -76,7 +78,6 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import itertools
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -110,9 +111,9 @@ CHAVES_DO_SELO: Final = {
     "chave-declaracoes-selo": "declaracoes",
 }
 """Chaves estaticas so de teste, alem das de ``exemplos.comum``: a renovada de ``ana`` (a mesma pessoa), a da bateria
-(``teste_selo``, no alvo de teste), a renovada da bateria (a mesma pessoa: serve a um caso com uma segunda chave da
-mesma identidade de teste, se o contrato o ganhar; critica A3.4) e a de leitura das declaracoes (na producao, so
-``tools/list`` e a consulta de controle, critica A4)."""
+(``teste_selo``, no alvo de teste), a renovada da bateria (a mesma pessoa: so a prova do comportamento contra o
+duble usa; pela decisao 1 do coordenador na etapa 2r, a bateria nao tem segunda chave da mesma identidade, critica
+A3.4) e a de leitura das declaracoes (na producao, so ``tools/list`` e a consulta de controle, critica A4)."""
 SUFIXO_TESTE: Final = "_teste"
 ESPACO_REAL: Final = "real"
 ESPACO_TESTE: Final = "teste"
@@ -367,10 +368,14 @@ class Dados:
     perfil: dict[str, str] = field(default_factory=lambda: {"nome": "", "telefone": ""})
     versao: int = 0
     mudancas: int = 0
-    _proximo: itertools.count[int] = field(default_factory=lambda: itertools.count(1))
+    criados: int = 0
+    """Quantos lembretes este espaco ja criou (o numero do proximo identificador). Um inteiro, e nao um contador do
+    ``itertools``, para o espaco poder ser copiado (``copy.deepcopy``; o mentiroso ``sucesso_sem_efeito`` escreve numa
+    copia)."""
 
     def criar_lembrete(self) -> str:
-        ident = f"lembrete-{next(self._proximo)}"
+        self.criados += 1
+        ident = f"lembrete-{self.criados}"
         self.lembretes.append(ident)
         self.aplicacoes_lembretes += 1
         return ident
@@ -509,6 +514,28 @@ class Motor:
     def registra_ao_chegar(self) -> bool:
         return True
 
+    def recusa_outros_argumentos(self) -> bool:
+        """O mesmo numero com outros argumentos e recusado sem aplicar (SELO-2.2)."""
+        return True
+
+    def recusa_sem_aplicar(self) -> bool:
+        """O que o sistema recusa fica sem efeito: o numero com outros argumentos (SELO-2.2), o numero queimado pela
+        consulta ou pelo aviso (SELO-2.5 e 3.6), os argumentos ruins (SELO-3.1), o item ruim do lote (SELO-3.3) e a
+        escrita com a versao velha (SELO-3.4). O mentiroso ``recusa_mas_aplica`` aplica e responde a mesma recusa."""
+        return True
+
+    def pede_dados_sem_aplicar(self) -> bool:
+        """A resposta ``input_required`` nao pos nada em efeito (SELO-2.3)."""
+        return True
+
+    def marcar_de_novo_desmarca(self) -> bool:
+        """``marcar_lido`` de um lembrete ja lido o desmarca (o honesto nao: marcar de novo nao muda nada, SELO-2.7)."""
+        return False
+
+    def onde_escrever(self, amb: Ambiente) -> Ambiente:
+        """Onde a escrita acontece: o honesto escreve nos dados do proprio ambiente."""
+        return amb
+
     def ajustar_saida(self, saida: Saida, reg: Registro) -> Saida:
         """O desfecho que o sistema conta depois de escrever (o honesto conta o que houve)."""
         return saida
@@ -638,7 +665,7 @@ class Motor:
             # Sem numero (pessoa de nivel 1): escreve como qualquer sistema, sem guardar nada e sem recibo.
             reg = Registro("", assinatura, "em_andamento", ferramenta=acao, espaco=espaco)
             try:
-                saida = await self._executar(amb, acao, espaco, args, reg)
+                saida = await self._executar(self.onde_escrever(amb), acao, espaco, args, reg)
             except PedeDados:
                 return self._pede_dados()
             return types.CallToolResult(content=[types.TextContent(type="text", text=saida.texto)], is_error=saida.erro)
@@ -651,21 +678,26 @@ class Motor:
         if anterior is not None and anterior.queimado_por is not None and self.queima():
             estado = "parada" if anterior.queimado_por == "aviso" else "nao_recebida"
             texto = "Este numero ja foi encerrado pelo sistema; nada foi feito. Peca de novo com outro numero."
+            if not self.recusa_sem_aplicar():
+                await self._aplicar_mesmo_recusando(amb, acao, espaco, args, numero, assinatura)
             return self._com_recibo(Saida(texto, True, estado), numero)
         if anterior is not None and anterior.queimado_por is None:
             if anterior.assinatura != assinatura:
-                raise MCPError(
-                    code=types.INVALID_PARAMS,
-                    message="Este numero ja foi usado com outros argumentos; nada foi feito.",
-                )
-            if self.deduplica():
+                if self.recusa_outros_argumentos():
+                    if not self.recusa_sem_aplicar():
+                        await self._aplicar_mesmo_recusando(amb, acao, espaco, args, numero, assinatura)
+                    raise MCPError(
+                        code=types.INVALID_PARAMS,
+                        message="Este numero ja foi usado com outros argumentos; nada foi feito.",
+                    )
+            elif self.deduplica():
                 await anterior.pronto.wait()
                 return self._repeticao(anterior, numero)
         reg = Registro(numero, assinatura, "em_andamento", ferramenta=acao, espaco=espaco)
         if self.registra_ao_chegar():
             amb.registros[chave] = reg
         try:
-            saida = await self._executar(amb, acao, espaco, args, reg)
+            saida = await self._executar(self.onde_escrever(amb), acao, espaco, args, reg)
         except PedeDados:
             # Nada foi feito e nada fica guardado: o numero nao conta como recebido (SELO-2.3).
             amb.registros.pop(chave, None)
@@ -680,6 +712,15 @@ class Motor:
             reg.disse.append(saida.estado)  # o recibo tambem e uma resposta do sistema sobre o numero
         await self.depois_de_aplicar(amb, ctx, chave, reg)
         return self._com_recibo(saida, numero)
+
+    async def _aplicar_mesmo_recusando(
+        self, amb: Ambiente, acao: str, espaco: str, args: dict[str, Any], numero: str, assinatura: str
+    ) -> None:
+        """So o mentiroso ``recusa_mas_aplica``: a escrita pedida acontece, com os argumentos que vieram, e quem chamou
+        recebe a recusa de sempre. O registro do numero fica como estava."""
+        reg = Registro(numero, assinatura, "em_andamento", ferramenta=acao, espaco=espaco)
+        with contextlib.suppress(PedeDados):
+            await self._executar(self.onde_escrever(amb), acao, espaco, args, reg)
 
     def _repeticao(self, reg: Registro, numero: str) -> types.CallToolResult:
         """O desfecho da primeira chamada, sem aplicar de novo (SELO-2.2): o que de fato houve com ela, no estado de
@@ -735,8 +776,14 @@ class Motor:
 
     async def _enviar_lembrete(self, amb: Ambiente, dados: Dados, args: dict[str, Any], reg: Registro) -> Saida:
         if args.get("pedir_confirmacao"):
+            if not self.pede_dados_sem_aplicar():
+                dados.criar_lembrete()
+                amb.aplicar("enviar_lembrete")
             raise PedeDados
         if "@" not in str(args.get("para", "")):
+            if not self.recusa_sem_aplicar():
+                dados.criar_lembrete()
+                amb.aplicar("enviar_lembrete")
             return self._concluir(reg, Saida("O endereco nao existe; nada foi enviado.", True, "recusada"))
         daqui_a = args.get("daqui_a")
         if isinstance(daqui_a, int | float) and daqui_a > 0:
@@ -778,7 +825,10 @@ class Motor:
             return self._concluir(reg, Saida("O lote veio vazio; nada foi enviado.", True, "recusada"))
         bons = [i for i in itens if isinstance(i, dict) and "@" in str(i.get("para", ""))]
         criados = tuple(dados.criar_lembrete() for _ in bons)
-        if criados:
+        ruins_aplicados = 0 if self.recusa_sem_aplicar() else len(itens) - len(bons)
+        for _ in range(ruins_aplicados):
+            dados.criar_lembrete()  # os itens ruins tambem saem, e a resposta diz que nao
+        if criados or ruins_aplicados:
             amb.aplicar("enviar_lote")
         contagem = {"aplicados": len(criados), "nao_aplicados": len(itens) - len(criados)}
         if not criados:
@@ -792,25 +842,39 @@ class Motor:
     def _marcar_lido(self, amb: Ambiente, dados: Dados, args: dict[str, Any], reg: Registro) -> Saida:
         lembrete = str(args.get("lembrete", "")).strip()
         if not lembrete:
+            if not self.recusa_sem_aplicar():
+                dados.lidos.add(lembrete)
+                dados.aplicacoes_lidos += 1
+                amb.aplicar("marcar_lido")
             return self._concluir(reg, Saida("Sem lembrete para marcar; nada foi feito.", True, "recusada"))
-        dados.lidos.add(lembrete)
+        if lembrete in dados.lidos and self.marcar_de_novo_desmarca():
+            dados.lidos.discard(lembrete)
+        else:
+            dados.lidos.add(lembrete)
         dados.aplicacoes_lidos += 1
         amb.aplicar("marcar_lido")
         return self._concluir(reg, Saida("Marcado como lido.", False, "concluida"))
 
     def _trocar_perfil(self, amb: Ambiente, dados: Dados, args: dict[str, Any], reg: Registro) -> Saida:
-        campos = {k: str(args[k]) for k in ("nome", "telefone") if k in args}
+        campos: dict[str, str] = {k: str(args[k]) for k in ("nome", "telefone") if k in args}
         if not campos or any(not v.strip() for v in campos.values()):
+            if campos and not self.recusa_sem_aplicar():
+                self._mudar_perfil(amb, dados, campos)
             return self._concluir(reg, Saida("Nada para mudar no perfil; nada foi feito.", True, "recusada"))
         versao = args.get("versao")
         if versao is not None and versao != dados.versao:
             texto = f"Conflito: o perfil mudou depois da leitura (versao {dados.versao}); nada foi aplicado."
+            if not self.recusa_sem_aplicar():
+                self._mudar_perfil(amb, dados, campos)  # a escrita velha passa por cima da nova
             return self._concluir(reg, Saida(texto, True, "recusada"))
+        self._mudar_perfil(amb, dados, campos)
+        return self._concluir(reg, Saida(f"Perfil atualizado (versao {dados.versao}).", False, "concluida"))
+
+    def _mudar_perfil(self, amb: Ambiente, dados: Dados, campos: Mapping[str, str]) -> None:
         dados.perfil.update(campos)
         dados.versao += 1
         dados.mudancas += 1
         amb.aplicar("trocar_perfil")
-        return self._concluir(reg, Saida(f"Perfil atualizado (versao {dados.versao}).", False, "concluida"))
 
     def _ler(self, amb: Ambiente, nome: str, args: dict[str, Any]) -> types.CallToolResult:
         espaco = ESPACO_TESTE if args.get("espaco") == ESPACO_TESTE else ESPACO_REAL

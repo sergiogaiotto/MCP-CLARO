@@ -2294,7 +2294,7 @@ def test_nomes_neutros_le_til_um_antes_de_til_zero_e_nada_do_fornecedor_chega_ao
         endereco="https://x.exemplo/mcp",
         origem="terceiro",
         tipo_chave="compartilhada",
-        selo=0,
+        selo=1,
         situacao="ativo",
         versao_mcp=VERSAO_MCP,
     )

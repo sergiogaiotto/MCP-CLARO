@@ -564,7 +564,17 @@ async def test_funcoes_da_0007_tem_caminho_de_busca_fixo(dono: AsyncEngine) -> N
             " 'ferramentas_revisadas_nasce'))",
         )
     }
-    assert len(funcoes) == 34
+    # 34 da etapa 1, 4 do retoque G02r (selo_esquema_teto, selo_esquema_peso, selo_alvo_bem_escrito e
+    # selo_alvo_mal_escrito) e 2 do retoque 2 (selo_ipv4_escrito e selo_endereco_conexao).
+    assert len(funcoes) == 40
+    assert {
+        "selo_esquema_teto",
+        "selo_esquema_peso",
+        "selo_alvo_bem_escrito",
+        "selo_alvo_mal_escrito",
+        "selo_ipv4_escrito",
+        "selo_endereco_conexao",
+    } <= set(funcoes)
     assert [n for n, config in funcoes.items() if "search_path=pg_catalog, public, pg_temp" not in config] == []
     definidoras = {
         str(n)

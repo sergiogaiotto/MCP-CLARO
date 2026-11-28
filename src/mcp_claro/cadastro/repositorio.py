@@ -24,7 +24,7 @@ from mcp_claro.cadastro.impressao import impressao
 from mcp_claro.cadastro.modelos import DICAS_CONHECIDAS, ORIGENS, Aplicativo, FerramentaVitrine, Pessoa, Sistema
 from mcp_claro.entrada.argumentos import conferir_esquema
 from mcp_claro.selo.contrato import FERRAMENTAS_DO_CONTRATO
-from mcp_claro.selo.vigente import SeloVigente
+from mcp_claro.selo.vigente import SELO_NAO_LIDO, SeloVigente
 
 
 def _aplicativo(linha: Row[Any]) -> Aplicativo:
@@ -38,8 +38,8 @@ def _pessoa(linha: Row[Any]) -> Pessoa:
 def _sistema(linha: Row[Any], prefixo: str = "", *, com_selo: bool = True) -> Sistema:
     """O ``Sistema`` de uma linha com as colunas de ``sistemas`` e, com ``com_selo``, as do selo vigente
     (``selo_nivel``, ``selo_teste_id``, ``selo_testado_em``, ``selo_vale_ate``, ``selo_modo``, ``selo_motivo``), que a
-    consulta traz por ``CROSS JOIN LATERAL selo_vigente(s.id)``. Sem ``com_selo``, ``selo_vigente`` fica no padrao
-    ``NIVEL_1_SEM_TESTE`` do modelo (nivel 1, que nao promete nada)."""
+    consulta traz de ``selo_vigente(s.id)``. Sem ``com_selo``, ``selo_vigente`` fica no padrao ``SELO_NAO_LIDO`` do
+    modelo (nivel 1, cujo retrato e cujo efetivo levantam ``SeloNaoLido``)."""
 
     def g(campo: str) -> Any:
         return getattr(linha, prefixo + campo)
@@ -56,6 +56,7 @@ def _sistema(linha: Row[Any], prefixo: str = "", *, com_selo: bool = True) -> Si
             g("versao_mcp"),
             g("revisao_servidor_id"),
             g("sondagem_desfecho"),
+            SELO_NAO_LIDO,
         )
     teste_id = g("selo_teste_id")
     selo_vigente = SeloVigente(
@@ -126,11 +127,11 @@ async def sistema_por_id(c: AsyncConnection, sistema_id: uuid.UUID, *, com_selo:
     mesma consulta.
 
     Sem ``com_selo`` (o padrao), a consulta nao chama ``selo_vigente()`` e ``Sistema.selo_vigente`` fica no padrao
-    ``NIVEL_1_SEM_TESTE`` (nivel 1, que nao promete nada): e o que os caminhos do despachante que nao usam o selo
-    (``sondar_sistema``, ``ler_declaracoes``, ``revisar_servidor``) leem. Assim, um defeito ou uma demora em
-    ``selo_vigente()`` (que le as ferramentas do contrato em ``ferramentas_vistas``) nao para a sondagem nem a
-    releitura do que o sistema declara, que e o que troca uma definicao ruim guardada. Quem mostra ou usa o selo pede
-    ``com_selo=True``, ou le ``selo.vigente.ler``."""
+    ``SELO_NAO_LIDO`` (nivel 1; o retrato e o efetivo dele levantam ``SeloNaoLido``): e o que os caminhos do
+    despachante que nao usam o selo (``sondar_sistema``, ``ler_declaracoes``, ``revisar_servidor``) leem. Assim, um
+    defeito ou uma demora em ``selo_vigente()`` (que le as ferramentas do contrato em ``ferramentas_vistas``) nao para
+    a sondagem nem a releitura do que o sistema declara, que e o que troca uma definicao ruim guardada. Quem mostra ou
+    usa o selo pede ``com_selo=True``, ou le ``selo.vigente.ler``."""
     sql = _SQL_SISTEMA if com_selo else _SQL_SISTEMA_SEM_SELO
     linha = (await c.execute(text(sql), {"i": sistema_id})).first()
     return _sistema(linha, com_selo=com_selo) if linha else None
@@ -140,16 +141,15 @@ async def sistema_por_id(c: AsyncConnection, sistema_id: uuid.UUID, *, com_selo:
 # guarda de sistemas so deixa a revisao vigente num servidor 'ativo'). Rever uma ferramenta grava outro id: ela sai
 # da vitrine ate a proxima conclusao. A revisada de terceiro tambem precisa da definicao declarada, que so a
 # revisao da Fase 3 grava (``revisar_ferramenta``, com o esquema limpo e as descricoes do ADMIN): uma linha de
-# antes dela nunca leva o texto do fornecedor a vitrine. Sistema proprio: como nas Fases 1 e 2. Fase 4: o selo
-# vigente de cada sistema vem junto (``selo_vigente``), e as ferramentas do contrato do selo nunca entram.
+# antes dela nunca leva o texto do fornecedor a vitrine. Sistema proprio: como nas Fases 1 e 2. Fase 4: as
+# ferramentas do contrato do selo nunca entram, e o selo vigente de cada sistema vem junto (``_com_selo``), calculado
+# uma vez por sistema, e nao por ferramenta. Quem chama poe os filtros e o ORDER BY do DISTINCT ON no fim.
 _SQL_VITRINE = """
 SELECT DISTINCT ON (f.id)
        f.*, o.id AS ordem_id,
        s.id AS s_id, s.nome AS s_nome, s.endereco AS s_endereco, s.origem AS s_origem, s.tipo_chave AS s_tipo_chave,
        s.selo AS s_selo, s.situacao AS s_situacao, s.versao_mcp AS s_versao_mcp,
-       s.revisao_servidor_id AS s_revisao_servidor_id, s.sondagem_desfecho AS s_sondagem_desfecho,
-       sv.nivel AS s_selo_nivel, sv.teste_id AS s_selo_teste_id, sv.testado_em AS s_selo_testado_em,
-       sv.vale_ate AS s_selo_vale_ate, sv.modo AS s_selo_modo, sv.motivo AS s_selo_motivo
+       s.revisao_servidor_id AS s_revisao_servidor_id, s.sondagem_desfecho AS s_sondagem_desfecho
 FROM ordens_servico o
 JOIN modelos_ordem m ON m.id = o.modelo_id AND m.ativo
 JOIN modelos_ordem_ferramentas mf ON mf.modelo_id = m.id
@@ -157,7 +157,6 @@ JOIN ferramentas_revisadas f ON f.sistema_id = mf.sistema_id AND f.nome_original
                              AND f.situacao = 'ativa'
 JOIN sistemas s ON s.id = f.sistema_id AND s.situacao = 'ativo' AND s.versao_mcp = :versao
 LEFT JOIN revisoes_servidor rs ON rs.id = s.revisao_servidor_id AND rs.sistema_id = s.id
-CROSS JOIN LATERAL selo_vigente(s.id) sv
 WHERE o.pessoa_id = :pessoa AND o.aplicativo_id = :aplicativo AND o.situacao = 'ativa'
   AND o.inicio <= now() AND o.fim > now()
   AND f.nome_original <> ALL (CAST(:reservados AS text[]))
@@ -167,15 +166,31 @@ WHERE o.pessoa_id = :pessoa AND o.aplicativo_id = :aplicativo AND o.situacao = '
 _RESERVADOS = list(FERRAMENTAS_DO_CONTRATO)
 
 
-def _ferramenta(linha: Row[Any], *, para_chamar: bool = False) -> FerramentaVitrine:
+def _com_selo(sql: str) -> str:
+    """A consulta das ferramentas (``_SQL_VITRINE`` com os filtros e o ORDER BY) com o selo vigente de cada sistema,
+    lido de ``selo_vigente()`` uma vez por sistema (a vitrine de 300 ferramentas de um sistema chama a funcao uma vez,
+    e nao 300)."""
+    # Constantes deste modulo e os filtros dos chamadores (com parametros): nenhum texto de fora entra no SQL.
+    return (
+        "WITH linhas AS MATERIALIZED (" + sql + "),"  # noqa: S608  # nosec B608
+        " selos AS MATERIALIZED (SELECT d.s_id, sv.* FROM (SELECT DISTINCT s_id FROM linhas) d"
+        " CROSS JOIN LATERAL selo_vigente(d.s_id) sv)"
+        " SELECT l.*, x.nivel AS s_selo_nivel, x.teste_id AS s_selo_teste_id, x.testado_em AS s_selo_testado_em,"
+        " x.vale_ate AS s_selo_vale_ate, x.modo AS s_selo_modo, x.motivo AS s_selo_motivo"
+        " FROM linhas l JOIN selos x ON x.s_id = l.s_id"
+    )
+
+
+def _ferramenta(linha: Row[Any], *, para_chamar: bool = False, com_selo: bool = True) -> FerramentaVitrine:
     """``para_chamar``: num terceiro, ``esquema_entrada`` e a copia com que a entrada confere os argumentos, sem
-    ``pattern`` nem ``uniqueItems`` (critica B3). Sem ele, o esquema revisado inteiro, que a vitrine mostra."""
+    ``pattern`` nem ``uniqueItems`` (critica B3). Sem ele, o esquema revisado inteiro, que a vitrine mostra.
+    ``com_selo``: a linha traz o selo vigente do sistema (``_com_selo``); sem ele, ``SELO_NAO_LIDO``."""
     esquema_entrada = dict(linha.esquema_entrada)
     if para_chamar and linha.s_origem != "proprio":
         esquema_entrada = para_conferir(esquema_entrada)
     return FerramentaVitrine(
         id=linha.id,
-        sistema=_sistema(linha, "s_"),
+        sistema=_sistema(linha, "s_", com_selo=com_selo),
         nome_original=linha.nome_original,
         versao=linha.versao,
         nome_vitrine=linha.nome_vitrine,
@@ -199,7 +214,7 @@ async def vitrine(
     de terceiros (chave da Fase 3 ligada ou pessoa de teste). O padrao e o lado que esconde."""
     linhas = (
         await c.execute(
-            text(_SQL_VITRINE + " ORDER BY f.id, o.fim DESC"),
+            text(_com_selo(_SQL_VITRINE + " ORDER BY f.id, o.fim DESC")),
             {
                 "pessoa": pessoa_id,
                 "aplicativo": aplicativo_id,
@@ -220,12 +235,16 @@ async def ferramenta_na_vitrine(
     versao: str,
     *,
     terceiros: bool = False,
+    com_selo: bool = True,
 ) -> FerramentaVitrine | None:
     """A ferramenta da vitrine que o aplicativo quer chamar. Num terceiro, ``esquema_entrada`` e a copia para
-    conferir os argumentos (``esquema.para_conferir``)."""
+    conferir os argumentos (``esquema.para_conferir``). ``com_selo`` (o padrao): com o selo vigente do sistema, como a
+    vitrine; sem ele, a consulta nao chama ``selo_vigente()`` e o sistema vem com ``SELO_NAO_LIDO`` (para quem so
+    quer saber se a ferramenta esta na vitrine e de que classe ela e)."""
+    sql = _SQL_VITRINE + " AND f.nome_vitrine = :nome ORDER BY f.id, o.fim DESC"
     linha = (
         await c.execute(
-            text(_SQL_VITRINE + " AND f.nome_vitrine = :nome ORDER BY f.id, o.fim DESC"),
+            text(_com_selo(sql) if com_selo else sql),
             {
                 "pessoa": pessoa_id,
                 "aplicativo": aplicativo_id,
@@ -236,7 +255,7 @@ async def ferramenta_na_vitrine(
             },
         )
     ).first()
-    return _ferramenta(linha, para_chamar=True) if linha else None
+    return _ferramenta(linha, para_chamar=True, com_selo=com_selo) if linha else None
 
 
 async def ferramenta_da_ordem(
@@ -248,12 +267,19 @@ async def ferramenta_da_ordem(
     ferramenta_id: uuid.UUID,
     versao: str,
     terceiros: bool = False,
+    com_selo: bool = False,
 ) -> FerramentaVitrine | None:
     """Reconferencia do despachante: a mesma regra da vitrine, presa a ordem e a versao revisada vigente. Como em
-    ``ferramenta_na_vitrine``, o esquema de entrada de um terceiro e a copia para conferir."""
+    ``ferramenta_na_vitrine``, o esquema de entrada de um terceiro e a copia para conferir.
+
+    Sem ``com_selo`` (o padrao, como ``sistema_por_id``), a consulta nao chama ``selo_vigente()`` e o sistema vem com
+    ``SELO_NAO_LIDO``: e o que a porta de saida (``saida.despachante``), a leitura (``despachante.servico``) e a
+    releitura do terceiro (``saida.pedidos``) leem, para que o selo nunca pare a porta nem a leitura (A1, decisao 3 do
+    coordenador na etapa 2r). Quem mostra ou grava o selo pede ``com_selo=True`` ou le ``selo.vigente.ler``."""
+    sql = _SQL_VITRINE + " AND f.id = :f AND o.id = :o ORDER BY f.id, o.fim DESC"
     linha = (
         await c.execute(
-            text(_SQL_VITRINE + " AND f.id = :f AND o.id = :o ORDER BY f.id, o.fim DESC"),
+            text(_com_selo(sql) if com_selo else sql),
             {
                 "pessoa": pessoa_id,
                 "aplicativo": aplicativo_id,
@@ -265,7 +291,7 @@ async def ferramenta_da_ordem(
             },
         )
     ).first()
-    return _ferramenta(linha, para_chamar=True) if linha else None
+    return _ferramenta(linha, para_chamar=True, com_selo=com_selo) if linha else None
 
 
 async def esquema_declarado(c: AsyncConnection, sistema_id: uuid.UUID, nome: str) -> dict[str, Any] | None:

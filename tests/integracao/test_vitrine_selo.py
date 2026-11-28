@@ -15,10 +15,11 @@ o cadastro e o modelo.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import mcp_types as types
 import pytest
@@ -190,6 +191,7 @@ async def test_entrada_e_despachante_leem_a_vitrine_com_o_selo(dono: AsyncEngine
                 ordem_id=ordem,
                 ferramenta_id=acao.id,
                 versao=VERSAO_MCP,
+                com_selo=True,  # sem ele (o padrao, da porta e da leitura), o selo nao e lido
             ),
             await repositorio.sistema_por_id(c, cena.sistema.id, com_selo=True),
         )
@@ -279,3 +281,123 @@ async def test_o_banco_recusa_revisar_o_nome_reservado(dono: AsyncEngine, cena: 
 
     with pytest.raises(DBAPIError, match="reservado ao contrato do selo"):
         await num_rascunho(dono, revisar)
+
+
+# --- O esquema do contrato que explode e o custo da vitrine (retoque G02r) ------------------------------------
+
+ESQUEMA_QUE_EXPLODE: Final = {
+    "$defs": {"a": {"type": "object", "properties": {"x": {"$ref": "#/$defs/a"}, "y": {"$ref": "#/$defs/a"}}}},
+    "$ref": "#/$defs/a",
+}
+"""129 bytes cuja forma essencial, sem o orcamento de nos, tem 2^33 partes (o teste pronto do G2, r2)."""
+
+
+def _cadeia_sem_ciclo(n: int = 32) -> dict[str, Any]:
+    defs: dict[str, Any] = {
+        f"a{i}": {
+            "type": "object",
+            "properties": {"x": {"$ref": f"#/$defs/a{i + 1}"}, "y": {"$ref": f"#/$defs/a{i + 1}"}},
+        }
+        for i in range(n)
+    }
+    defs[f"a{n}"] = {"type": "string"}
+    return {"$defs": defs, "$ref": "#/$defs/a0"}
+
+
+@pytest.mark.parametrize("papel", [ENTRADA, DESPACHANTE])
+@pytest.mark.parametrize("esquema", [ESQUEMA_QUE_EXPLODE, _cadeia_sem_ciclo()], ids=["ciclo", "cadeia"])
+async def test_vitrine_responde_com_o_esquema_do_contrato_que_explode(
+    dono: AsyncEngine, cena: Cena, esquema: dict[str, Any], papel: str
+) -> None:
+    """Um proprio com selo vigente lista selo_consultar com um esquema cuja forma essencial cresce em exponencial: a
+    vitrine, ``ferramenta_na_vitrine``, ``ferramenta_da_ordem`` (a reconferencia da porta de saida e da leitura, sem e
+    com o selo) e ``sistema_por_id(com_selo=True)`` respondem em pouco tempo, pela entrada e pelo despachante, e o selo
+    cai para o nivel 1 (``contrato_sumiu``: o esquema nunca confere). Antes do orcamento de nos, as quatro eram
+    canceladas pelo ``statement_timeout``."""
+    async with dono.begin() as c:
+        # A gravacao da definicao calcula ferramentas_vistas.contrato_confere: tambem com o tempo curto.
+        await c.execute(text("SET LOCAL statement_timeout = '3s'"))
+        await apoio.gravar_teste(c, cena.sistema.id, nivel=2, admin_id=cena.admin_id)
+        explode = dict(apoio.definicao_do_contrato(contrato.FERRAMENTA_CONSULTAR), inputSchema=esquema)
+        await apoio.listar_contrato(c, cena.sistema.id, 2, definicoes={contrato.FERRAMENTA_CONSULTAR: explode})
+    ordem = await _uma_ordem(dono, cena, cena.de_teste)
+    acao = cena.sistema.acoes[0]
+
+    async def ler(c: AsyncConnection) -> tuple[list[FerramentaVitrine], Any, Any, Any, Any, float]:
+        await como(c, papel)
+        await c.execute(text("SET LOCAL statement_timeout = '3s'"))
+        inicio = time.monotonic()
+        argumentos = {
+            "pessoa_id": cena.de_teste,
+            "aplicativo_id": cena.aplicativo_id,
+            "ordem_id": ordem,
+            "ferramenta_id": acao.id,
+            "versao": VERSAO_MCP,
+        }
+        return (
+            await _vitrine(c, cena, cena.de_teste),
+            await repositorio.ferramenta_na_vitrine(
+                c, cena.de_teste, cena.aplicativo_id, acao.nome_vitrine, VERSAO_MCP
+            ),
+            await repositorio.ferramenta_da_ordem(c, **argumentos),
+            await repositorio.ferramenta_da_ordem(c, **argumentos, com_selo=True),
+            await repositorio.sistema_por_id(c, cena.sistema.id, com_selo=True),
+            time.monotonic() - inicio,
+        )
+
+    ferramentas, na_vitrine, da_ordem, da_ordem_com_selo, sistema, levou = await num_rascunho(dono, ler)
+    assert levou < 1
+    assert {f.sistema.selo_vigente.motivo for f in ferramentas} == {"contrato_sumiu"}
+    assert na_vitrine.sistema.selo_vigente.motivo == "contrato_sumiu"
+    assert da_ordem_com_selo.sistema.selo_vigente.motivo == "contrato_sumiu"
+    assert sistema.selo_vigente.motivo == "contrato_sumiu"
+    assert da_ordem.sistema.selo_vigente is vigente.SELO_NAO_LIDO  # a porta nem le o selo
+    assert {na_vitrine.sistema.selo_vigente.nivel, da_ordem_com_selo.sistema.selo_vigente.nivel} == {1}
+
+
+async def _vitrine_de_tres_sistemas(engine: AsyncEngine, ferramentas_no_grande: int = 300) -> Cena:
+    """Uma pessoa com uma ordem de tres sistemas com selo vigente: um com ``ferramentas_no_grande`` leituras e dois
+    pequenos."""
+    async with engine.begin() as c:
+        admin = await apoio.nova_pessoa(c, admin=True)
+        grande = await apoio.proprio_com_acoes(c, leituras=tuple(f"ler_{i:03d}" for i in range(ferramentas_no_grande)))
+        pequenos = [await apoio.proprio_com_acoes(c) for _ in range(2)]
+        for s in (grande, *pequenos):
+            await apoio.gravar_teste(c, s.id, nivel=3, admin_id=admin)
+        aplicativo = await apoio.novo_aplicativo(c)
+        modelo = await repositorio.criar_modelo_ordem(
+            c,
+            nome=f"modelo-grande-{uuid.uuid4().hex[:8]}",
+            descricao="Tudo",
+            ferramentas=[(s.id, r.nome_original) for s in (grande, *pequenos) for r in (*s.acoes, *s.leituras)],
+            validade_dias=30,
+            criado_por="admin-teste",
+        )
+        pessoa = await apoio.nova_pessoa(c, teste=True)
+        await _ordem(c, pessoa, aplicativo, modelo)
+        return Cena(admin, grande, aplicativo, modelo, pessoa, pessoa)
+
+
+async def test_a_vitrine_calcula_o_selo_uma_vez_por_sistema(dono: AsyncEngine) -> None:
+    """Item 5 do retoque G02r: a vitrine de 303 ferramentas de tres sistemas chama ``selo_vigente()`` tres vezes (uma
+    por sistema, ``repositorio._com_selo``), e nao uma por ferramenta, contadas pelo proprio banco
+    (``pg_stat_xact_user_functions``, com ``track_functions``), e todo sistema traz o seu selo."""
+    cena = await _vitrine_de_tres_sistemas(dono)
+
+    async def contar(c: AsyncConnection) -> tuple[list[FerramentaVitrine], int]:
+        await c.execute(text("SET LOCAL track_functions = 'all'"))
+        ferramentas = await _vitrine(c, cena, cena.real)
+        chamadas = (
+            await c.execute(
+                text("SELECT coalesce(sum(calls), 0) FROM pg_stat_xact_user_functions WHERE funcname = 'selo_vigente'")
+            )
+        ).scalar_one()
+        return ferramentas, int(chamadas)
+
+    ferramentas, chamadas = await num_rascunho(dono, contar)
+    sistemas = {f.sistema.id for f in ferramentas}
+    assert len(ferramentas) == 300 + 1 + 2 * 2
+    assert len(sistemas) == 3
+    assert chamadas == 3
+    assert {f.sistema.selo_vigente.nivel for f in ferramentas} == {3}
+    assert {f.sistema.selo_vigente.teste_id for f in ferramentas if f.sistema.id == cena.sistema.id} != {None}

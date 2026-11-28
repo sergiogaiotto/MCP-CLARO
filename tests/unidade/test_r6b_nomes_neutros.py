@@ -72,7 +72,7 @@ TERCEIRO = Sistema(
     endereco="https://x.exemplo/mcp",
     origem="terceiro",
     tipo_chave="compartilhada",
-    selo=0,
+    selo=1,
     situacao="ativo",
     versao_mcp=VERSAO_MCP,
 )

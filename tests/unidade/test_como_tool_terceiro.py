@@ -25,7 +25,15 @@ from mcp_claro.cadastro.esquema import com_descricoes, limpar_textos
 from mcp_claro.cadastro.modelos import FIM_DA_DESCRICAO_TERCEIRO, FerramentaVitrine, Sistema
 from mcp_claro.despachante import medida
 from mcp_claro.regras import estranhos
-from mcp_claro.selo.vigente import FASE_DESLIGADA, NIVEL_1_SEM_TESTE, SeloVigente, efetivo
+from mcp_claro.selo.vigente import (
+    FASE_DESLIGADA,
+    NIVEL_1_SEM_TESTE,
+    SELO_NAO_LIDO,
+    SeloNaoLido,
+    SeloVigente,
+    efetivo,
+    foi_lido,
+)
 from mcp_claro.versao import VERSAO_MCP
 
 pytestmark = pytest.mark.anyio
@@ -207,8 +215,10 @@ COM_NIVEL_3 = replace(PROPRIO, selo_vigente=NIVEL_3)
 
 
 def test_sistema_montado_a_mao_fica_no_nivel_1_sem_teste() -> None:
-    assert PROPRIO.selo_vigente is NIVEL_1_SEM_TESTE
-    assert (PROPRIO.selo_vigente.nivel, PROPRIO.selo_vigente.motivo) == (1, "nunca_testado")
+    # Retoque G02r: o padrao e o selo nao lido, com o nivel 1, e nao o "nunca testado" lido do banco.
+    assert PROPRIO.selo_vigente is SELO_NAO_LIDO
+    assert PROPRIO.selo_vigente.nivel == 1
+    assert not foi_lido(PROPRIO.selo_vigente)
 
 
 @pytest.mark.parametrize("pessoa_teste", [True, False])
@@ -234,7 +244,11 @@ def test_efetivo_ate_o_vigente_passa(nivel: int) -> None:
 
 @pytest.mark.parametrize("nivel", [2, 3])
 def test_efetivo_acima_do_vigente_e_recusado(nivel: int) -> None:
+    nunca_testado = replace(PROPRIO, selo_vigente=NIVEL_1_SEM_TESTE)
     with pytest.raises(ValueError, match="nunca passa do selo vigente"):
+        _ferramenta(nunca_testado).como_tool(selo_efetivo=nivel)
+    # Sem o selo lido, nenhum efetivo vai ao _meta (retoque G02r).
+    with pytest.raises(SeloNaoLido):
         _ferramenta(PROPRIO).como_tool(selo_efetivo=nivel)
 
 

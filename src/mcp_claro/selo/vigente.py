@@ -6,6 +6,10 @@ aprovado (D8). Este modulo le esse resultado (``ler``, ``ler_todos``), calcula o
 (``efetivo``), monta o retrato que a ficha e o extrato guardam (``SeloVigente.retrato``) e diz o motivo em texto
 legivel para as telas do ADMIN (``motivo_legivel``, ``selo_agora_legivel``, ``motivo_no_banco``).
 
+Quem nao leu o selo (``repositorio.sistema_por_id`` e ``repositorio.ferramenta_da_ordem`` sem ``com_selo``, ou um
+``Sistema`` montado a mao) fica com ``SELO_NAO_LIDO``: nivel 1, mas o retrato, o efetivo e os textos dele levantam
+``SeloNaoLido``, para que um "Nunca testado" nunca seja gravado nem mostrado de um sistema que pode ter teste.
+
 ``FEATURE_PHASE4_BADGES`` (D24) controla os efeitos para pessoas reais. Desligada: pessoa real fica no nivel 1, com o
 motivo ``fase_desligada``, e pessoa de teste (``pessoas.teste``) fica com o vigente. Ligada (so pelo construtor de
 ``Parametros``, nos testes: a partida a recusa): o vigente para todos. O efetivo nunca sobe acima do vigente.
@@ -134,9 +138,41 @@ def _data_do_retrato(valor: Any) -> datetime | None:
 
 
 NIVEL_1_SEM_TESTE: Final = SeloVigente(1, None, None, None, None, "nunca_testado")
-"""O padrao de ``Sistema.selo_vigente`` para quem monta o ``Sistema`` a mao (os testes) e para
-``repositorio.sistema_por_id`` sem ``com_selo``: nivel 1, que nao promete nada. A vitrine e a porta leem o selo do
-banco (``cadastro.repositorio``)."""
+"""O selo lido de um sistema que nunca foi testado (``selo_vigente`` sem teste): nivel 1, sem teste nem datas."""
+
+
+class SeloNaoLido(ValueError):
+    """O selo do sistema nao foi lido (``SELO_NAO_LIDO``) e alguem quis mostra-lo, grava-lo ou calcular o efetivo."""
+
+
+class _NaoLido(SeloVigente):
+    """O selo que nao foi lido do banco (``SELO_NAO_LIDO``). Tem a forma de nivel 1 sem teste, para quem so compara o
+    nivel, mas nao e "nunca testado": o retrato, o efetivo e os textos legiveis levantam ``SeloNaoLido``, para que um
+    "Nunca testado" nunca chegue a ficha, ao extrato nem a tela de um sistema que pode ter teste."""
+
+    __slots__ = ()
+
+    def retrato(self) -> dict[str, Any]:
+        raise SeloNaoLido(_NAO_LIDO)
+
+
+_NAO_LIDO: Final = (
+    "o selo deste sistema nao foi lido (sistema_por_id ou ferramenta_da_ordem sem com_selo): leia o selo do banco"
+    " (com_selo=True, a vitrine ou vigente.ler) antes de mostrar, gravar ou calcular o efetivo"
+)
+
+SELO_NAO_LIDO: Final[SeloVigente] = _NaoLido(1, None, None, None, None, "nunca_testado")
+"""O padrao de ``Sistema.selo_vigente`` para quem monta o ``Sistema`` a mao (os testes) e para os caminhos que nao
+leem o selo (``repositorio.sistema_por_id`` e ``repositorio.ferramenta_da_ordem`` sem ``com_selo``: a sondagem, a
+releitura das declaracoes, a revisao do servidor, a leitura, a porta de saida e a releitura do terceiro). O nivel e 1,
+que nao promete nada; o retrato (``retrato``), o efetivo (``efetivo``) e os textos (``motivo_legivel``,
+``selo_agora_legivel``) levantam ``SeloNaoLido``: o retrato de "nunca testado" so sai de um selo lido."""
+
+
+def foi_lido(selo: contrato.SeloLido) -> bool:
+    """O selo veio do banco (``selo_vigente``), e nao e o padrao ``SELO_NAO_LIDO``."""
+    return not isinstance(selo, _NaoLido)
+
 
 FASE_DESLIGADA: Final = SeloVigente(1, None, None, None, None, contrato.MOTIVO_FASE_DESLIGADA)
 """O efetivo de uma pessoa real com ``FEATURE_PHASE4_BADGES`` desligada: nivel 1, sem teste nem datas, para que nada
@@ -146,7 +182,10 @@ FASE_DESLIGADA: Final = SeloVigente(1, None, None, None, None, contrato.MOTIVO_F
 def efetivo(vigente: contrato.SeloLido, *, ligada: bool, pessoa_teste: bool) -> SeloVigente:
     """O selo efetivo de uma operacao (``contrato.CalculaEfetivo``): o vigente quando ``FEATURE_PHASE4_BADGES``
     esta ligada (``ligada``) ou a pessoa e de teste (``pessoa_teste``); ``FASE_DESLIGADA`` nos outros casos. So
-    ``True`` liga: qualquer outro valor conta como desligado (o lado que esconde). Nunca sobe o nivel."""
+    ``True`` liga: qualquer outro valor conta como desligado (o lado que esconde). Nunca sobe o nivel. Levanta
+    ``SeloNaoLido`` com o ``SELO_NAO_LIDO``, mesmo com a chave desligada: o efetivo so sai de um selo lido."""
+    if not foi_lido(vigente):
+        raise SeloNaoLido(_NAO_LIDO)
     if ligada is True or pessoa_teste is True:
         if isinstance(vigente, SeloVigente):
             return vigente
@@ -237,7 +276,9 @@ def _data(momento: datetime | None, fuso: str) -> str:
 
 def motivo_legivel(selo: contrato.SeloLido, detalhes: Detalhes | None = None, *, fuso: str = FUSO_PADRAO) -> str:
     """O motivo do selo em texto para o ADMIN, com as datas no ``fuso`` (dia, mes e ano). Levanta ``ValueError`` para
-    um motivo fora do vocabulario."""
+    um motivo fora do vocabulario, e ``SeloNaoLido`` (um ``ValueError``) para o ``SELO_NAO_LIDO``."""
+    if not foi_lido(selo):
+        raise SeloNaoLido(_NAO_LIDO)
     modelo = MOTIVOS_LEGIVEIS.get(selo.motivo)
     if modelo is None:
         raise ValueError(f"motivo do selo fora do vocabulario: {selo.motivo!r}")

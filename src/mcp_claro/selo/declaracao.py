@@ -10,8 +10,8 @@ Tres conferencias, nesta ordem:
 1. ``ler_texto`` (o JSON colado) ou ``validar`` (um objeto ja lido): ate ``contrato.TETO_DECLARACAO_BYTES``, JSON
    sem chave repetida nem NaN, sem o caractere nulo (que o jsonb do banco nao guarda), ate ``FUNDO_MAXIMO`` niveis, e a
    forma do modelo ``Declaracao`` (nada a mais, em nivel nenhum). O alvo de teste tem o nome escrito de um jeito so:
-   ASCII, e um IP so por inteiro (``10.0.0.5``, nunca ``10.5`` nem ``0x0a000005``), para que o texto guardado seja o
-   nome que o cliente conecta;
+   ASCII, e um IP so por inteiro (``10.0.0.5``, nunca ``10.5`` nem ``0x0a000005``; um IPv6 sem um IPv4 dentro, nunca
+   ``[::ffff:10.0.0.5]``), para que o texto guardado seja o nome que o cliente conecta;
 2. ``conferir``, contra o cadastro de agora (``cadastro_do_sistema``): terceiro recusado ate o G7; https fora de
    desenvolvimento e teste; o alvo de teste nunca e o endereco de producao de NENHUM sistema do cadastro, de qualquer
    situacao, nem na forma normalizada (``contrato.mesmo_endereco``) nem na forma de conexao (``forma_de_conexao``: o
@@ -200,6 +200,23 @@ def _ip_comum(nome: str) -> bool:
     return str(ip) == nome and not (isinstance(ip, ipaddress.IPv6Address) and ip.scope_id is not None)
 
 
+def _ipv6_com_ipv4_dentro(nome: str) -> bool:
+    """O IPv6 leva um IPv4 dentro e fica de fora do alvo, aqui e no banco (``selo_alvo_bem_escrito``):
+
+    - o mapeado ``::ffff:a.b.c.d``: o cliente, num socket IPv6 comum, conecta no proprio IPv4, entao
+      ``[::ffff:10.0.0.5]`` e a producao ``10.0.0.5`` escrita de outro jeito (e ``[::ffff:127.0.0.1]``, a maquina
+      local). A tela pega a producao assim escrita pela forma de conexao, mas o banco compara o texto: sem esta regra,
+      o INSERT direto passava;
+    - o da forma antiga ``::a.b.c.d`` (os 96 primeiros bits zerados e o IPv4 nos 32 do fim, fora ``::`` e ``::N``),
+      que o Python escreve em hexadecimal (``::a00:5``) e o banco com pontos (``::10.0.0.5``): sem forma comum aos
+      dois, fica de fora nos dois."""
+    try:
+        ip = ipaddress.IPv6Address(nome)
+    except ValueError:
+        return False
+    return ip.ipv4_mapped is not None or (ip.packed[:12] == bytes(12) and ip.packed[12:14] != bytes(2))
+
+
 def _nome_do_alvo(nome: str, ipv6: bool) -> None:
     """O nome do alvo escrito de um jeito so (critica A4): o texto guardado e o nome que o cliente conecta.
 
@@ -207,9 +224,14 @@ def _nome_do_alvo(nome: str, ipv6: bool) -> None:
     pontos de outros alfabetos (U+3002, U+FF0E, U+FF61) por pontos comuns e conecta em outro nome que o do texto; um
     IPv4 escrito de outro jeito (``127.1``, ``2130706433``) conecta no IP por inteiro. Os dois passariam por diferentes
     da producao na comparacao de texto do banco. Com so ``_NOME_ASCII`` (ou um IPv6 na forma comum), o nome que o
-    ``httpx2`` conecta e o proprio texto (``forma_de_conexao`` le pelo ``httpx2``, e o teste confere os dois)."""
+    ``httpx2`` conecta e o proprio texto (``forma_de_conexao`` le pelo ``httpx2``, e o teste confere os dois).
+
+    E a mesma regra de ``selo_alvo_bem_escrito`` no banco (a segunda barreira, no INSERT da declaracao, no pedido, em
+    ``rodando`` e no teste; o teste confere as duas numa lista de formas), com o nome so em ASCII conferido antes por
+    ``_endereco``: o IPv6 que leva um IPv4 dentro (``::ffff:a.b.c.d`` e ``::a.b.c.d``) fica de fora
+    (``_ipv6_com_ipv4_dentro``)."""
     if ipv6:
-        if not _ip_comum(nome):
+        if not _ip_comum(nome) or _ipv6_com_ipv4_dentro(nome):
             raise _erro("alvo_nome", _ALVO_NOME)
     elif not _NOME_ASCII.fullmatch(nome) or (_IPV4_ESCRITO.fullmatch(nome) and not _ip_comum(nome)):
         raise _erro("alvo_nome", _ALVO_NOME)
@@ -233,6 +255,9 @@ def _endereco(valor: str) -> str:
         raise _erro("alvo_invalido", mensagem) from None
     if not partes.hostname or "@" in partes.netloc or partes.query or partes.fragment or "?" in valor or "#" in valor:
         raise _erro("alvo_invalido", mensagem)
+    if not partes.netloc.isascii():
+        # Antes das minusculas de urlsplit: o sinal de kelvin (U+212A) vira "k", e o nome passaria por ASCII.
+        raise _erro("alvo_nome", _ALVO_NOME)
     _nome_do_alvo(partes.hostname, "[" in partes.netloc)
     return valor
 
@@ -612,7 +637,11 @@ def forma_de_conexao(endereco: str) -> tuple[str, int, str] | None:
     nomes ``.localhost``, todo IP de loopback e o IP nao especificado (``0.0.0.0``, ``::``) chegam a mesma maquina:
     viram um nome so. A porta e a efetiva (80 no http e 443 no https sem porta) e o caminho e o de
     ``contrato.endereco_normalizado``. O esquema nao entra: o mesmo nome na mesma porta e o mesmo servico. Como
-    ``endereco_normalizado``, e de proposito mais largo que a igualdade de URL."""
+    ``endereco_normalizado``, e de proposito mais largo que a igualdade de URL.
+
+    O banco tem a mesma regra (``selo_endereco_conexao``, em ``selo_alvo_na_producao``; o teste confere que os dois
+    juntam os mesmos enderecos), menos o nome fora de ASCII: o ``httpx2`` o escreve na forma ``xn--`` (IDNA), que o
+    banco nao calcula. Esse caso fica so com a tela (``alvo_na_producao``)."""
     try:
         url = httpx2.URL(endereco)
         nome = url.raw_host.decode("ascii").lower().rstrip(".")
